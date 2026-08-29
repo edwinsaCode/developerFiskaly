@@ -1,0 +1,28 @@
+# Air — Go hot-reload config
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/server ./cmd/api"
+  bin = "./tmp/server"
+  full_bin = "./tmp/server"
+  include_ext = ["go"]
+  exclude_dir  = ["vendor", "migrations"]
+  delay = 1000
+  kill_delay = "0s"
+  rerun = false
+  log = "build-errors.log"
+  send_interrupt = false
+  stop_on_error  = false
+
+[log]
+  time = false
+
+[color]
+  main    = "magenta"
+  watcher = "cyan"
+  build   = "yellow"
+  runner  = "green"
+
+[misc]
+  clean_on_exit = false

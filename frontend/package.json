@@ -1,0 +1,33 @@
+{
+  "name": "esaproperti-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1",
+    "dev:local": "next dev -H 127.0.0.1",
+    "dev:container": "next dev -H 0.0.0.0",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test": "node --experimental-strip-types --test components/**/*.test.ts",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "jwt-decode": "^4.0.0",
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "autoprefixer": "^10.5.1",
+    "eslint": "^9",
+    "eslint-config-next": "^15.0.0",
+    "postcss": "^8.5.15",
+    "prettier": "^3",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5"
+  }
+}

@@ -1,0 +1,2 @@
+ALTER TABLE units
+  ADD COLUMN land_area DECIMAL(20,4) NOT NULL DEFAULT '0.0000' AFTER saleable_area;

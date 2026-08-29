@@ -1,0 +1,43 @@
+# Env files — JANGAN pernah commit
+.env
+.env.local
+.env.*.local
+
+# Docker volumes yang di-mount lokal (jika ada)
+data/
+
+.claude/
+
+# Go
+backend/vendor/
+backend/coverage.out
+backend/coverage.html
+backend/server
+
+# Next.js
+frontend/.next/
+frontend/out/
+frontend/node_modules/
+*.tsbuildinfo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Nginx certs (generated externally)
+nginx/certs/
+
+# Air tmp
+backend/tmp/
+
+# Next.js generated files
+frontend/.next/
+frontend/.next*/
+frontend/.next-*/
+frontend/.next.*

@@ -1,0 +1,36 @@
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    - errcheck       # error yang tidak di-handle
+    - govet          # suspicious constructs
+    - staticcheck    # go static analysis
+    - unused         # kode yang tidak dipakai
+    - gofmt          # formatting
+    - goimports      # import ordering
+    - misspell       # typo
+    - bodyclose      # HTTP response body tidak di-close
+    - noctx          # HTTP request tanpa context
+    - forbidigo      # pola terlarang (lihat di bawah)
+
+linters-settings:
+  forbidigo:
+    forbid:
+      # Invariant 2: float64 tidak boleh menyentuh jalur uang.
+      # Ini tidak bisa catch semua kasus, tapi menangkap yang paling umum.
+      - pattern: "float64\\("
+        msg: "Gunakan domain.Money atau shopspring/decimal — bukan float64 untuk uang (Invariant 2)"
+      - pattern: "float32\\("
+        msg: "Gunakan domain.Money atau shopspring/decimal — bukan float32 untuk uang (Invariant 2)"
+
+issues:
+  exclude-rules:
+    # Test files boleh lebih relaxed
+    - path: "_test\\.go"
+      linters:
+        - forbidigo
+
+  max-issues-per-linter: 0
+  max-same-issues: 0

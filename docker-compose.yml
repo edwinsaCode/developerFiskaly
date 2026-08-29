@@ -1,0 +1,97 @@
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      # Loopback-only: DB tidak boleh dijangkau dari LAN/WiFi. Akses host tetap
+      # via 127.0.0.1:3307 (mis. integration test). Antar-container tetap lewat
+      # jaringan docker (tcp(mysql:3306)), tidak terpengaruh.
+      - "127.0.0.1:3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-authentication-plugin=mysql_native_password
+      --sql-mode=NO_ENGINE_SUBSTITUTION
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  backend:
+    build:
+      context: ./backend
+      target: dev
+    restart: unless-stopped
+    volumes:
+      - ./backend:/app
+      - go_cache:/root/go/pkg/mod
+    # Host memakai systemd-resolved (stub 127.0.0.53) yang TIDAK bisa dipakai
+    # dari dalam container. Tanpa ini, `go mod download` gagal saat go_cache
+    # kosong (mis. volume baru/di-prune) dan backend gagal boot. Nilainya sama
+    # dengan upstream resolved di host.
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    ports:
+      # Loopback-only: backend hanya bisa diakses dari komputer ini, bukan LAN.
+      # Yang bisa diubah HANYA sisi host. PORT di dalam container tetap 8080 —
+      # nama service + port itulah yang dipakai frontend container dan nginx
+      # production, jadi API contract tidak ikut bergeser. Override sisi host
+      # dipakai bila 8080 sudah ditempati proyek lain di komputer ini.
+      - "127.0.0.1:${BACKEND_HOST_PORT:-8080}:8080"
+    environment:
+      DB_DSN: "${MYSQL_USER}:${MYSQL_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE}?parseTime=true&loc=Local&charset=utf8mb4&collation=utf8mb4_unicode_ci"
+      PORT: "8080"
+      # Di dalam container harus bind 0.0.0.0 agar docker-proxy bisa
+      # meneruskan port. Isolasi LAN ditegakkan oleh mapping 127.0.0.1 di atas.
+      BIND_ADDR: "0.0.0.0"
+      JWT_SECRET: ${JWT_SECRET}
+      APP_ENV: development
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      target: dev
+    restart: unless-stopped
+    volumes:
+      - ./frontend:/app
+      - node_modules:/app/node_modules
+    ports:
+      # Loopback-only: frontend dev hanya dari komputer ini, bukan LAN.
+      # Sama seperti backend: hanya port host yang bisa digeser (3000 sering
+      # sudah dipakai proyek Next lain); di dalam container tetap 3000.
+      - "127.0.0.1:${FRONTEND_HOST_PORT:-3000}:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://backend:8080}
+    depends_on:
+      - backend
+
+  migrate:
+    image: migrate/migrate:v4.17.0
+    profiles: ["tools"]
+    volumes:
+      - ./backend/migrations:/migrations
+    command: >
+      -path /migrations
+      -database "mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE}"
+      up
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  go_cache:
+  node_modules:

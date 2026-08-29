@@ -1,0 +1,87 @@
+services:
+  mysql:
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-authentication-plugin=mysql_native_password
+      --innodb-buffer-pool-size=256M
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  backend:
+    build:
+      context: ./backend
+      target: prod
+    restart: always
+    environment:
+      DB_DSN: "${MYSQL_USER}:${MYSQL_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE}?parseTime=true&loc=Local&charset=utf8mb4&collation=utf8mb4_unicode_ci"
+      PORT: "8080"
+      # Wajib 0.0.0.0: nginx (container terpisah) menjangkau backend lewat
+      # jaringan docker. Backend TIDAK dipublish ke host (pakai `expose`),
+      # jadi tetap tidak terekspos ke LAN. Default kode = 127.0.0.1.
+      BIND_ADDR: "0.0.0.0"
+      JWT_SECRET: ${JWT_SECRET}
+      APP_ENV: production
+    depends_on:
+      mysql:
+        condition: service_healthy
+    expose:
+      - "8080"
+
+  frontend:
+    build:
+      context: ./frontend
+      target: prod
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    restart: always
+    expose:
+      - "3000"
+    depends_on:
+      - backend
+
+  nginx:
+    image: nginx:1.25-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx_certs:/etc/nginx/certs:ro
+    depends_on:
+      - frontend
+      - backend
+
+  migrate:
+    build:
+      context: ./backend
+      target: prod
+    profiles: ["tools"]
+    command: >
+      migrate
+      -path /app/migrations
+      -database "mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE}"
+      up
+    volumes:
+      - ./backend/migrations:/app/migrations
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  nginx_certs:
