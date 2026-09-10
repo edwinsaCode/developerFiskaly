@@ -305,9 +305,9 @@ func (e *eqEnv) seedUnit(t *testing.T, code string) uint64 {
 	// yang dihasilkan fixture ini identik dengan sebelum hardening.
 	e.db.Exec(`INSERT IGNORE INTO product_types (tenant_id, code, name, category, revenue_account_code, is_active)
 		VALUES (?,?,?,?,?,TRUE)`, eqTenant, "rumah", "rumah", "property", "4-1000")
-	if err := e.db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, list_price, status)
-		VALUES (?,?,?,?,?,?,?)`,
-		eqTenant, e.projectID, code, "rumah", domain.FromInt(100), domain.FromInt(500_000_000), "available").Error; err != nil {
+	if err := e.db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, land_area, list_price, status)
+		VALUES (?,?,?,?,?,?,?,?)`,
+		eqTenant, e.projectID, code, "rumah", domain.FromInt(100), domain.FromInt(100), domain.FromInt(500_000_000), "available").Error; err != nil {
 		t.Fatalf("seed unit %s: %v", code, err)
 	}
 	var id uint64
@@ -451,9 +451,13 @@ func TestConsistency_FinancialNumbers(t *testing.T) {
 	env.postCost(t, 300_000_000, day)
 
 	// 2. Booking unit A fee 5jt → konversi ke kontrak KPR 500jt.
+	// Refundable:false (RULE KLIEN 2026-07-29, default): fee diakui langsung
+	// sebagai Pendapatan Booking, tidak pernah menyentuh 2-2100 — skenario ini
+	// tidak pernah men-dispose/forfeit fee A, jadi jalur legacy held tidak
+	// relevan di sini (lihat assersi EQ_BookingLiability/EQ_R4_BookingFee).
 	bkA, err := env.svc.CreateBooking(ctx, eqTenant, sale.CreateBookingRequest{
 		UnitID: env.unitA, CustomerID: env.customerID, SalesPersonID: &env.salesID,
-		BookingFee: domain.FromInt(5_000_000), Refundable: true,
+		BookingFee: domain.FromInt(5_000_000), Refundable: false,
 		BankAccountCode: "1-1300", BookingDate: day, ExpiryDate: day.AddDate(0, 1, 0),
 	})
 	if err != nil {
@@ -640,7 +644,7 @@ func TestConsistency_FinancialNumbers(t *testing.T) {
 		moneyEq(t, "total_paid: statement vs summary", st.TotalPaid, sum.TotalPaid.String())
 	})
 	t.Run("EQ_Outstanding_CollectionPreview_vs_Summary", func(t *testing.T) {
-		pv, err := env.svc.PreviewCollectionPayment(ctx, eqTenant, env.contractAID, domain.FromInt(1_000_000), "1-1300")
+		pv, err := env.svc.PreviewCollectionPayment(ctx, eqTenant, env.contractAID, domain.FromInt(1_000_000), "1-1300", domain.Zero, 0, sale.PaymentSourceCollection)
 		if err != nil {
 			t.Fatalf("preview: %v", err)
 		}
@@ -660,7 +664,7 @@ func TestConsistency_FinancialNumbers(t *testing.T) {
 		moneyEq(t, "Piutang Customer 1-2000 vs outstanding kanonik", customer, sum.Outstanding.String())
 	})
 	t.Run("EQ_T3_CreditAccount_Preview_vs_Posting", func(t *testing.T) {
-		pv, err := env.svc.PreviewCollectionPayment(ctx, eqTenant, env.contractAID, domain.FromInt(1_000_000), "1-1300")
+		pv, err := env.svc.PreviewCollectionPayment(ctx, eqTenant, env.contractAID, domain.FromInt(1_000_000), "1-1300", domain.Zero, 0, sale.PaymentSourceCollection)
 		if err != nil {
 			t.Fatalf("preview: %v", err)
 		}
@@ -789,7 +793,7 @@ func TestConsistency_FinancialNumbers(t *testing.T) {
 	})
 
 	// ═════ #9/#11 REVENUE & MARGIN — dashboard vs Laba Rugi kanonik ═════
-	pl, err := env.repSvc.GetProjectPL(ctx, eqTenant, env.projectID, asOf)
+	pl, err := env.repSvc.GetProjectPL(ctx, eqTenant, env.projectID, nil, asOf)
 	if err != nil {
 		t.Fatalf("project PL: %v", err)
 	}
@@ -859,6 +863,48 @@ func TestConsistency_FinancialNumbers(t *testing.T) {
 		// Skenario tanpa biaya expense (marketing/other) → total realisasi ==
 		// kapitalisasi == dashboard actual_cost.
 		moneyEq(t, "actual cost: budget TotalRealisasi vs dashboard", rr.TotalRealisasi, dp.ActualCost)
+	})
+
+	// ═════ Rule #6 (UAT 2026-09-03) PERSEDIAAN — Neraca vs kapitalisasi dikurangi HPP relieved ═════
+	// Persediaan (akun 1-3xxx, empat sub-akun kategori biaya) harus == kapitalisasi
+	// kanonik (dp.ActualCost, S5 — TIDAK berkurang oleh relief BAST) dikurangi HPP
+	// yang sudah direlief ke L/R (ledger 5-1000). Ini membuktikan Neraca/persediaan
+	// konsisten dengan L/R dan jurnal transaksi, bukan kalkulasi kedua yang terpisah.
+	t.Run("EQ_Persediaan_Neraca_vs_CapitalizedMinusHPP", func(t *testing.T) {
+		persediaan := env.tbBalance(t, tb, func(code, _ string) bool {
+			return code == "1-3000" || code == "1-3100" || code == "1-3200" || code == "1-3300"
+		})
+		var ledgerHPPRaw string
+		env.db.Raw(`SELECT COALESCE(SUM(jl.debit - jl.credit),0)
+			FROM journal_lines jl
+			JOIN journal_entries je ON je.id = jl.journal_entry_id
+			JOIN accounts a ON a.id = jl.account_id
+			WHERE je.tenant_id = ? AND je.posted_at IS NOT NULL AND a.code = '5-1000'`, eqTenant).Scan(&ledgerHPPRaw)
+
+		actual, err := domain.NewMoney(dp.ActualCost)
+		if err != nil {
+			t.Fatalf("dp.ActualCost bukan money: %q", dp.ActualCost)
+		}
+		ledgerHPP, err := domain.NewMoney(ledgerHPPRaw)
+		if err != nil {
+			t.Fatalf("ledgerHPP bukan money: %q", ledgerHPPRaw)
+		}
+		want := actual.Sub(ledgerHPP).String()
+		moneyEq(t, "persediaan: Neraca Σ1-3xxx vs kapitalisasi(S5) − HPP relieved(5-1000)", persediaan, want)
+
+		// Skenario: kapitalisasi 300jt (postCost), BAST unit A relief 150jt →
+		// sisa 150jt tetap sebagai persediaan (unit B di proyek yg sama belum BAST).
+		moneyEq(t, "persediaan: sisa 150jt (unit B proyek sama belum BAST)", persediaan, domain.FromInt(150_000_000).String())
+
+		// Per sub-akun: skenario ini hanya memposting biaya konstruksi (1-3100) —
+		// tanah/perizinan/pembiayaan (1-3000/1-3200/1-3300) harus nol, dan seluruh
+		// saldo persediaan berasal dari 1-3100 saja.
+		for _, code := range []string{"1-3000", "1-3200", "1-3300"} {
+			zero := env.tbBalance(t, tb, func(c, _ string) bool { return c == code })
+			moneyEq(t, "persediaan sub-akun "+code+" harus nol (tanpa biaya kategori ini)", zero, "0")
+		}
+		hard := env.tbBalance(t, tb, func(c, _ string) bool { return c == "1-3100" })
+		moneyEq(t, "persediaan 1-3100 (hard/konstruksi) vs total Σ1-3xxx (satu-satunya kategori aktif)", hard, persediaan)
 	})
 
 	// ═════ #19 FORECAST CASH — dashboard vs BuildARAging ═════

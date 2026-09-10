@@ -43,6 +43,8 @@ const typeLabel: Record<string, string> = {
   TERMIN:    "Termin",
   PELUNASAN: "Pelunasan",
   KEKURANGAN: "Kekurangan",
+  REALISASI: "Biaya Realisasi",
+  KELEBIHAN_TANAH: "Kelebihan Tanah",
 };
 
 export function AllInvoiceList({ token, initialInvoices, totalUnpaid }: Props) {

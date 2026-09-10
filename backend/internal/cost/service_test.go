@@ -37,13 +37,15 @@ var standardAccounts = map[string]uint64{
 	"1-3000": 100, // Persediaan — Tanah
 	"1-3100": 101, // Persediaan — Hard Cost
 	"1-3200": 102, // Persediaan — Soft Cost
-	"1-3300": 103, // Persediaan — Biaya Pembiayaan
+	"1-3300": 103, // Persediaan — Biaya Pembiayaan (legacy, tidak dipakai lagi utk plan baru)
 	"1-1300": 200, // Bank — BCA
 	"1-1400": 201, // Bank — Mandiri
 	"1-1500": 202, // Bank — BRI
 	"2-1000": 300, // Hutang Usaha
 	"5-3000": 400, // Beban Pemasaran (tier overhead)
 	"5-4000": 401, // Beban Umum & Administrasi (tier overhead)
+	"5-4600": 402, // Beban Operasional (tier overhead, dahulu "financing"/Pendanaan)
+	"5-4700": 403, // Beban Soft Cost (tier overhead, RULE KLIEN FREEZE 2026-09-04)
 }
 
 var standardNames = map[string]string{
@@ -57,6 +59,8 @@ var standardNames = map[string]string{
 	"2-1000": "Hutang Usaha",
 	"5-3000": "Beban Pemasaran",
 	"5-4000": "Beban Umum & Administrasi",
+	"5-4600": "Beban Operasional",
+	"5-4700": "Beban Soft Cost (Desain & Legal)",
 }
 
 // capturedJournalCall records one call to CreateJournal.
@@ -200,6 +204,7 @@ func baseReq() cost.CreateCostEntryRequest {
 	return cost.CreateCostEntryRequest{
 		ProjectID:       1,
 		Category:        domain.CostCategoryHard,
+		HardSubcategory: domain.ConstructionSaranaPrasarana,
 		Amount:          domain.FromInt(500_000_000),
 		PaymentMethod:   cost.PaymentMethodBank,
 		BankAccountCode: "1-1300",
@@ -243,14 +248,15 @@ func TestCostEntry_Create_Success(t *testing.T) {
 // ── Category → account mapping (DoD: mapping kategori→sub-akun benar) ─────────
 
 func TestCostEntry_Mapping_AllCategories(t *testing.T) {
+	// RULE KLIEN FREEZE (2026-09-04): Soft Cost bukan lagi kapitalisasi ke
+	// Persediaan (1-3200) — direalisasi sebagai beban (5-4700).
 	cases := []struct {
 		category           domain.CostCategory
 		expectedDebitAccID uint64
 	}{
-		{domain.CostCategoryLand, 100},      // 1-3000
-		{domain.CostCategoryHard, 101},      // 1-3100
-		{domain.CostCategorySoft, 102},      // 1-3200
-		{domain.CostCategoryFinancing, 103}, // 1-3300
+		{domain.CostCategoryLand, 100}, // 1-3000
+		{domain.CostCategoryHard, 101}, // 1-3100
+		{domain.CostCategorySoft, 403}, // 5-4700 (Beban Soft Cost)
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -258,6 +264,9 @@ func TestCostEntry_Mapping_AllCategories(t *testing.T) {
 			svc, _, writer, _, _ := defaultTestService()
 			req := baseReq()
 			req.Category = tc.category
+			if tc.category != domain.CostCategoryHard {
+				req.HardSubcategory = ""
+			}
 
 			_, err := svc.CreateCostEntry(context.Background(), 1, req)
 			if err != nil {
@@ -649,6 +658,7 @@ func TestPreviewCostEntry_MatchesCreateJournal(t *testing.T) {
 			req: func() cost.CreateCostEntryRequest {
 				r := baseReq()
 				r.Category = domain.CostCategoryLand
+				r.HardSubcategory = ""
 				r.PaymentMethod = cost.PaymentMethodPayable
 				r.BankAccountCode = ""
 				return r
@@ -657,27 +667,33 @@ func TestPreviewCostEntry_MatchesCreateJournal(t *testing.T) {
 			wantCr: "2-1000",
 		},
 		{
+			// RULE KLIEN FREEZE (2026-09-04): Soft Cost direalisasi sebagai beban
+			// (5-4700), bukan lagi dikapitalisasi ke Persediaan (1-3200).
 			name: "soft_bank_mandiri",
 			req: func() cost.CreateCostEntryRequest {
 				r := baseReq()
 				r.Category = domain.CostCategorySoft
+				r.HardSubcategory = ""
 				r.PaymentMethod = cost.PaymentMethodBank
 				r.BankAccountCode = "1-1400"
+				r.UnitID = nil
 				return r
 			},
-			wantDr: "1-3200",
+			wantDr: "5-4700",
 			wantCr: "1-1400",
 		},
 		{
-			name: "financing_payable",
+			name: "operational_payable",
 			req: func() cost.CreateCostEntryRequest {
 				r := baseReq()
-				r.Category = domain.CostCategoryFinancing
+				r.Category = domain.CostCategoryOperational
+				r.HardSubcategory = ""
 				r.PaymentMethod = cost.PaymentMethodPayable
 				r.BankAccountCode = ""
+				r.UnitID = nil
 				return r
 			},
-			wantDr: "1-3300",
+			wantDr: "5-4600",
 			wantCr: "2-1000",
 		},
 	}

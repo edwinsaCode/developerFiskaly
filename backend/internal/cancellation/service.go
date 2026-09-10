@@ -35,6 +35,7 @@ type Service struct {
 	db           *gorm.DB
 	approvalGate ApprovalGate
 	realization  RealizationReleaser
+	buyerCredit  BuyerCreditConsumer
 }
 
 // RealizationReleaser membalik piutang biaya realisasi sebuah unit di dalam
@@ -47,6 +48,22 @@ type RealizationReleaser interface {
 	ReverseRecognitionInTx(ctx context.Context, tx *gorm.DB, tenantID, unitID uint64, createdBy *uint64) error
 }
 
+// BuyerCreditConsumer menutup habis SISA saldo kredit buyer sebuah unit di
+// dalam transaksi pembatalan (bug fix Saldo Kredit Buyer, 2026-09-04).
+// Diimplementasi sale.Service; dipasang di main.go lewat interface agar paket
+// ini tidak meng-import sale.
+//
+// Pembatalan adalah DISPOSISI TERMINAL atas seluruh posisi Uang Muka unit —
+// settlement di bawah (settleLines) memindahkannya ke penalti dan/atau hutang
+// refund, TIDAK PERNAH mengembalikannya sebagai saldo kredit yang bisa dipakai
+// lagi. Maka simetri yang benar terhadap Akad (yang menutup sisa saldo kredit
+// via netting Uang Muka) adalah: pembatalan JUGA menutup sisa saldo kredit
+// yang masih ada — bukan memulihkannya — supaya sisa itu tidak selamanya
+// terlihat "tersedia" padahal dananya sudah didisposisi via settlement.
+type BuyerCreditConsumer interface {
+	ConsumeRemainingCreditInTx(ctx context.Context, tx *gorm.DB, tenantID, unitID, saleContractID uint64, reason string, appliedBy *uint64) error
+}
+
 func NewService(db *gorm.DB) *Service { return &Service{db: db} }
 
 // SetApprovalGate memasang gate approval (wiring produksi).
@@ -54,6 +71,9 @@ func (s *Service) SetApprovalGate(g ApprovalGate) { s.approvalGate = g }
 
 // SetRealizationReleaser memasang pembalik piutang biaya realisasi (W-5).
 func (s *Service) SetRealizationReleaser(r RealizationReleaser) { s.realization = r }
+
+// SetBuyerCreditConsumer memasang penutup sisa saldo kredit buyer saat pembatalan.
+func (s *Service) SetBuyerCreditConsumer(c BuyerCreditConsumer) { s.buyerCredit = c }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -730,6 +750,12 @@ func (s *Service) Process(ctx context.Context, tenantID, id uint64, actorID *uin
 					Reason:      fmt.Sprintf("Pembatalan unit (cancellation #%d): %s", c.ID, c.Reason),
 					CancelledBy: actorID,
 					CancelDate:  c.EventDate,
+					// Refund/settlement dana buyer (termasuk yang sudah
+					// dibayar ke piutang Kelebihan Tanah) dihitung utuh di
+					// langkah 5 (settleLines) di bawah — beda dari jalur
+					// standalone land.Service.CancelLandSale yang tidak
+					// punya mekanisme refund sendiri.
+					AllowPaidSchedule: true,
 				})
 				if err != nil {
 					return fmt.Errorf("pembalikan komponen Kelebihan Tanah: %w", err)
@@ -790,6 +816,25 @@ func (s *Service) Process(ctx context.Context, tenantID, id uint64, actorID *uin
 				return fmt.Errorf("posting settlement: %w", err)
 			}
 			settleID = &entry.ID
+		}
+
+		// 5b. Buyer Credit: tutup SISA saldo kredit yang belum terpakai (bug
+		//     fix Saldo Kredit Buyer). Settlement di atas sudah mendisposisi
+		//     SELURUH posisi Uang Muka unit ini secara terminal (ke penalti
+		//     dan/atau hutang refund) — sisa saldo kredit yang masih tercatat
+		//     "tersedia" di sub-ledger tidak lagi punya dana riil di
+		//     baliknya, jadi harus ditutup di sini juga (bukan dipulihkan),
+		//     simetris dengan penutupan otomatis saat Akad.
+		if s.buyerCredit != nil {
+			var saleContractID uint64
+			if c.SaleContractID != nil {
+				saleContractID = *c.SaleContractID
+			}
+			if err := s.buyerCredit.ConsumeRemainingCreditInTx(ctx, tx, tenantID, c.UnitID, saleContractID,
+				fmt.Sprintf("Konsumsi otomatis saat pembatalan unit (cancellation #%d) — dana sudah didisposisi via settlement", c.ID),
+				actorID); err != nil {
+				return fmt.Errorf("tutup sisa saldo kredit buyer: %w", err)
+			}
 		}
 
 		// 6. Unit release + lifecycle log (pinned; Increment 6 pattern — jalur

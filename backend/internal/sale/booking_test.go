@@ -116,6 +116,18 @@ func (m *mockBookingStore) CloseBookingAtomic(_ context.Context, _ uint64, booki
 	return b, nil
 }
 
+func (m *mockBookingStore) TransferBookingAtomic(_ context.Context, _ uint64, bookingID, newUnitID uint64, in sale.TransferBookingInput) (*sale.Booking, error) {
+	b, ok := m.byID[bookingID]
+	if !ok {
+		return nil, sale.ErrBookingNotFound
+	}
+	if b.Status != sale.BookingStatusActive {
+		return nil, sale.ErrBookingNotActive
+	}
+	b.UnitID = newUnitID
+	return b, nil
+}
+
 func (m *mockBookingStore) FindBookingByID(_ context.Context, _ uint64, id uint64) (*sale.Booking, error) {
 	b, ok := m.byID[id]
 	if !ok {
@@ -230,6 +242,75 @@ func TestCreateBooking_Valid(t *testing.T) {
 	}
 }
 
+// TestCreateBooking_Refundable (Item 3, 2026-09): booking ditandai Refundable
+// saat dibuat → fee TIDAK diakui langsung sebagai pendapatan (Cr 4-2100),
+// melainkan Titipan Booking (Cr 2-2100), disposisi 'held' — mengaktifkan
+// mesin refund existing (CloseBookingAtomic → pending_refund →
+// cancellation.CreateBookingRefund/PayRefund). Booking non-refundable (default)
+// harus TETAP recognized (rule klien 2026-07-29 tidak boleh berubah).
+func TestCreateBooking_Refundable(t *testing.T) {
+	store := newMockBookingStore()
+	svc := newBookingTestService(store, "available")
+	req := validBookingReq()
+	req.Refundable = true
+	b, err := svc.CreateBooking(context.Background(), 1, req)
+	if err != nil {
+		t.Fatalf("CreateBooking: %v", err)
+	}
+	if !b.Refundable || b.FeeDisposition != sale.FeeHeld {
+		t.Errorf("refundable/disposisi salah: %v/%s (want true/held)", b.Refundable, b.FeeDisposition)
+	}
+	cr := store.created.JournalLines[1]
+	if cr.Credit.String() != "5000000" {
+		t.Errorf("Cr = %s, want 5000000 (balanced)", cr.Credit)
+	}
+	if store.created.CreditAccountCode != "2-2100" {
+		t.Errorf("CreditAccountCode = %s, want 2-2100 (Titipan Booking, bukan Pendapatan)", store.created.CreditAccountCode)
+	}
+}
+
+// TestCreateBooking_RefundableAccountMissing: akun Titipan (2-2100) hilang
+// harus gagal dengan error KHUSUS titipan, bukan tertukar dgn error revenue.
+func TestCreateBooking_RefundableAccountMissing(t *testing.T) {
+	store := newMockBookingStore()
+	svc := newBookingTestService(store, "available", "2-2100")
+	req := validBookingReq()
+	req.Refundable = true
+	_, err := svc.CreateBooking(context.Background(), 1, req)
+	if !errors.Is(err, sale.ErrTitipanAccountMissing) {
+		t.Errorf("want ErrTitipanAccountMissing, got %v", err)
+	}
+}
+
+// TestCreateBooking_FeeZero (client final note 2026-09-10): fee = 0 sah,
+// TANPA jurnal/kwitansi, disposisi SELALU 'recognized' — bahkan bila
+// Refundable=true (tidak ada apa pun untuk dipegang/direfund saat fee nihil).
+func TestCreateBooking_FeeZero(t *testing.T) {
+	for _, refundable := range []bool{false, true} {
+		store := newMockBookingStore()
+		svc := newBookingTestService(store, "available")
+		req := validBookingReq()
+		req.BookingFee = domain.FromInt(0)
+		req.Refundable = refundable
+		b, err := svc.CreateBooking(context.Background(), 1, req)
+		if err != nil {
+			t.Fatalf("refundable=%v: CreateBooking: %v", refundable, err)
+		}
+		if b.FeeDisposition != sale.FeeRecognized {
+			t.Errorf("refundable=%v: disposisi = %s, want recognized", refundable, b.FeeDisposition)
+		}
+		if store.created == nil {
+			t.Fatalf("refundable=%v: store tidak terpanggil", refundable)
+		}
+		if len(store.created.JournalLines) != 0 {
+			t.Errorf("refundable=%v: JournalLines = %+v, want kosong (tanpa jurnal fee Rp0)", refundable, store.created.JournalLines)
+		}
+		if store.created.GenerateReceipt {
+			t.Errorf("refundable=%v: GenerateReceipt = true, want false (tanpa kwitansi fee Rp0)", refundable)
+		}
+	}
+}
+
 func TestCreateBooking_Validations(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -238,7 +319,7 @@ func TestCreateBooking_Validations(t *testing.T) {
 		missing []string
 		wantErr error
 	}{
-		{"fee nol", func(r *sale.CreateBookingRequest) { r.BookingFee = domain.FromInt(0) }, "available", nil, sale.ErrBookingFeeInvalid},
+		{"fee negatif", func(r *sale.CreateBookingRequest) { r.BookingFee = domain.MustParse("-1") }, "available", nil, sale.ErrBookingFeeInvalid},
 		{"fee pecahan", func(r *sale.CreateBookingRequest) { r.BookingFee = domain.MustParse("100.5") }, "available", nil, sale.ErrBookingFeeInvalid},
 		{"expiry <= booking date", func(r *sale.CreateBookingRequest) { r.ExpiryDate = r.BookingDate }, "available", nil, sale.ErrBookingExpiryInvalid},
 		{"tanpa customer", func(r *sale.CreateBookingRequest) { r.CustomerID = 0 }, "available", nil, sale.ErrBookingCustomerRequired},
@@ -291,6 +372,61 @@ func TestMarkExpiredBookings_SweepIdempotent(t *testing.T) {
 	n, err = svc.MarkExpiredBookings(context.Background(), 1, asOf)
 	if err != nil || n != 0 {
 		t.Fatalf("sweep kedua: n=%d err=%v (want 0, nil)", n, err)
+	}
+}
+
+// ── Transfer (Item 3) ──────────────────────────────────────────────────────────
+
+func TestTransferBooking_Valid(t *testing.T) {
+	store := newMockBookingStore()
+	svc := newBookingTestService(store, "available")
+	b, err := svc.CreateBooking(context.Background(), 1, validBookingReq())
+	if err != nil {
+		t.Fatalf("seed booking: %v", err)
+	}
+	originalUnitID := b.UnitID
+	createCallsBefore := store.created // pointer snapshot: sama identitas = tak ada create baru
+	out, err := svc.TransferBooking(context.Background(), 1, b.ID, 99, "pindah blok", time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("TransferBooking: %v", err)
+	}
+	if out.UnitID != 99 {
+		t.Errorf("UnitID = %d, want 99", out.UnitID)
+	}
+	if originalUnitID == 99 {
+		t.Fatal("skenario test rusak: unit asal sudah 99")
+	}
+	// TANPA jurnal baru: mockBookingStore.TransferBookingAtomic sama sekali tidak
+	// punya jalur posting jurnal (beda dgn CreateBookingAtomic) — no double
+	// revenue by construction. CreateBookingAtomic hanya terpanggil sekali
+	// (saat seed), tak pernah lagi saat transfer — dibuktikan identitas pointer
+	// params jurnal tidak berubah.
+	if store.created != createCallsBefore {
+		t.Error("CreateBookingAtomic (posting jurnal) terpanggil lagi saat transfer — dilarang, harus TANPA jurnal")
+	}
+}
+
+func TestTransferBooking_Validations(t *testing.T) {
+	store := newMockBookingStore()
+	svc := newBookingTestService(store, "available")
+	b, err := svc.CreateBooking(context.Background(), 1, validBookingReq())
+	if err != nil {
+		t.Fatalf("seed booking: %v", err)
+	}
+
+	if _, err := svc.TransferBooking(context.Background(), 1, b.ID, b.UnitID, "", time.Time{}, nil); !errors.Is(err, sale.ErrBookingTransferSameUnit) {
+		t.Errorf("unit sama: want ErrBookingTransferSameUnit, got %v", err)
+	}
+	if _, err := svc.TransferBooking(context.Background(), 1, b.ID, 0, "", time.Time{}, nil); !errors.Is(err, sale.ErrUnitRequired) {
+		t.Errorf("new_unit_id=0: want ErrUnitRequired, got %v", err)
+	}
+	if _, err := svc.TransferBooking(context.Background(), 1, 9999, 99, "", time.Time{}, nil); !errors.Is(err, sale.ErrBookingNotFound) {
+		t.Errorf("booking tak ada: want ErrBookingNotFound, got %v", err)
+	}
+
+	svcBooked := newBookingTestService(store, "booked") // target unit TIDAK available
+	if _, err := svcBooked.TransferBooking(context.Background(), 1, b.ID, 99, "", time.Time{}, nil); !errors.Is(err, sale.ErrBookingUnitStateInvalid) {
+		t.Errorf("unit tujuan tidak available: want ErrBookingUnitStateInvalid, got %v", err)
 	}
 }
 

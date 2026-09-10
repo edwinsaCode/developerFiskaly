@@ -61,7 +61,7 @@ export function ProjectCostTable({ results, unitMap }: ProjectCostTableProps) {
             <Th right>Tanah</Th>
             <Th right>Konstruksi</Th>
             <Th right>Lunak</Th>
-            <Th right>Pendanaan</Th>
+            <Th right>Operasional</Th>
             <Th right>Total Biaya Aktual</Th>
           </TableRow>
         </TableHead>
@@ -140,7 +140,7 @@ export function UnitCostBreakdown({ result }: UnitCostBreakdownProps) {
             <Th right>Tanah</Th>
             <Th right>Konstruksi</Th>
             <Th right>Lunak</Th>
-            <Th right>Pendanaan</Th>
+            <Th right>Operasional</Th>
             <Th right>Total</Th>
           </TableRow>
         </TableHead>

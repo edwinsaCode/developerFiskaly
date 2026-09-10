@@ -173,7 +173,7 @@ const CATEGORY_LABEL: Record<string, string> = {
   land: "Tanah",
   construction: "Konstruksi",
   soft: "Soft Cost",
-  financing: "Pembiayaan",
+  operational: "Operasional",
   marketing: "Marketing",
   other: "Lainnya",
 };

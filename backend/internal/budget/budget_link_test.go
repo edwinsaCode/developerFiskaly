@@ -58,6 +58,7 @@ func setupActivePlanWithItems(t *testing.T, tenantID, projectID uint64) (planID,
 
 	i1, err := svc.AddItem(context.Background(), tenantID, budget.AddItemRequest{
 		PlanID: plan.ID, Category: budget.BudgetCategoryConstruction,
+		Subcategory:    string(domain.ConstructionSaranaPrasarana),
 		BudgetedAmount: rupiah(500_000_000), Description: "Struktur bangunan",
 	})
 	if err != nil {
@@ -92,6 +93,7 @@ func TestBudget_RealisasiPerItem_CorrectAggregate(t *testing.T) {
 	plan, _ := svc.CreatePlan(context.Background(), 1, budget.CreatePlanRequest{ProjectID: 10, Label: "RAB"})
 	item1, _ := svc.AddItem(context.Background(), 1, budget.AddItemRequest{
 		PlanID: plan.ID, Category: budget.BudgetCategoryConstruction,
+		Subcategory:    string(domain.ConstructionSaranaPrasarana),
 		BudgetedAmount: rupiah(500_000_000), Description: "Struktur",
 	})
 	item2, _ := svc.AddItem(context.Background(), 1, budget.AddItemRequest{
@@ -167,6 +169,7 @@ func TestBudget_RealisasiPerItem_UnlinkedEntries_NotCounted(t *testing.T) {
 	plan, _ := svc.CreatePlan(context.Background(), 1, budget.CreatePlanRequest{ProjectID: 10, Label: "RAB"})
 	_, _ = svc.AddItem(context.Background(), 1, budget.AddItemRequest{
 		PlanID: plan.ID, Category: budget.BudgetCategoryConstruction,
+		Subcategory:    string(domain.ConstructionSaranaPrasarana),
 		BudgetedAmount: rupiah(200_000_000),
 	})
 	_, _ = svc.ApprovePlan(context.Background(), 1, budget.ApprovePlanRequest{PlanID: plan.ID})
@@ -249,6 +252,7 @@ func TestBudget_GetRABvsRealisasi_Regression_AfterPerItemAdded(t *testing.T) {
 	plan, _ := svc.CreatePlan(context.Background(), 1, budget.CreatePlanRequest{ProjectID: 10, Label: "RAB"})
 	_, _ = svc.AddItem(context.Background(), 1, budget.AddItemRequest{
 		PlanID: plan.ID, Category: budget.BudgetCategoryConstruction,
+		Subcategory:    string(domain.ConstructionSaranaPrasarana),
 		BudgetedAmount: rupiah(500_000_000),
 	})
 	_, _ = svc.ApprovePlan(context.Background(), 1, budget.ApprovePlanRequest{PlanID: plan.ID})

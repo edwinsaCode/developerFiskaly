@@ -19,7 +19,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="id" className={inter.variable}>
+    <html lang="id" className={`${inter.variable} scroll-smooth`}>
       <body className="font-sans bg-bg text-text-primary antialiased">
         <ToastProvider>
           {children}

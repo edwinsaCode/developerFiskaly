@@ -20,7 +20,6 @@ export interface CreateContractInput {
   buyer_id: string;
   payment_type: "kpr" | "tunai";
   bank_kpr?: string;
-  loan_amount?: string;
   contract_date: string; // RFC3339
   total_price: string;   // string integer rupiah
   // Increment 3 — WAJIB di backend produksi (scheme flow aktif):
@@ -33,9 +32,9 @@ export interface CreateContractInput {
   // Increment 7 — konversi booking → kontrak (atomik).
   booking_id?: number;
   /**
-   * Produk Tambahan: Kelebihan Tanah (kelebihan-tanah-booking-integration-2026-08)
-   * untuk kontrak yang dibuat LANGSUNG tanpa booking. Diabaikan backend bila
-   * booking_id diisi — komponen tanah pada jalur konversi ikut dari Booking.
+   * Produk Tambahan: Kelebihan Tanah (kelebihan-tanah-konversi-kontrak-2026-08)
+   * — berlaku baik untuk kontrak LANGSUNG maupun konversi Booking (booking_id
+   * diisi). Booking sendiri tidak lagi membawa komponen tanah; dipilih di sini.
    */
   land_quantity_m2?: string;
 }
@@ -174,6 +173,10 @@ export interface RecordAkadInput {
   vat_rate?: string;  // e.g. "0.11"
   buyer_ref: string;
   recognition_date: string; // RFC3339
+  /** Gap 1 (UAT 2026-09-07): nominal yang benar-benar disetujui bank — source
+   *  of truth Dana Jaminan Bank KPR. Wajib diisi utk kontrak KPR (dulu diminta
+   *  di Konversi Kontrak sbg "Nilai Pengajuan KPR" — dipindah ke sini). */
+  bank_approved_amount?: string;
 }
 
 export async function recordAkad(
@@ -260,6 +263,22 @@ export interface ContractFinancialSummary {
   net_contract: string;
   total_paid: string;
   outstanding: string;
+  /** Komponen Kelebihan Tanah (opsional) — dibekukan sejak kontrak dibuat. */
+  has_land: boolean;
+  land_amount: string;
+  total_contract_value: string; // net_contract + land_amount
+  total_outstanding: string;    // total_contract_value − total_paid (proyeksi pra-Akad)
+  /** Sisa tagihan SESUNGGUHNYA rumah+tanah (payment_schedules type=land,
+   *  pasca-Akad, superseded/dibatalkan diabaikan) — sama dengan `outstanding`
+   *  sebelum Akad (belum ada baris tanah formal). Beda dari total_outstanding
+   *  di atas yang proyeksi snapshot kontrak; ini baca anchor AR formal jadi
+   *  tidak phantom bila land_sale dibatalkan pasca-Akad. Pakai ini untuk
+   *  prefill/hint nominal pembayaran pasca-Akad. */
+  total_outstanding_actual: string;
+  /** Pasangan total_outstanding_actual — total kas gabungan rumah+tanah yang
+   *  SESUNGGUHNYA sudah diterima (bukan Σ total_paid, yang mengecualikan
+   *  pembayaran yang 100% meluber ke baris tanah). */
+  total_paid_actual: string;
 }
 
 export async function fetchContractFinancialSummary(

@@ -73,18 +73,51 @@ export async function fetchDocumentPreview(token?: string): Promise<DocumentPrev
 
 export async function fetchDocuments(
   token?: string,
-  filter: { type?: string; year?: number; limit?: number } = {},
+  filter: { type?: string; year?: number; limit?: number; number?: string } = {},
 ): Promise<DocumentRow[]> {
   const q = new URLSearchParams();
   if (filter.type) q.set("type", filter.type);
   if (filter.year) q.set("year", String(filter.year));
   if (filter.limit) q.set("limit", String(filter.limit));
+  if (filter.number) q.set("number", filter.number);
   const qs = q.toString();
   const res = await apiFetch<{ documents: DocumentRow[] }>(
     `/documents${qs ? `?${qs}` : ""}`,
     { token },
   );
   return res?.documents ?? [];
+}
+
+// resolveDocumentByNumber — cari SATU dokumen persis dari nomornya (mis.
+// "BKK/2026/000002"). Dipakai DocumentNumberLink untuk membuka dokumen dari
+// teks bebas mana pun nomor itu tertulis. null kalau tidak ditemukan.
+export async function resolveDocumentByNumber(
+  token: string | undefined,
+  number: string,
+): Promise<DocumentRow | null> {
+  const rows = await fetchDocuments(token, { number, limit: 1 });
+  return rows[0] ?? null;
+}
+
+// ── Bypass cetak (DocumentNumberLink) ───────────────────────────────────────
+//
+// Klik nomor dokumen di FE harus LANGSUNG mencetak/mengunduh — bukan mengarah
+// ke layar lain. resolvePrintTarget menjawab "cetakan mana yang sudah ADA di
+// aplikasi untuk nomor ini" sebagai {kind, id}; frontend memetakannya ke
+// fetcher cetak modul terkait. "unknown" berarti belum ada cetakan untuk
+// sumber ini — bukan sinyal untuk menebak atau bernavigasi.
+export type PrintTargetKind = "receipt" | "invoice" | "ap_payment" | "expense" | "unknown";
+
+export interface PrintTarget {
+  kind: PrintTargetKind;
+  id?: number;
+}
+
+export async function resolvePrintTarget(
+  token: string | undefined,
+  number: string,
+): Promise<PrintTarget> {
+  return apiFetch<PrintTarget>(`/documents/print-target?number=${encodeURIComponent(number)}`, { token });
 }
 
 export async function fetchDocumentTypeHistory(

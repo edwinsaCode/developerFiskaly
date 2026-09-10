@@ -28,6 +28,7 @@ const KIND_OPTIONS: { value: TerminKind; label: string }[] = [
   { value: "dp", label: "DP (Uang Muka)" },
   { value: "installment", label: "Cicilan" },
   { value: "final_payment", label: "Pelunasan" },
+  { value: "land_excess", label: "Kelebihan Tanah" },
   { value: "other", label: "Lainnya" },
 ];
 

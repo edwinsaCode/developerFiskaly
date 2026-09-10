@@ -2,15 +2,16 @@
 
 package sale_test
 
-// kelebihan-tanah-booking-integration-2026-08 — integration (real MySQL):
+// kelebihan-tanah-konversi-kontrak-2026-08 — integration (real MySQL):
 // membuktikan komponen Produk Tambahan Kelebihan Tanah yang menempel pada
-// Booking/Kontrak/Akad unit benar-benar atomik dengan siklus hidup
-// finansialnya sendiri — reservasi lahir bersama Booking, lepas bersama
-// pembatalan, kelebihan kapasitas membatalkan SELURUH Booking (rollback
-// penuh, bukan cuma komponen tanahnya), dan Akad membukukan jurnal
-// pendapatan+HPP rumah DAN tanah dalam SATU transaksi (§D3), balanced.
+// Kontrak/Akad unit benar-benar atomik dengan siklus hidup finansialnya
+// sendiri. Booking TIDAK LAGI membawa komponen tanah — dipilih di Konversi
+// Kontrak (baik kontrak langsung maupun konversi dari Booking), bukan di
+// Booking. Kelebihan kapasitas membatalkan SELURUH konversi/kontrak
+// (rollback penuh, bukan cuma komponen tanahnya), dan Akad membukukan
+// jurnal pendapatan+HPP rumah DAN tanah dalam SATU transaksi (§D3), balanced.
 //
-// Prasyarat: TEST_DB_DSN di-set + DB termigrasi (≥ 000084/000085).
+// Prasyarat: TEST_DB_DSN di-set + DB termigrasi (≥ 000089/000090).
 
 import (
 	"context"
@@ -128,7 +129,7 @@ func lbWire(db *gorm.DB, landHPP land.LandHPPResolver, unitHPP sale.HPPResolver)
 	allocRepo := allocation.NewGORMRepository(db)
 	allocSvc := allocation.NewService(allocRepo, allocRepo, allocRepo)
 	repo := slWireReceipts(db, sale.NewGORMRepository(db, posting, allocSvc))
-	opts := []sale.ServiceOption{sale.WithContractStore(repo), sale.WithBookingStore(repo)}
+	opts := []sale.ServiceOption{sale.WithContractStore(repo), sale.WithBookingStore(repo), sale.WithPaymentCommitter(repo)}
 	if landHPP != nil {
 		landSvc := land.NewService(land.NewGORMRepository(db), land.WithHPPResolver(landHPP))
 		opts = append(opts, sale.WithLandAkadPreparer(landSvc))
@@ -159,7 +160,9 @@ func (lbZeroUnitHPPResolver) ResolveHPP(_ context.Context, _, _ uint64, _ *uint6
 	return sale.HPPResolution{Method: sale.HPPMethodActual}, nil
 }
 
-func lbBookingReq(unitID, customerID uint64, qty *decimal.Decimal) sale.CreateBookingRequest {
+// lbBookingReq: Booking TIDAK LAGI membawa komponen Kelebihan Tanah
+// (kelebihan-tanah-konversi-kontrak-2026-08) — dipilih di Konversi Kontrak.
+func lbBookingReq(unitID, customerID uint64) sale.CreateBookingRequest {
 	return sale.CreateBookingRequest{
 		UnitID:          unitID,
 		CustomerID:      customerID,
@@ -168,7 +171,6 @@ func lbBookingReq(unitID, customerID uint64, qty *decimal.Decimal) sale.CreateBo
 		BankAccountCode: "1-1300",
 		BookingDate:     time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 		ExpiryDate:      time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC),
-		LandQuantityM2:  qty,
 	}
 }
 
@@ -192,9 +194,11 @@ func lbJournalBalanced(t *testing.T, db *gorm.DB, journalID uint64, wantTotal st
 	}
 }
 
-// ── Booking: reservasi lahir atomik bersama Booking ─────────────────────────
+// ── Booking: TIDAK menyentuh tanah sama sekali ──────────────────────────────
+// kelebihan-tanah-konversi-kontrak-2026-08: Booking tak lagi punya field
+// land_* (migration 000089) — CreateBooking tak pernah membuat reservasi.
 
-func TestIntegration_Land_BookingReserveOnCreate(t *testing.T) {
+func TestIntegration_Land_BookingNeverTouchesLand(t *testing.T) {
 	db := itConnect(t)
 	lbCleanup(t, db)
 	defer lbCleanup(t, db)
@@ -204,19 +208,65 @@ func TestIntegration_Land_BookingReserveOnCreate(t *testing.T) {
 	pool := lbMustPool(t, db, projectID, "1000", "500000")
 	svc := lbWire(db, nil, nil)
 
-	qty := decimal.RequireFromString("100")
-	b, err := svc.CreateBooking(ctx, lbTenant, lbBookingReq(unitID, customerID, &qty))
+	if _, err := svc.CreateBooking(ctx, lbTenant, lbBookingReq(unitID, customerID)); err != nil {
+		t.Fatalf("CreateBooking: %v", err)
+	}
+
+	var resvCount int64
+	db.Raw(`SELECT COUNT(*) FROM land_stock_reservations WHERE tenant_id = ?`, lbTenant).Scan(&resvCount)
+	if resvCount != 0 {
+		t.Errorf("land_stock_reservations = %d, want 0 (Booking tak boleh menyentuh tanah)", resvCount)
+	}
+	var reserved string
+	db.Raw(`SELECT reserved_quantity_m2 FROM land_stock WHERE id = ?`, pool.ID).Scan(&reserved)
+	if reserved != "0.0000" {
+		t.Errorf("pool.reserved_quantity_m2 = %s, want 0.0000", reserved)
+	}
+}
+
+// ── Konversi Kontrak: reservasi lahir atomik saat Booking dikonversi ───────
+// kelebihan-tanah-konversi-kontrak-2026-08: komponen tanah dipilih di
+// Konversi Kontrak, bukan di Booking — ConvertWithContractAtomic mereservasi
+// dengan pola identik SaveContract (booking_repo.go).
+
+func TestIntegration_Land_ConversionReserveOnCreate(t *testing.T) {
+	db := itConnect(t)
+	lbCleanup(t, db)
+	defer lbCleanup(t, db)
+	ctx := context.Background()
+
+	projectID, unitID, customerID := lbSeed(t, db, "available")
+	pool := lbMustPool(t, db, projectID, "1000", "500000")
+	svc := lbWire(db, nil, nil)
+
+	b, err := svc.CreateBooking(ctx, lbTenant, lbBookingReq(unitID, customerID))
 	if err != nil {
 		t.Fatalf("CreateBooking: %v", err)
 	}
-	if b.LandStockID == nil || *b.LandStockID != pool.ID {
-		t.Errorf("LandStockID = %v, want %d", b.LandStockID, pool.ID)
+
+	qty := decimal.RequireFromString("100")
+	cust := customerID
+	contract, err := svc.CreateContract(ctx, lbTenant, sale.CreateContractRequest{
+		UnitID:         unitID,
+		BuyerName:      "Buyer LB Konversi",
+		PaymentType:    sale.PaymentTypeTunai,
+		ContractDate:   time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC),
+		TotalPrice:     domain.FromInt(1_000_000_000),
+		CustomerID:     &cust,
+		BookingID:      &b.ID,
+		LandQuantityM2: &qty,
+	})
+	if err != nil {
+		t.Fatalf("CreateContract (konversi): %v", err)
 	}
-	if b.LandReservationID == nil {
+	if contract.LandStockID == nil || *contract.LandStockID != pool.ID {
+		t.Errorf("LandStockID = %v, want %d", contract.LandStockID, pool.ID)
+	}
+	if contract.LandReservationID == nil {
 		t.Fatal("LandReservationID harus terisi")
 	}
-	if b.LandUnitPriceSnapshot == nil || !b.LandUnitPriceSnapshot.Equal(domain.FromInt(500_000)) {
-		t.Errorf("LandUnitPriceSnapshot = %v, want 500000 (dari pool)", b.LandUnitPriceSnapshot)
+	if contract.LandUnitPriceSnapshot == nil || !contract.LandUnitPriceSnapshot.Equal(domain.FromInt(500_000)) {
+		t.Errorf("LandUnitPriceSnapshot = %v, want 500000 (dari pool)", contract.LandUnitPriceSnapshot)
 	}
 
 	var resv struct {
@@ -224,7 +274,7 @@ func TestIntegration_Land_BookingReserveOnCreate(t *testing.T) {
 		CustomerID uint64
 		QuantityM2 string
 	}
-	db.Raw(`SELECT status, customer_id, quantity_m2 FROM land_stock_reservations WHERE id = ?`, *b.LandReservationID).Scan(&resv)
+	db.Raw(`SELECT status, customer_id, quantity_m2 FROM land_stock_reservations WHERE id = ?`, *contract.LandReservationID).Scan(&resv)
 	if resv.Status != string(land.ReservationStatusActive) || resv.CustomerID != customerID || resv.QuantityM2 != "100.0000" {
 		t.Errorf("reservasi = %+v, want active/%d/100.0000", resv, customerID)
 	}
@@ -236,43 +286,10 @@ func TestIntegration_Land_BookingReserveOnCreate(t *testing.T) {
 	}
 }
 
-// ── Booking: pembatalan melepas reservasi, atomik ───────────────────────────
+// ── Konversi Kontrak: kapasitas kurang → SELURUH konversi batal ────────────
+// Booking tetap 'active' & unit tetap 'booked' — tak ada rollback parsial.
 
-func TestIntegration_Land_BookingCancelReleasesReservation(t *testing.T) {
-	db := itConnect(t)
-	lbCleanup(t, db)
-	defer lbCleanup(t, db)
-	ctx := context.Background()
-
-	projectID, unitID, customerID := lbSeed(t, db, "available")
-	pool := lbMustPool(t, db, projectID, "1000", "500000")
-	svc := lbWire(db, nil, nil)
-
-	qty := decimal.RequireFromString("100")
-	b, err := svc.CreateBooking(ctx, lbTenant, lbBookingReq(unitID, customerID, &qty))
-	if err != nil {
-		t.Fatalf("CreateBooking: %v", err)
-	}
-
-	if _, err := svc.CancelBooking(ctx, lbTenant, b.ID, "buyer mundur", time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC), nil); err != nil {
-		t.Fatalf("CancelBooking: %v", err)
-	}
-
-	var status string
-	db.Raw(`SELECT status FROM land_stock_reservations WHERE id = ?`, *b.LandReservationID).Scan(&status)
-	if status != string(land.ReservationStatusCancelled) {
-		t.Errorf("reservasi status = %s, want cancelled", status)
-	}
-	var reserved string
-	db.Raw(`SELECT reserved_quantity_m2 FROM land_stock WHERE id = ?`, pool.ID).Scan(&reserved)
-	if reserved != "0.0000" {
-		t.Errorf("pool.reserved_quantity_m2 pasca-batal = %s, want 0.0000 (dilepas)", reserved)
-	}
-}
-
-// ── Booking: kapasitas kurang → SELURUH booking batal, bukan cuma tanahnya ──
-
-func TestIntegration_Land_BookingCapacityExceeded_FullRollback(t *testing.T) {
+func TestIntegration_Land_ConversionCapacityExceeded_FullRollback(t *testing.T) {
 	db := itConnect(t)
 	lbCleanup(t, db)
 	defer lbCleanup(t, db)
@@ -282,17 +299,35 @@ func TestIntegration_Land_BookingCapacityExceeded_FullRollback(t *testing.T) {
 	lbMustPool(t, db, projectID, "50", "500000") // hanya 50 m2 tersedia
 	svc := lbWire(db, nil, nil)
 
+	b, err := svc.CreateBooking(ctx, lbTenant, lbBookingReq(unitID, customerID))
+	if err != nil {
+		t.Fatalf("CreateBooking: %v", err)
+	}
+	// CreateBooking sah membukukan jurnal Titipan Booking sendiri — baseline
+	// diambil SETELAH booking, agar assert di bawah murni membuktikan konversi
+	// yang gagal tidak menambah apa pun (bukan bahwa booking tanpa jurnal).
+	var journalsBefore int64
+	db.Raw("SELECT COUNT(*) FROM journal_entries WHERE tenant_id = ?", lbTenant).Scan(&journalsBefore)
+
 	qty := decimal.RequireFromString("100") // minta lebih dari yang ada
-	_, err := svc.CreateBooking(ctx, lbTenant, lbBookingReq(unitID, customerID, &qty))
+	cust := customerID
+	_, err = svc.CreateContract(ctx, lbTenant, sale.CreateContractRequest{
+		UnitID:         unitID,
+		BuyerName:      "Buyer LB Konversi Gagal",
+		PaymentType:    sale.PaymentTypeTunai,
+		ContractDate:   time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC),
+		TotalPrice:     domain.FromInt(1_000_000_000),
+		CustomerID:     &cust,
+		BookingID:      &b.ID,
+		LandQuantityM2: &qty,
+	})
 	if !errors.Is(err, land.ErrCapacityExceeded) {
 		t.Fatalf("want ErrCapacityExceeded, got %v", err)
 	}
 
 	for q, label := range map[string]string{
-		"SELECT COUNT(*) FROM bookings WHERE tenant_id=?":                 "bookings",
-		"SELECT COUNT(*) FROM land_stock_reservations WHERE tenant_id=?":  "land_stock_reservations",
-		"SELECT COUNT(*) FROM journal_entries WHERE tenant_id=?":         "journal_entries",
-		"SELECT COUNT(*) FROM termin_payments WHERE tenant_id=?":        "termin_payments",
+		"SELECT COUNT(*) FROM sale_contracts WHERE tenant_id=?":          "sale_contracts",
+		"SELECT COUNT(*) FROM land_stock_reservations WHERE tenant_id=?": "land_stock_reservations",
 	} {
 		var n int64
 		db.Raw(q, lbTenant).Scan(&n)
@@ -300,10 +335,20 @@ func TestIntegration_Land_BookingCapacityExceeded_FullRollback(t *testing.T) {
 			t.Errorf("%s harus 0 (rollback penuh), got %d", label, n)
 		}
 	}
-	var status string
-	db.Raw("SELECT status FROM units WHERE id = ?", unitID).Scan(&status)
-	if status != "available" {
-		t.Errorf("unit status = %s, want available (tak tersentuh)", status)
+	var journalsAfter int64
+	db.Raw("SELECT COUNT(*) FROM journal_entries WHERE tenant_id = ?", lbTenant).Scan(&journalsAfter)
+	if journalsAfter != journalsBefore {
+		t.Errorf("journal_entries bertambah dari %d ke %d, want tetap (konversi gagal harus rollback penuh)", journalsBefore, journalsAfter)
+	}
+	var bookingStatus string
+	db.Raw("SELECT status FROM bookings WHERE id = ?", b.ID).Scan(&bookingStatus)
+	if bookingStatus != string(sale.BookingStatusActive) {
+		t.Errorf("booking status = %s, want active (konversi gagal, booking tetap aktif)", bookingStatus)
+	}
+	var unitStatus string
+	db.Raw("SELECT status FROM units WHERE id = ?", unitID).Scan(&unitStatus)
+	if unitStatus != "booked" {
+		t.Errorf("unit status = %s, want booked (tak berubah oleh konversi yang gagal)", unitStatus)
 	}
 }
 
@@ -531,4 +576,409 @@ func TestIntegration_Land_ConcurrentReserve_NoOversell(t *testing.T) {
 	if resvCount != 1 {
 		t.Errorf("jumlah reservasi = %d, want 1", resvCount)
 	}
+}
+
+// ── Bug UAT 2026-09: Penerimaan mengabaikan piutang Kelebihan Tanah ────────
+//
+// Sebelum fix (migrasi 000095 + payment_schedules land row + guard/waterfall
+// aditif): kontrak Unit + Kelebihan Tanah menghasilkan Piutang Usaha gabungan
+// yang BENAR di Neraca (unit + land, sama-sama ke 1-2000 pada kontrak Tunai),
+// tapi menu Penerimaan (outstanding/max payment) hanya menghitung piutang
+// unit — piutang tanah tidak pernah muncul sebagai piutang yang bisa
+// dialokasikan, sehingga customer TIDAK BISA melunasi seluruh piutangnya.
+//
+// Test ini membuktikan, dalam SATU alur end-to-end:
+//  1. Akad (rumah+tanah bundled) menghasilkan AR gabungan = harga unit + gross
+//     tanah (bukan cuma unit).
+//  2. Pembayaran PARSIAL (kurang dari harga rumah) dialokasikan waterfall ke
+//     rumah dulu (cicilan presedensi) — tanah tetap outstanding.
+//  3. Pembayaran PELUNASAN (sisa penuh, rumah+tanah) diterima TANPA ditolak
+//     guard overpayment (bug lama: guard cuma tahu piutang rumah) — dan
+//     KEDUA baris jadwal (rumah, tanah) menjadi lunas.
+//  4. Saldo akun Piutang Usaha (1-2000) atas unit ini kembali 0 (Neraca
+//     reconcile — jurnal Dr Kas/Bank / Cr Piutang benar).
+//  5. Overpayment (bayar lagi walau outstanding 0) tetap DITOLAK.
+//  6. Retry dengan idempotency key yang sama TIDAK membuat termin/jurnal
+//     kedua (aman di-retry).
+func TestIntegration_Land_ReceivePayment_CoversUnitAndLandAR(t *testing.T) {
+	db := itConnect(t)
+	lbCleanup(t, db)
+	defer lbCleanup(t, db)
+	ctx := context.Background()
+
+	projectID, unitID, customerID := lbSeed(t, db, "reserved")
+	// Harga jual tanah 500.000/m² x 50 m² = 25.000.000 (RpX pada skenario klien).
+	pool := lbMustPool(t, db, projectID, "1000", "500000")
+	_ = pool
+
+	hppStub := &lbStubHPPResolver{res: land.LandHPPResolution{
+		RatePerM2: domain.FromInt(200_000),
+		Method:    land.HPPMethodActual,
+	}}
+	svc := lbWire(db, hppStub, lbZeroUnitHPPResolver{})
+
+	const housePrice = 185_000_000 // Rp185jt — persis skenario klien.
+	const landQtyM2 = "50"
+	const landGross = 25_000_000 // 50 x 500.000 — RpX.
+	const combinedAR = housePrice + landGross
+
+	qty := decimal.RequireFromString(landQtyM2)
+	cust := customerID
+	contract, err := svc.CreateContract(ctx, lbTenant, sale.CreateContractRequest{
+		UnitID:         unitID,
+		BuyerName:      "Buyer LB AR",
+		PaymentType:    sale.PaymentTypeTunai,
+		ContractDate:   time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+		TotalPrice:     domain.FromInt(housePrice),
+		CustomerID:     &cust,
+		LandQuantityM2: &qty,
+	})
+	if err != nil {
+		t.Fatalf("CreateContract: %v", err)
+	}
+
+	rec, err := svc.RecordAkad(ctx, lbTenant, sale.RecordBASTRequest{
+		UnitID: unitID, SalePrice: domain.FromInt(housePrice), BuyerRef: "Buyer LB AR",
+		BASTDate: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("RecordAkad: %v", err)
+	}
+	if rec.RevenueJournalID == 0 {
+		t.Fatal("rumah: RevenueJournalID harus ada")
+	}
+
+	// ── AR gabungan tercatat sebagai DUA baris jadwal: rumah (fallback lump-sum,
+	//    lihat repository.go Execute) + tanah (ScheduleTypeLand, migrasi 000095) ──
+	type schedRow struct {
+		Type        string
+		Amount      string
+		PaidAmount  string
+		Status      string
+		Installment int `gorm:"column:installment_number"`
+	}
+	loadSchedules := func() []schedRow {
+		var rows []schedRow
+		if err := db.Table("payment_schedules").
+			Select("type, amount, paid_amount, status, installment_number").
+			Where("tenant_id = ? AND sale_contract_id = ?", lbTenant, contract.ID).
+			Order("installment_number ASC").
+			Scan(&rows).Error; err != nil {
+			t.Fatalf("baca payment_schedules: %v", err)
+		}
+		return rows
+	}
+	schedules := loadSchedules()
+	if len(schedules) != 2 {
+		t.Fatalf("jumlah baris payment_schedules pasca-Akad = %d, want 2 (rumah+tanah), got %+v", len(schedules), schedules)
+	}
+	var houseAmt, landAmt string
+	for _, r := range schedules {
+		switch r.Type {
+		case "land":
+			landAmt = r.Amount
+		default:
+			houseAmt = r.Amount
+		}
+	}
+	if houseAmt != "185000000.0000" {
+		t.Errorf("baris jadwal rumah = %s, want 185000000.0000", houseAmt)
+	}
+	if landAmt != "25000000.0000" {
+		t.Errorf("baris jadwal tanah = %s, want 25000000.0000", landAmt)
+	}
+
+	// ── 1-2000 pasca-Akad: gabungan rumah+tanah (Neraca sudah benar SEBELUM fix) ──
+	// Tidak difilter per unit_id: jurnal AR tanah (internal/land/akad.go) berdiri
+	// sendiri dari sale_contracts.unit_id (§B.3) dan tidak membawa unit_id pada
+	// journal_lines-nya — saldo Neraca akun 1-2000 selalu dihitung tenant-wide.
+	// Fixture ini hanya punya satu kontrak per tenant sehingga scoping tenant
+	// setara dengan scoping per-kontrak untuk keperluan assert reconcile.
+	unit2000Balance := func() string {
+		var v string
+		if err := db.Raw(`SELECT COALESCE(SUM(jl.debit - jl.credit), 0) FROM journal_lines jl
+			JOIN accounts a ON a.id = jl.account_id
+			JOIN journal_entries je ON je.id = jl.journal_entry_id
+			WHERE jl.tenant_id = ? AND a.code = ? AND je.posted_at IS NOT NULL`,
+			lbTenant, "1-2000").Scan(&v).Error; err != nil {
+			t.Fatalf("query saldo 1-2000: %v", err)
+		}
+		m, _ := domain.NewMoney(v)
+		return m.String()
+	}
+	if got := unit2000Balance(); got != "210000000" {
+		t.Fatalf("saldo 1-2000 pasca-Akad = %s, want 210000000 (185jt rumah + 25jt tanah)", got)
+	}
+
+	// ── 2. Pembayaran PARSIAL — kurang dari harga rumah, tanah harus TETAP outstanding ──
+	cid := contract.ID
+	partial, err := svc.ReceivePayment(ctx, lbTenant, sale.ReceivePaymentRequest{
+		Source: sale.PaymentSourceCollection, ContractID: &cid,
+		Amount: domain.FromInt(100_000_000), Date: time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC),
+		BankAccountCode: "1-1300", IdempotencyKey: "lb-ar-partial-1",
+	})
+	if err != nil {
+		t.Fatalf("ReceivePayment (parsial): %v", err)
+	}
+	if partial.RemainingBalance != "110000000" {
+		t.Errorf("RemainingBalance pasca-parsial = %s, want 110000000 (85jt rumah + 25jt tanah)", partial.RemainingBalance)
+	}
+	schedules = loadSchedules()
+	for _, r := range schedules {
+		if r.Type == "land" && r.PaidAmount != "0.0000" {
+			t.Errorf("BUG: baris tanah ikut terbayar oleh pembayaran parsial (waterfall rumah harus presedensi): paid_amount=%s", r.PaidAmount)
+		}
+		if r.Type != "land" && r.PaidAmount != "100000000.0000" {
+			t.Errorf("baris rumah paid_amount = %s, want 100000000.0000", r.PaidAmount)
+		}
+	}
+
+	// ── 3. Pelunasan PENUH — sisa 110jt (85jt rumah + 25jt tanah) — TIDAK BOLEH
+	//    ditolak guard overpayment (bug lama: guard hanya tahu piutang rumah,
+	//    85jt < 110jt akan salah menolak sebelum fix) ──
+	full, err := svc.ReceivePayment(ctx, lbTenant, sale.ReceivePaymentRequest{
+		Source: sale.PaymentSourceCollection, ContractID: &cid,
+		Amount: domain.FromInt(110_000_000), Date: time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC),
+		BankAccountCode: "1-1300", IdempotencyKey: "lb-ar-full-1",
+	})
+	if err != nil {
+		t.Fatalf("ReceivePayment (pelunasan penuh, seharusnya TIDAK ditolak): %v", err)
+	}
+	if full.RemainingBalance != "0" {
+		t.Errorf("RemainingBalance pasca-lunas = %s, want 0", full.RemainingBalance)
+	}
+
+	// ── 4. KEDUA baris jadwal lunas ──────────────────────────────────────────
+	schedules = loadSchedules()
+	for _, r := range schedules {
+		wantPaid := "185000000.0000"
+		if r.Type == "land" {
+			wantPaid = "25000000.0000"
+		}
+		if r.PaidAmount != wantPaid {
+			t.Errorf("baris %s paid_amount = %s, want %s", r.Type, r.PaidAmount, wantPaid)
+		}
+		if r.Status != "received" {
+			t.Errorf("baris %s status = %s, want received", r.Type, r.Status)
+		}
+	}
+
+	// ── Neraca reconcile: 1-2000 kembali 0 ───────────────────────────────────
+	if got := unit2000Balance(); got != "0" {
+		t.Errorf("saldo 1-2000 pasca-lunas = %s, want 0 (Neraca harus reconcile)", got)
+	}
+
+	// ── 5. Overpayment tetap ditolak (outstanding sudah 0) ───────────────────
+	_, err = svc.ReceivePayment(ctx, lbTenant, sale.ReceivePaymentRequest{
+		Source: sale.PaymentSourceCollection, ContractID: &cid,
+		Amount: domain.FromInt(1), Date: time.Date(2026, 9, 11, 0, 0, 0, 0, time.UTC),
+		BankAccountCode: "1-1300", IdempotencyKey: "lb-ar-overpay-1",
+	})
+	if !errors.Is(err, sale.ErrPaymentExceedsReceivable) {
+		t.Errorf("overpayment error = %v, want ErrPaymentExceedsReceivable", err)
+	}
+
+	// ── 6. Retry idempoten atas pembayaran pelunasan — TIDAK membuat termin/
+	//    jurnal kedua, hasil identik ──────────────────────────────────────────
+	retry, err := svc.ReceivePayment(ctx, lbTenant, sale.ReceivePaymentRequest{
+		Source: sale.PaymentSourceCollection, ContractID: &cid,
+		Amount: domain.FromInt(110_000_000), Date: time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC),
+		BankAccountCode: "1-1300", IdempotencyKey: "lb-ar-full-1",
+	})
+	if err != nil {
+		t.Fatalf("ReceivePayment (retry idempotency): %v", err)
+	}
+	if retry.TerminID != full.TerminID {
+		t.Errorf("retry idempotency menghasilkan termin BARU: got %d, want %d (sama dgn payment asli)", retry.TerminID, full.TerminID)
+	}
+	if got := unit2000Balance(); got != "0" {
+		t.Errorf("saldo 1-2000 pasca-retry = %s, want tetap 0 (retry tak boleh posting jurnal kedua)", got)
+	}
+	var terminCount int64
+	db.Raw(`SELECT COUNT(*) FROM termin_payments WHERE tenant_id = ? AND unit_id = ?`, lbTenant, unitID).Scan(&terminCount)
+	if terminCount != 2 {
+		t.Errorf("jumlah termin_payments = %d, want 2 (parsial + lunas — retry TIDAK menambah baris)", terminCount)
+	}
+
+	_ = combinedAR // dipakai sebagai dokumentasi angka skenario (185jt+25jt=210jt)
+}
+
+// TestIntegration_Land_CancelPaidBundledLandSale_RejectsStandaloneCancel
+// membuktikan guard baru (land.ErrLandSaleHasReceivedPayment): land_sale
+// BUNDLED yang piutangnya (payment_schedules.land_sale_id) sudah menerima
+// pembayaran TIDAK BOLEH dibatalkan lewat land.Service.CancelLandSale
+// (endpoint langsung) — jalur itu tidak punya mekanisme refund/settlement,
+// jadi kalau dibiarkan lanjut, uang yang sudah diterima buyer jadi kas tak
+// bertuan. Pembatalan yang benar untuk skenario ini adalah lewat
+// internal/cancellation (pembatalan unit), yang menghitung refund utuh —
+// dibuktikan terpisah oleh
+// cancellation_test.TestIntegration_Cancellation_PostAkad_WithLandComponent.
+func TestIntegration_Land_CancelPaidBundledLandSale_RejectsStandaloneCancel(t *testing.T) {
+	db := itConnect(t)
+	lbCleanup(t, db)
+	defer lbCleanup(t, db)
+	ctx := context.Background()
+
+	projectID, unitID, customerID := lbSeed(t, db, "reserved")
+	lbMustPool(t, db, projectID, "1000", "500000")
+
+	hppStub := &lbStubHPPResolver{res: land.LandHPPResolution{
+		RatePerM2: domain.FromInt(200_000),
+		Method:    land.HPPMethodActual,
+	}}
+	svc := lbWire(db, hppStub, lbZeroUnitHPPResolver{})
+
+	const housePrice = 185_000_000
+	qty := decimal.RequireFromString("50")
+	cust := customerID
+	contract, err := svc.CreateContract(ctx, lbTenant, sale.CreateContractRequest{
+		UnitID:         unitID,
+		BuyerName:      "Buyer LB Cancel",
+		PaymentType:    sale.PaymentTypeTunai,
+		ContractDate:   time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+		TotalPrice:     domain.FromInt(housePrice),
+		CustomerID:     &cust,
+		LandQuantityM2: &qty,
+	})
+	if err != nil {
+		t.Fatalf("CreateContract: %v", err)
+	}
+	if _, err := svc.RecordAkad(ctx, lbTenant, sale.RecordBASTRequest{
+		UnitID: unitID, SalePrice: domain.FromInt(housePrice), BuyerRef: "Buyer LB Cancel",
+		BASTDate: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("RecordAkad: %v", err)
+	}
+
+	var landSaleID uint64
+	if err := db.Raw(`SELECT id FROM land_sales WHERE tenant_id = ? AND reservation_id = ?`,
+		lbTenant, *contract.LandReservationID).Scan(&landSaleID).Error; err != nil || landSaleID == 0 {
+		t.Fatalf("baca land_sales.id: %v (id=%d)", err, landSaleID)
+	}
+
+	// Lunasi SELURUH AR gabungan (rumah 185jt + tanah 25jt = 210jt) — baris
+	// jadwal tanah ikut jadi 'received' dengan paid_amount > 0.
+	cid := contract.ID
+	if _, err := svc.ReceivePayment(ctx, lbTenant, sale.ReceivePaymentRequest{
+		Source: sale.PaymentSourceCollection, ContractID: &cid,
+		Amount: domain.FromInt(210_000_000), Date: time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC),
+		BankAccountCode: "1-1300", IdempotencyKey: "lb-cancel-guard-full",
+	}); err != nil {
+		t.Fatalf("ReceivePayment (pelunasan penuh): %v", err)
+	}
+
+	landSvc := land.NewService(land.NewGORMRepository(db), land.WithHPPResolver(hppStub))
+	_, err = landSvc.CancelLandSale(ctx, lbTenant, landSaleID, land.CancelLandSaleRequest{
+		Reason: "percobaan batalkan langsung — harus ditolak", CancelDate: time.Now(),
+	})
+	if !errors.Is(err, land.ErrLandSaleHasReceivedPayment) {
+		t.Fatalf("CancelLandSale (standalone, land_sale sudah dibayar) error = %v, want ErrLandSaleHasReceivedPayment", err)
+	}
+
+	// land_sale HARUS tetap akad (tidak ada perubahan) — guard menolak SEBELUM
+	// jurnal apa pun dibalik.
+	var statusAfter string
+	if err := db.Raw(`SELECT status FROM land_sales WHERE id = ?`, landSaleID).Scan(&statusAfter).Error; err != nil {
+		t.Fatalf("baca status land_sales: %v", err)
+	}
+	if statusAfter != "akad" {
+		t.Errorf("land_sales.status pasca-percobaan-tolak = %s, want tetap akad", statusAfter)
+	}
+}
+
+// TestIntegration_Land_CrossoverPayment_NoDoubleCounting membuktikan
+// perbaikan bug ContractFinancialSummary.TotalOutstandingActual dan
+// CustomerStatement.RemainingBalance/Exposure: formula naif yang menjumlah
+// dua sisa yang MASING-MASING sudah dikurangi dari kolam pembayaran
+// gabungan (rumah+tanah) akan menghitung ganda begitu waterfall meluber
+// dari cicilan rumah ke baris tanah. Skenario: rumah 185jt + tanah 25jt =
+// 210jt AR; bayar 200jt sekali jalan → rumah LUNAS (185jt) dan tanah
+// terbayar sebagian (15jt dari 25jt) → sisa yang benar = 10jt (bukan
+// negatif/salah seperti formula lama).
+func TestIntegration_Land_CrossoverPayment_NoDoubleCounting(t *testing.T) {
+	db := itConnect(t)
+	lbCleanup(t, db)
+	defer lbCleanup(t, db)
+	ctx := context.Background()
+
+	projectID, unitID, customerID := lbSeed(t, db, "reserved")
+	lbMustPool(t, db, projectID, "1000", "500000")
+
+	hppStub := &lbStubHPPResolver{res: land.LandHPPResolution{
+		RatePerM2: domain.FromInt(200_000),
+		Method:    land.HPPMethodActual,
+	}}
+	svc := lbWire(db, hppStub, lbZeroUnitHPPResolver{})
+
+	const housePrice = 185_000_000 // Rp185jt
+	const landGross = 25_000_000   // 50 x 500.000
+	const crossoverPayment = 200_000_000
+	const wantRemaining = "10000000" // (185+25) - 200
+
+	qty := decimal.RequireFromString("50")
+	cust := customerID
+	contract, err := svc.CreateContract(ctx, lbTenant, sale.CreateContractRequest{
+		UnitID:         unitID,
+		BuyerName:      "Buyer LB Crossover",
+		PaymentType:    sale.PaymentTypeTunai,
+		ContractDate:   time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+		TotalPrice:     domain.FromInt(housePrice),
+		CustomerID:     &cust,
+		LandQuantityM2: &qty,
+	})
+	if err != nil {
+		t.Fatalf("CreateContract: %v", err)
+	}
+	if _, err := svc.RecordAkad(ctx, lbTenant, sale.RecordBASTRequest{
+		UnitID: unitID, SalePrice: domain.FromInt(housePrice), BuyerRef: "Buyer LB Crossover",
+		BASTDate: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("RecordAkad: %v", err)
+	}
+
+	cid := contract.ID
+	if _, err := svc.ReceivePayment(ctx, lbTenant, sale.ReceivePaymentRequest{
+		Source: sale.PaymentSourceCollection, ContractID: &cid,
+		Amount: domain.FromInt(crossoverPayment), Date: time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC),
+		BankAccountCode: "1-1300", IdempotencyKey: "lb-crossover-1",
+	}); err != nil {
+		t.Fatalf("ReceivePayment (crossover 200jt): %v", err)
+	}
+
+	// ── ContractFinancialSummary.TotalOutstandingActual — HARUS 10jt, bukan
+	//    negatif (bug lama: Outstanding(rumah, sudah minus kolam gabungan)
+	//    + landOutstanding(tanah, minus kolam gabungan lagi) = double-count) ──
+	summary, err := svc.ContractFinancialSummaryByID(ctx, lbTenant, cid)
+	if err != nil {
+		t.Fatalf("ContractFinancialSummaryByID: %v", err)
+	}
+	if got := summary.TotalOutstandingActual.String(); got != wantRemaining {
+		t.Errorf("TotalOutstandingActual = %s, want %s (rumah lunas 185jt + tanah tersisa 15jt dari 25jt = 10jt)", got, wantRemaining)
+	}
+	if summary.TotalOutstandingActual.IsNeg() {
+		t.Fatalf("TotalOutstandingActual NEGATIF (%s) — bug double-counting waterfall rumah→tanah belum diperbaiki", summary.TotalOutstandingActual.String())
+	}
+
+	// ── CustomerStatement.RemainingBalance — SATU rumus dengan Summary di atas ──
+	stmt, err := svc.GetCustomerStatement(ctx, lbTenant, cid, time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("GetCustomerStatement: %v", err)
+	}
+	if stmt.RemainingBalance != wantRemaining {
+		t.Errorf("RemainingBalance = %s, want %s", stmt.RemainingBalance, wantRemaining)
+	}
+	if stmt.Exposure == nil {
+		t.Fatal("Exposure nil")
+	}
+	if stmt.Exposure.HouseOutstanding != "0" {
+		t.Errorf("Exposure.HouseOutstanding = %s, want 0 (rumah sudah lunas oleh crossover)", stmt.Exposure.HouseOutstanding)
+	}
+	if stmt.Exposure.LandOutstanding != wantRemaining {
+		t.Errorf("Exposure.LandOutstanding = %s, want %s (sisa 10jt dari 25jt tanah)", stmt.Exposure.LandOutstanding, wantRemaining)
+	}
+	if stmt.Exposure.TotalOutstanding != wantRemaining {
+		t.Errorf("Exposure.TotalOutstanding = %s, want %s", stmt.Exposure.TotalOutstanding, wantRemaining)
+	}
+
+	_ = landGross // dokumentasi angka skenario
 }

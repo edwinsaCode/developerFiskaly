@@ -21,12 +21,15 @@ import (
 //
 //	Biaya project-wide (unit_id=NULL): Land 200 jt  ← biaya yang dialokasikan
 //	Biaya langsung U1  (unit_id=1)  : Hard 100 jt  ← biaya langsung ber-unit_id
-//	Basis: saleable_area (U1=80m², U2=120m²)
+//	Basis: saleable_area (U1=80m², U2=120m²) — Land (Item 9, UAT 2026-09-07)
+//	punya basisnya sendiri: land_area per unit (di fixture ini == saleable_area,
+//	U1=80m², U2=120m², total 200m²), bukan lagi dibagi RATA (rule klien UAT #1
+//	lama).
 //
 // Expected allocation engine Phase 5:
 //
-//	U1.Total = Land 80M (200M × 80/200) + Hard 100M (direct)
-//	U2.Total = Land 120M (200M × 120/200)
+//	U1.Total = Land 80M (200M × 80/200, proporsional land_area) + Hard 100M (direct)
+//	U2.Total = Land 120M (200M × 120/200, proporsional land_area)
 //
 // Saldo Persediaan AWAL dari kapitalisasi biaya:
 //
@@ -53,12 +56,14 @@ func TestGhostInventory_SiklusPenuh_TidakAdaPersediaanHantu(t *testing.T) {
 		{
 			UnitID:       1,
 			SaleableArea: decimal.NewFromInt(80),
+			LandAreaM2:   decimal.NewFromInt(80),
 			SalesValue:   rupiah(1_000_000_000),
 			Direct:       u1Direct,
 		},
 		{
 			UnitID:       2,
 			SaleableArea: decimal.NewFromInt(120),
+			LandAreaM2:   decimal.NewFromInt(120),
 			SalesValue:   rupiah(1_500_000_000),
 			Direct:       u2Direct,
 		},
@@ -79,7 +84,7 @@ func TestGhostInventory_SiklusPenuh_TidakAdaPersediaanHantu(t *testing.T) {
 	u2Cost := costMap[2]
 
 	// ── 3. Verifikasi angka alokasi engine ────────────────────────────────────
-	// U1: Land = 200M × (80/200) = 80M
+	// U1: Land = 200M × 80/200 (Item 9, proporsional land_area) = 80M
 	if !u1Cost.Land.Equal(rupiah(80_000_000)) {
 		t.Errorf("U1 Land allocated=%s, want 80_000_000", u1Cost.Land)
 	}
@@ -87,7 +92,7 @@ func TestGhostInventory_SiklusPenuh_TidakAdaPersediaanHantu(t *testing.T) {
 	if !u1Cost.Hard.Equal(rupiah(100_000_000)) {
 		t.Errorf("U1 Hard (direct)=%s, want 100_000_000", u1Cost.Hard)
 	}
-	// U2: Land = 200M × (120/200) = 120M
+	// U2: Land = 200M × 120/200 (Item 9, proporsional land_area) = 120M
 	if !u2Cost.Land.Equal(rupiah(120_000_000)) {
 		t.Errorf("U2 Land allocated=%s, want 120_000_000", u2Cost.Land)
 	}
@@ -255,6 +260,7 @@ func TestGhostInventory_AlokasiBesar_TidakAdaSelisDariPembulatan(t *testing.T) {
 		unitInputs[i] = allocation.UnitInput{
 			UnitID:       uint64(i + 1),
 			SaleableArea: decimal.NewFromInt(int64(50 + i%10)), // variasi 50–59m²
+			LandAreaM2:   decimal.NewFromInt(int64(50 + i%10)),
 			SalesValue:   rupiah(int64((i + 1) * 500_000_000)),
 			Direct:       domain.UnitCostBreakdown{},
 		}

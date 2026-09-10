@@ -61,110 +61,90 @@ func isDuplicateKey(err error) bool {
 // menjadi kredit buyer / bagian harga.
 func (r *GORMRepository) CreateBookingAtomic(ctx context.Context, p CreateBookingAtomicParams) (*Booking, error) {
 	b := p.Booking
+	// Client final note 2026-09-10: fee = 0 → tidak ada uang yang berpindah —
+	// TANPA jurnal, TANPA termin, TANPA kwitansi (langkah 1-3 dilewati utuh).
+	// TerminPaymentID tetap NULL; booking tetap tercipta normal (langkah 4-5).
+	feeZero := b.BookingFee.IsZero()
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 1. Jurnal penerimaan fee.
-		txLedgerRepo := ledger.NewGORMRepository(tx)
-		txPosting := ledger.NewPostingService(txLedgerRepo, txLedgerRepo).WithPeriodChecker(txLedgerRepo)
-		entry, err := txPosting.Create(ctx, ledger.CreateJournalRequest{
-			TenantID:    p.TenantID,
-			Date:        b.BookingDate,
-			Description: fmt.Sprintf("Booking fee unit %d", b.UnitID),
-			Lines:       toledgerLines(p.JournalLines),
-		})
-		if err != nil {
-			return fmt.Errorf("buat jurnal booking fee: %w", err)
-		}
-		// Jurnal tetap DRAFT sampai KWB-nya terbit dan tertaut (langkah 3b):
-		// W-3.5 menolak jurnal kas yang selesai diposting tanpa dokumen, dan
-		// KWB baru bisa lahir sesudah termin — yang butuh id jurnal ini.
-
-		// 2. Termin (audit penerimaan; TANPA alokasi — lihat komentar atas).
-		termin := &TerminPayment{
-			TenantID:          p.TenantID,
-			UnitID:            b.UnitID,
-			ProjectID:         b.ProjectID,
-			PhaseID:           b.PhaseID,
-			Amount:            b.BookingFee,
-			BankAccountCode:   p.BankAccountCode,
-			Date:              b.BookingDate,
-			Description:       "Booking fee",
-			JournalEntryID:    entry.ID,
-			CreditAccountCode: p.CreditAccountCode,
-			CreatedBy:         b.CreatedBy,
-			PaymentSource:     PaymentSourceBookingFee,
-			Kind:              TerminKindOther,
-			// Booking fee di LUAR harga unit — TIDAK pernah mengurangi
-			// outstanding (flag = SoT tunggal "mengurangi harga atau tidak").
-			CountsTowardPrice: false,
-		}
-		if err := tx.WithContext(ctx).Create(termin).Error; err != nil {
-			return fmt.Errorf("simpan termin booking fee: %w", err)
-		}
-
-		// 3. Kwitansi KWB (idempoten, seam billing) — WAJIB, bukan opsional.
-		//
-		// W-3.2 (I-2): booking memang sudah menerbitkan KWB lewat Document
-		// Engine W-2, jadi tidak ada jalur kwitansi baru yang dibuat di sini.
-		// Yang diperbaiki adalah fail-open-nya: `p.GenerateReceipt` bernilai
-		// false atau seam yang belum terpasang membuat langkah 1 memposting
-		// penerimaan kas tanpa bukti apa pun.
-		if r.receiptTx == nil {
-			return fmt.Errorf("wiring tidak lengkap: penerimaan booking fee tanpa generator kwitansi")
-		}
-		var cb uint64
-		if b.CreatedBy != nil {
-			cb = *b.CreatedBy
-		}
-		receiptNumber, receiptID, rerr := r.receiptTx.GenerateReceiptInTx(ctx, tx, p.TenantID, cb,
-			termin.ID, b.UnitID, b.BookingFee, p.BankAccountCode, b.BookingDate, p.ReceiptNotes)
-		if rerr != nil {
-			return fmt.Errorf("buat kwitansi booking fee: %w", rerr)
-		}
-		// Nomor kwitansi ikut pulang bersama booking: admin yang baru saja
-		// menerima uang bisa langsung menyebut/mencetak lembarannya.
-		rid := receiptID
-		b.ReceiptID = &rid
-		b.ReceiptNumber = receiptNumber
-		// 3b. Tautkan KWB ke jurnal kasnya (INV-DOC-1).
-		if _, derr := document.LinkJournalBySource(tx.WithContext(ctx), p.TenantID, "receipts", receiptID, entry.ID); derr != nil {
-			return fmt.Errorf("tautkan kwitansi booking ke jurnal: %w", derr)
-		}
-		// 3c. Buktinya ada — kas baru boleh bergerak (W-3.5).
-		if _, err := txPosting.PostDraft(ctx, p.TenantID, entry.ID, ledger.DocumentSpec{}); err != nil {
-			return fmt.Errorf("posting jurnal booking fee: %w", err)
-		}
-
-		// 3d. Produk Tambahan: Kelebihan Tanah (opsional, kelebihan-tanah-booking-
-		// integration-2026-08). Salesperson HANYA input quantity di form Booking
-		// (b.LandQuantityM2, diisi service.go); pool, harga, dan reservasi
-		// diresolve+dikunci DI SINI, atomik dengan booking — gagal salah satu,
-		// batal keduanya.
-		if b.LandQuantityM2 != nil {
-			pool, perr := land.FindPoolByProjectTx(ctx, tx, p.TenantID, b.ProjectID)
-			if perr != nil {
-				return fmt.Errorf("resolusi pool Kelebihan Tanah: %w", perr)
-			}
-			expiry := b.ExpiryDate
-			res, rerr := land.ReserveTx(ctx, tx, p.TenantID, pool.ID, land.ReserveInput{
-				ProjectID:     b.ProjectID,
-				CustomerID:    b.CustomerID,
-				SalesPersonID: b.SalesPersonID,
-				QuantityM2:    *b.LandQuantityM2,
-				ReservedAt:    b.BookingDate,
-				ExpiryDate:    &expiry,
-				CreatedBy:     b.CreatedBy,
+		if !feeZero {
+			// 1. Jurnal penerimaan fee.
+			txLedgerRepo := ledger.NewGORMRepository(tx)
+			txPosting := ledger.NewPostingService(txLedgerRepo, txLedgerRepo).WithPeriodChecker(txLedgerRepo)
+			entry, err := txPosting.Create(ctx, ledger.CreateJournalRequest{
+				TenantID:    p.TenantID,
+				Date:        b.BookingDate,
+				Description: fmt.Sprintf("Booking fee unit %d", b.UnitID),
+				Lines:       toledgerLines(p.JournalLines),
 			})
-			if rerr != nil {
-				return fmt.Errorf("reservasi Kelebihan Tanah: %w", rerr)
+			if err != nil {
+				return fmt.Errorf("buat jurnal booking fee: %w", err)
 			}
-			poolID, resID, price := pool.ID, res.ID, res.UnitPriceSnapshot
-			b.LandStockID = &poolID
-			b.LandReservationID = &resID
-			b.LandUnitPriceSnapshot = &price
+			// Jurnal tetap DRAFT sampai KWB-nya terbit dan tertaut (langkah 3b):
+			// W-3.5 menolak jurnal kas yang selesai diposting tanpa dokumen, dan
+			// KWB baru bisa lahir sesudah termin — yang butuh id jurnal ini.
+
+			// 2. Termin (audit penerimaan; TANPA alokasi — lihat komentar atas).
+			termin := &TerminPayment{
+				TenantID:          p.TenantID,
+				UnitID:            b.UnitID,
+				ProjectID:         b.ProjectID,
+				PhaseID:           b.PhaseID,
+				Amount:            b.BookingFee,
+				BankAccountCode:   p.BankAccountCode,
+				Date:              b.BookingDate,
+				Description:       "Booking fee",
+				JournalEntryID:    entry.ID,
+				CreditAccountCode: p.CreditAccountCode,
+				CreatedBy:         b.CreatedBy,
+				PaymentSource:     PaymentSourceBookingFee,
+				Kind:              TerminKindOther,
+				// Booking fee di LUAR harga unit — TIDAK pernah mengurangi
+				// outstanding (flag = SoT tunggal "mengurangi harga atau tidak").
+				CountsTowardPrice: false,
+			}
+			if err := tx.WithContext(ctx).Create(termin).Error; err != nil {
+				return fmt.Errorf("simpan termin booking fee: %w", err)
+			}
+
+			// 3. Kwitansi KWB (idempoten, seam billing) — WAJIB, bukan opsional.
+			//
+			// W-3.2 (I-2): booking memang sudah menerbitkan KWB lewat Document
+			// Engine W-2, jadi tidak ada jalur kwitansi baru yang dibuat di sini.
+			// Yang diperbaiki adalah fail-open-nya: `p.GenerateReceipt` bernilai
+			// false atau seam yang belum terpasang membuat langkah 1 memposting
+			// penerimaan kas tanpa bukti apa pun.
+			if r.receiptTx == nil {
+				return fmt.Errorf("wiring tidak lengkap: penerimaan booking fee tanpa generator kwitansi")
+			}
+			var cb uint64
+			if b.CreatedBy != nil {
+				cb = *b.CreatedBy
+			}
+			receiptNumber, receiptID, rerr := r.receiptTx.GenerateReceiptInTx(ctx, tx, p.TenantID, cb,
+				termin.ID, b.UnitID, b.BookingFee, p.BankAccountCode, b.BookingDate, p.ReceiptNotes)
+			if rerr != nil {
+				return fmt.Errorf("buat kwitansi booking fee: %w", rerr)
+			}
+			// Nomor kwitansi ikut pulang bersama booking: admin yang baru saja
+			// menerima uang bisa langsung menyebut/mencetak lembarannya.
+			rid := receiptID
+			b.ReceiptID = &rid
+			b.ReceiptNumber = receiptNumber
+			// 3b. Tautkan KWB ke jurnal kasnya (INV-DOC-1).
+			if _, derr := document.LinkJournalBySource(tx.WithContext(ctx), p.TenantID, "receipts", receiptID, entry.ID); derr != nil {
+				return fmt.Errorf("tautkan kwitansi booking ke jurnal: %w", derr)
+			}
+			// 3c. Buktinya ada — kas baru boleh bergerak (W-3.5).
+			if _, err := txPosting.PostDraft(ctx, p.TenantID, entry.ID, ledger.DocumentSpec{}); err != nil {
+				return fmt.Errorf("posting jurnal booking fee: %w", err)
+			}
+			tid := termin.ID
+			b.TerminPaymentID = &tid
 		}
 
 		// 4. Baris booking (satu aktif per unit — UNIQUE active_key).
-		b.TerminPaymentID = termin.ID
+		// Kelebihan Tanah TIDAK LAGI dipasang di Booking (kelebihan-tanah-
+		// konversi-kontrak-2026-08) — dipilih di Konversi Kontrak.
 		if err := tx.WithContext(ctx).Create(b).Error; err != nil {
 			if isDuplicateKey(err) {
 				return ErrActiveBookingExists
@@ -221,6 +201,36 @@ func (r *GORMRepository) ConvertWithContractAtomic(ctx context.Context, tenantID
 			return ErrBookingUnitMismatch
 		}
 
+		// 1b. Produk Tambahan: Kelebihan Tanah (kelebihan-tanah-konversi-kontrak-
+		// 2026-08). Dipasang di KONVERSI KONTRAK, bukan Booking — reservasi
+		// dibuat ATOMIK di sini, SEBELUM kontrak disimpan (pola identik
+		// SaveContract/CreateBookingAtomic): kontrak tidak pernah lahir dengan
+		// land_quantity_m2 terisi tapi tanpa reservasi yang sah (§D3).
+		if c.LandQuantityM2 != nil {
+			pool, perr := land.FindPoolByProjectTx(ctx, tx, tenantID, b.ProjectID)
+			if perr != nil {
+				return fmt.Errorf("resolusi pool Kelebihan Tanah: %w", perr)
+			}
+			var custID uint64
+			if c.CustomerID != nil {
+				custID = *c.CustomerID
+			}
+			res, rerr := land.ReserveTx(ctx, tx, tenantID, pool.ID, land.ReserveInput{
+				ProjectID:     pool.ProjectID,
+				CustomerID:    custID,
+				SalesPersonID: c.SalesPersonID,
+				QuantityM2:    *c.LandQuantityM2,
+				ReservedAt:    c.ContractDate,
+			})
+			if rerr != nil {
+				return fmt.Errorf("reservasi Kelebihan Tanah: %w", rerr)
+			}
+			poolID, resID, price := pool.ID, res.ID, res.UnitPriceSnapshot
+			c.LandStockID = &poolID
+			c.LandReservationID = &resID
+			c.LandUnitPriceSnapshot = &price
+		}
+
 		// 2. Kontrak DI DALAM tx yang sama (atomik penuh dengan konversi).
 		if err := tx.WithContext(ctx).Create(c).Error; err != nil {
 			return fmt.Errorf("simpan sale contract (konversi booking): %w", err)
@@ -234,45 +244,50 @@ func (r *GORMRepository) ConvertWithContractAtomic(ctx context.Context, tenantID
 		//        recognized (rule klien) → tetap recognized (pendapatan final);
 		//        held (legacy R4)        → tetap held (menunggu disposisi manual).
 		//      Outstanding kontrak = gross penuh.
-		var feeTermin TerminPayment
-		if err := tx.WithContext(ctx).
-			Where("id = ? AND tenant_id = ?", b.TerminPaymentID, tenantID).
-			First(&feeTermin).Error; err != nil {
-			return fmt.Errorf("baca termin fee booking %d: %w", b.ID, err)
-		}
-
 		disposition := b.FeeDisposition
 		var reclassJournalID *uint64
-		if feeTermin.CountsTowardPrice {
-			// Jalur LAMA — fee dikonversi menjadi bagian pembayaran harga.
-			txLedgerRepo := ledger.NewGORMRepository(tx)
-			txPosting := ledger.NewPostingService(txLedgerRepo, txLedgerRepo).WithPeriodChecker(txLedgerRepo)
-			pid, uid := b.ProjectID, b.UnitID
-			entry, err := txPosting.Create(ctx, ledger.CreateJournalRequest{
-				TenantID:    tenantID,
-				Date:        in.EventDate,
-				Description: fmt.Sprintf("Konversi booking #%d → kontrak: reklas titipan ke uang muka", b.ID),
-				Lines: toledgerLines([]JournalLineInput{
-					{AccountID: in.TitipanAccountID, Debit: b.BookingFee, ProjectID: &pid, UnitID: &uid, Description: "Reklas titipan booking"},
-					{AccountID: in.UangMukaAccountID, Credit: b.BookingFee, ProjectID: &pid, UnitID: &uid, Description: "Uang muka dari booking fee"},
-				}),
-			})
-			if err != nil {
-				return fmt.Errorf("buat jurnal reklas booking: %w", err)
+		// TerminPaymentID nil = booking fee Rp0 (client final note 2026-09-10):
+		// tidak pernah ada termin/jurnal fee utk booking ini, jadi tidak ada
+		// apa pun utk direklas — disposisi tetap apa adanya (recognized).
+		if b.TerminPaymentID != nil {
+			var feeTermin TerminPayment
+			if err := tx.WithContext(ctx).
+				Where("id = ? AND tenant_id = ?", *b.TerminPaymentID, tenantID).
+				First(&feeTermin).Error; err != nil {
+				return fmt.Errorf("baca termin fee booking %d: %w", b.ID, err)
 			}
-			if _, err := txPosting.Post(ctx, tenantID, entry.ID); err != nil {
-				return fmt.Errorf("posting jurnal reklas booking: %w", err)
-			}
-			reclassJournalID = &entry.ID
-			disposition = FeeTransferred
 
-			// Fee menjadi saldo kredit buyer (sub-ledger; rekonsiliasi FE-2/FE-3).
-			if err := insertBuyerCreditTx(ctx, tx, tenantID, BuyerCreditAllocationInput{
-				TerminPaymentID: b.TerminPaymentID,
-				Amount:          b.BookingFee,
-				CreatedBy:       in.ActorID,
-			}); err != nil {
-				return err
+			if feeTermin.CountsTowardPrice {
+				// Jalur LAMA — fee dikonversi menjadi bagian pembayaran harga.
+				txLedgerRepo := ledger.NewGORMRepository(tx)
+				txPosting := ledger.NewPostingService(txLedgerRepo, txLedgerRepo).WithPeriodChecker(txLedgerRepo)
+				pid, uid := b.ProjectID, b.UnitID
+				entry, err := txPosting.Create(ctx, ledger.CreateJournalRequest{
+					TenantID:    tenantID,
+					Date:        in.EventDate,
+					Description: fmt.Sprintf("Konversi booking #%d → kontrak: reklas titipan ke uang muka", b.ID),
+					Lines: toledgerLines([]JournalLineInput{
+						{AccountID: in.TitipanAccountID, Debit: b.BookingFee, ProjectID: &pid, UnitID: &uid, Description: "Reklas titipan booking"},
+						{AccountID: in.UangMukaAccountID, Credit: b.BookingFee, ProjectID: &pid, UnitID: &uid, Description: "Uang muka dari booking fee"},
+					}),
+				})
+				if err != nil {
+					return fmt.Errorf("buat jurnal reklas booking: %w", err)
+				}
+				if _, err := txPosting.Post(ctx, tenantID, entry.ID); err != nil {
+					return fmt.Errorf("posting jurnal reklas booking: %w", err)
+				}
+				reclassJournalID = &entry.ID
+				disposition = FeeTransferred
+
+				// Fee menjadi saldo kredit buyer (sub-ledger; rekonsiliasi FE-2/FE-3).
+				if err := insertBuyerCreditTx(ctx, tx, tenantID, BuyerCreditAllocationInput{
+					TerminPaymentID: *b.TerminPaymentID,
+					Amount:          b.BookingFee,
+					CreatedBy:       in.ActorID,
+				}); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -433,23 +448,105 @@ func (r *GORMRepository) CloseBookingAtomic(ctx context.Context, tenantID, booki
 			return uerr
 		}
 
-		// Produk Tambahan: Kelebihan Tanah — lepas reservasi bersama penutupan
-		// booking (kelebihan-tanah-booking-integration-2026-08). Booking batal/
-		// expire tanpa konversi → reservasi tanahnya juga batal/expire, atomik
-		// (INV-LAND-1: reserved_quantity_m2 turun di transaksi yang sama).
-		if b.LandReservationID != nil {
-			landStatus := land.ReservationStatusExpired
-			if in.NextStatus == BookingStatusCancelled {
-				landStatus = land.ReservationStatusCancelled
-			}
-			if _, lerr := land.CloseReservationTx(ctx, tx, tenantID, *b.LandReservationID, landStatus, in.Reason); lerr != nil {
-				return fmt.Errorf("lepas reservasi Kelebihan Tanah: %w", lerr)
-			}
-		}
-
 		b.Status = in.NextStatus
 		b.FeeDisposition = disposition
 		b.ForfeitJournalID = forfeitJournalID
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// appendTransferNote menambah jejak transfer ke Notes booking (audit ringan;
+// jejak resmi tetap dua baris UnitStatusTransition append-only di bawah).
+func appendTransferNote(notes, reason string, oldUnitID, newUnitID uint64) string {
+	note := fmt.Sprintf("[transfer unit #%d → #%d] %s", oldUnitID, newUnitID, reason)
+	if notes == "" {
+		return note
+	}
+	return notes + " | " + note
+}
+
+// TransferBookingAtomic (Item 3): memindahkan booking active ke unit lain —
+// unit LAMA booked→available, unit BARU available→booked, booking.unit_id/
+// project_id/phase_id ikut pindah. TANPA jurnal (fee sudah tercatat final/
+// held di unit asal — invariant #5 append-only); termin/kwitansi/jurnal
+// historis TIDAK disentuh (dokumen tetap merujuk konteks saat diterbitkan).
+func (r *GORMRepository) TransferBookingAtomic(ctx context.Context, tenantID, bookingID, newUnitID uint64, in TransferBookingInput) (*Booking, error) {
+	var b Booking
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		err := tx.WithContext(ctx).
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND tenant_id = ?", bookingID, tenantID).
+			First(&b).Error
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrBookingNotFound
+			}
+			return fmt.Errorf("lock booking %d: %w", bookingID, err)
+		}
+		if b.Status != BookingStatusActive {
+			return ErrBookingNotActive
+		}
+		oldUnitID := b.UnitID
+
+		var newUnit project.Unit
+		if err := tx.WithContext(ctx).
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND tenant_id = ?", newUnitID, tenantID).
+			First(&newUnit).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrUnitNotFound
+			}
+			return fmt.Errorf("lock unit tujuan %d: %w", newUnitID, err)
+		}
+
+		res := tx.WithContext(ctx).Model(&Booking{}).
+			Where("id = ? AND tenant_id = ? AND status = ?", b.ID, tenantID, string(BookingStatusActive)).
+			Updates(map[string]interface{}{
+				"unit_id":    newUnitID,
+				"project_id": newUnit.ProjectID,
+				"phase_id":   newUnit.PhaseID,
+				"notes":      appendTransferNote(b.Notes, in.Reason, oldUnitID, newUnitID),
+			})
+		if res.Error != nil {
+			return fmt.Errorf("update booking transfer: %w", res.Error)
+		}
+		if res.RowsAffected == 0 {
+			return ErrBookingNotActive
+		}
+
+		refID := b.ID
+		// Unit LAMA: booked → available + log.
+		if err := transitionUnitPinnedTx(ctx, tx, tenantID, oldUnitID,
+			project.UnitStatusBooked, project.UnitStatusAvailable,
+			&project.UnitStatusTransition{
+				TenantID: tenantID, UnitID: oldUnitID,
+				FromStatus: project.UnitStatusBooked, ToStatus: project.UnitStatusAvailable,
+				Event: project.EventBookingTransferredOut, EventDate: in.EventDate,
+				ReferenceType: project.RefTypeBooking, ReferenceID: &refID,
+				ActorID: in.ActorID, Notes: in.Reason,
+			}); err != nil {
+			return err
+		}
+		// Unit BARU: available → booked + log.
+		if err := transitionUnitPinnedTx(ctx, tx, tenantID, newUnitID,
+			project.UnitStatusAvailable, project.UnitStatusBooked,
+			&project.UnitStatusTransition{
+				TenantID: tenantID, UnitID: newUnitID,
+				FromStatus: project.UnitStatusAvailable, ToStatus: project.UnitStatusBooked,
+				Event: project.EventBookingTransferredIn, EventDate: in.EventDate,
+				ReferenceType: project.RefTypeBooking, ReferenceID: &refID,
+				ActorID: in.ActorID, Notes: in.Reason,
+			}); err != nil {
+			return err
+		}
+
+		b.UnitID = newUnitID
+		b.ProjectID = newUnit.ProjectID
+		b.PhaseID = newUnit.PhaseID
 		return nil
 	})
 	if err != nil {
@@ -480,7 +577,7 @@ func (r *GORMRepository) DisposeConvertedFeeAtomic(ctx context.Context, tenantID
 			}
 			return fmt.Errorf("lock booking %d: %w", bookingID, err)
 		}
-		if b.Status != BookingStatusConverted || b.FeeDisposition != FeeHeld {
+		if b.Status != BookingStatusConverted || b.FeeDisposition != FeeHeld || b.TerminPaymentID == nil {
 			return ErrFeeNotDisposable
 		}
 		// Jaga ganda: hanya fee outside-price (flag FALSE) yang menetap di 2-2100.
@@ -488,7 +585,7 @@ func (r *GORMRepository) DisposeConvertedFeeAtomic(ctx context.Context, tenantID
 		if err := tx.WithContext(ctx).
 			Table("termin_payments").
 			Select("counts_toward_price").
-			Where("id = ? AND tenant_id = ?", b.TerminPaymentID, tenantID).
+			Where("id = ? AND tenant_id = ?", *b.TerminPaymentID, tenantID).
 			Scan(&counts).Error; err != nil {
 			return fmt.Errorf("baca termin fee: %w", err)
 		}
@@ -561,8 +658,8 @@ func (r *GORMRepository) DisposeConvertedFeeAtomic(ctx context.Context, tenantID
 func (r *GORMRepository) attachBookingReceipts(ctx context.Context, tenantID uint64, bs []*Booking) {
 	ids := make([]uint64, 0, len(bs))
 	for _, b := range bs {
-		if b != nil && b.TerminPaymentID != 0 {
-			ids = append(ids, b.TerminPaymentID)
+		if b != nil && b.TerminPaymentID != nil {
+			ids = append(ids, *b.TerminPaymentID)
 		}
 	}
 	if len(ids) == 0 {
@@ -586,7 +683,10 @@ func (r *GORMRepository) attachBookingReceipts(ctx context.Context, tenantID uin
 		byTermin[row.TerminPaymentID] = row
 	}
 	for _, b := range bs {
-		if row, ok := byTermin[b.TerminPaymentID]; ok {
+		if b.TerminPaymentID == nil {
+			continue
+		}
+		if row, ok := byTermin[*b.TerminPaymentID]; ok {
 			id := row.ID
 			b.ReceiptID = &id
 			b.ReceiptNumber = row.ReceiptNumber

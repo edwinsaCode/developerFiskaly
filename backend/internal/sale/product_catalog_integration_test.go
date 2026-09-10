@@ -81,11 +81,15 @@ func pcSeedCatalog(t *testing.T, db *gorm.DB) {
 	}
 }
 
-func pcSeedUnit(t *testing.T, db *gorm.DB, projectID uint64, code, unitType string, area, price int64) uint64 {
+// landArea (Item 9, UAT 2026-09-07): units.land_area — fail-closed sejak HPP
+// Tanah dialokasikan proporsional terhadap land_area (bukan lagi rata), jadi
+// setiap unit PROPERTI yang bisa ikut ComputeBudgeted (lewat RecordAkad) wajib
+// diberi nilai > 0 di sini.
+func pcSeedUnit(t *testing.T, db *gorm.DB, projectID uint64, code, unitType string, area, landArea, price int64) uint64 {
 	t.Helper()
-	if err := db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, list_price, status)
-		VALUES (?,?,?,?,?,?,?)`,
-		pcTenant, projectID, code, unitType, domain.FromInt(area), domain.FromInt(price), "reserved").Error; err != nil {
+	if err := db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, land_area, list_price, status)
+		VALUES (?,?,?,?,?,?,?,?)`,
+		pcTenant, projectID, code, unitType, domain.FromInt(area), domain.FromInt(landArea), domain.FromInt(price), "reserved").Error; err != nil {
 		t.Fatalf("seed unit %s: %v", code, err)
 	}
 	var id uint64
@@ -165,9 +169,13 @@ func pcSumByAccount(t *testing.T, db *gorm.DB, unitID uint64, code string) (debi
 	return row.Debit, row.Credit
 }
 
-// H-1: unit non-properti punya area 100 m² — kalau ia ikut basis, bobot rumah
-// R-01 turun dari 100/400 (25%) menjadi 100/500 (20%) dan HPP-nya berkurang
-// 20 juta. Test ini mengunci angka 25%.
+// H-1: unit non-properti punya area 100 m² — kalau ia ikut DENOMINATOR basis
+// Hard (saleable_area), bobot rumah R-01 turun dari 100/400 (25%) menjadi
+// 100/500 (20%). Land juga tidak terdilusi oleh non-properti (H-1 mengecualikan
+// PDAM-01 dari GetUnitInputs sama sekali) — tapi BUKAN LAGI rata (rule klien
+// UAT #1 lama): sejak Item 9 (UAT 2026-09-07), Land proporsional terhadap
+// land_area unit. R-01=150 m², R-02=250 m² (total 400) → R-01 dapat 150/400
+// = 37.5% dari pool 400jt = 150jt (BUKAN 50%/200jt seperti rule lama).
 func TestIntegration_NonProperty_DoesNotDiluteHPP(t *testing.T) {
 	db := itConnect(t)
 	pcCleanup(t, db)
@@ -175,9 +183,9 @@ func TestIntegration_NonProperty_DoesNotDiluteHPP(t *testing.T) {
 	ctx := context.Background()
 	env := pcSetup(t, db)
 
-	rumahA := pcSeedUnit(t, db, env.projectID, "R-01", "rumah", 100, 500_000_000)
-	pcSeedUnit(t, db, env.projectID, "R-02", "rumah", 300, 900_000_000)
-	pcSeedUnit(t, db, env.projectID, "PDAM-01", "pdam", 100, 5_000_000) // non-properti
+	rumahA := pcSeedUnit(t, db, env.projectID, "R-01", "rumah", 100, 150, 500_000_000)
+	pcSeedUnit(t, db, env.projectID, "R-02", "rumah", 300, 250, 900_000_000)
+	pcSeedUnit(t, db, env.projectID, "PDAM-01", "pdam", 100, 0, 5_000_000) // non-properti
 
 	rec, err := env.svc.RecordAkad(ctx, pcTenant, sale.RecordBASTRequest{
 		UnitID: rumahA, SalePrice: domain.FromInt(500_000_000),
@@ -187,25 +195,44 @@ func TestIntegration_NonProperty_DoesNotDiluteHPP(t *testing.T) {
 		t.Fatalf("RecordBAST rumah: %v", err)
 	}
 
-	// 25% dari pool: land 100jt, hard 200jt.
-	wantLand := domain.FromInt(100_000_000)
+	// Land: proporsional land_area (Item 9) = 150/400 dari pool 400jt = 150jt
+	// (tidak didilusi PDAM-01 — H-1 tetap berlaku, PDAM-01 dikecualikan dari
+	// GetUnitInputs sama sekali sehingga tak pernah masuk Σland_area).
+	// Hard: 25% dari pool 800jt = 200jt (saleable_area 100/400, PDAM-01
+	// dikecualikan dari denominator — H-1).
+	wantLand := domain.FromInt(150_000_000)
 	wantHard := domain.FromInt(200_000_000)
 	if !rec.HPPLand.Equal(wantLand) || !rec.HPPHard.Equal(wantHard) {
-		t.Fatalf("HPP rumah = land %s / hard %s, want %s / %s (produk non-properti mendilusi basis!)",
+		t.Fatalf("HPP rumah = land %s / hard %s, want %s / %s",
 			rec.HPPLand, rec.HPPHard, wantLand, wantHard)
 	}
 	if rec.HPPMethod != "budgeted" {
 		t.Errorf("hpp_method = %q, want budgeted", rec.HPPMethod)
 	}
 
-	// Bukti audit di snapshot: persentase alokasi = 25%, artinya DENOMINATOR
-	// basis hanya menjumlahkan unit properti (100/400), bukan 100/500.
-	var pcts []string
-	db.Raw(`SELECT DISTINCT l.allocation_percentage FROM allocation_snapshot_lines l
+	// Bukti audit di snapshot: baris hard/soft/financing = 25% (basis
+	// saleable_area, DENOMINATOR hanya unit properti: 100/400, bukan 100/500
+	// — H-1), baris land = 37.5% (basis "land_area", 150/400 m² — Item 9).
+	var lines []struct {
+		AccountingClass string
+		BasisType       string
+		Pct             string `gorm:"column:allocation_percentage"`
+	}
+	db.Raw(`SELECT l.accounting_class, l.basis_type, l.allocation_percentage FROM allocation_snapshot_lines l
 		JOIN allocation_snapshots s ON s.id = l.snapshot_id
-		WHERE s.tenant_id = ? AND s.unit_id = ?`, pcTenant, rumahA).Scan(&pcts)
-	if len(pcts) != 1 || pcts[0] != "25.000000" {
-		t.Errorf("allocation_percentage = %v, want [25.000000] (basis tercemar unit non-properti)", pcts)
+		WHERE s.tenant_id = ? AND s.unit_id = ?`, pcTenant, rumahA).Scan(&lines)
+	for _, ln := range lines {
+		switch ln.AccountingClass {
+		case "land":
+			if ln.BasisType != "land_area" || ln.Pct != "37.500000" {
+				t.Errorf("baris land: basis_type=%s pct=%s, want land_area/37.500000", ln.BasisType, ln.Pct)
+			}
+		default:
+			if ln.BasisType != "saleable_area" || ln.Pct != "25.000000" {
+				t.Errorf("baris %s: basis_type=%s pct=%s, want saleable_area/25.000000 (basis tercemar unit non-properti)",
+					ln.AccountingClass, ln.BasisType, ln.Pct)
+			}
+		}
 	}
 }
 
@@ -218,8 +245,8 @@ func TestIntegration_NonProperty_RevenueWithoutCOGS(t *testing.T) {
 	ctx := context.Background()
 	env := pcSetup(t, db)
 
-	pcSeedUnit(t, db, env.projectID, "R-01", "rumah", 100, 500_000_000)
-	pdam := pcSeedUnit(t, db, env.projectID, "PDAM-01", "pdam", 0, 5_000_000)
+	pcSeedUnit(t, db, env.projectID, "R-01", "rumah", 100, 100, 500_000_000)
+	pdam := pcSeedUnit(t, db, env.projectID, "PDAM-01", "pdam", 0, 0, 5_000_000)
 
 	rec, err := env.svc.RecordAkad(ctx, pcTenant, sale.RecordBASTRequest{
 		UnitID: pdam, SalePrice: domain.FromInt(5_000_000),
@@ -278,7 +305,7 @@ func TestIntegration_UnregisteredUnitType_BASTRejected(t *testing.T) {
 	env := pcSetup(t, db)
 
 	// Unit dengan tipe yang tidak terdaftar (mis. data lama / master dirusak).
-	ghost := pcSeedUnit(t, db, env.projectID, "G-01", "hotel", 100, 500_000_000)
+	ghost := pcSeedUnit(t, db, env.projectID, "G-01", "hotel", 100, 100, 500_000_000)
 
 	var before int64
 	db.Raw(`SELECT COUNT(*) FROM journal_entries WHERE tenant_id = ?`, pcTenant).Scan(&before)

@@ -2,6 +2,12 @@ package cost_test
 
 // Tes jembatan CostEntry ↔ BudgetItem (Phase 5 RAB link).
 // Semua tes di file ini harus HIJAU tanpa mengubah logika Event 1 (jurnal).
+//
+// Item 8 (UAT 2026-09-07): RULE KLIEN 2026-09-04 (kapitalisasi Construction
+// penuh saat RAB approval, dan redirect debit cost entry Hard ke Hutang
+// Usaha untuk menghindari double-capitalize) DICABUT klien. Cost entry Hard
+// SELALU mendebit Persediaan langsung, sama seperti kategori kapitalisasi
+// lain — tidak ada lagi redirect berbasis status kapitalisasi plan.
 
 import (
 	"context"
@@ -102,6 +108,84 @@ func TestCostEntry_BudgetItemID_Valid_Stored(t *testing.T) {
 	}
 }
 
+// ── Test: Item 8 — Hard SELALU mendebit Persediaan, tidak ada redirect ───────
+// RULE KLIEN 2026-09-04 dicabut: RAB tidak lagi mengkapitalisasi Construction
+// di muka, jadi tidak ada lagi status "sudah dikapitalisasi" untuk dihindari
+// double-booking-nya. Setiap cost entry Hard direct/shared mendebit Persediaan
+// Konstruksi (1-3100) langsung — sama seperti kategori kapitalisasi lain.
+
+func TestCostEntry_BudgetItemID_Hard_AlwaysDebitsInventory(t *testing.T) {
+	lookup := &mockBudgetItemLookup{items: map[uint64]budgetItemStub{
+		42: {projectID: 1, costCategory: domain.CostCategoryHard, isMappable: true},
+	}}
+	svc, writer, _ := buildServiceWithLookup(lookup)
+
+	req := baseReq()
+	req.ProjectID = 1
+	req.Category = domain.CostCategoryHard
+	req.BudgetItemID = ptr64(42)
+
+	_, err := svc.CreateCostEntry(context.Background(), 1, req)
+	if err != nil {
+		t.Fatalf("CreateCostEntry: %v", err)
+	}
+	if len(writer.calls) != 1 {
+		t.Fatalf("jurnal harus dibuat tepat 1 kali, got %d", len(writer.calls))
+	}
+	call := writer.calls[0]
+	if len(call.Lines) != 2 {
+		t.Fatalf("jurnal harus 2 baris (debit+kredit), got %d", len(call.Lines))
+	}
+	// Debit HARUS Persediaan (1-3100, acc ID 101) — biaya aktual, bukan redirect.
+	if call.Lines[0].AccountID != 101 {
+		t.Errorf("debit account = %d, want 101 (1-3100 Persediaan Konstruksi)", call.Lines[0].AccountID)
+	}
+	// Kredit tetap mengikuti PaymentMethod (Bank pada baseReq): 1-1300, acc ID 200.
+	if call.Lines[1].AccountID != 200 {
+		t.Errorf("kredit account = %d, want 200 (1-1300 Bank)", call.Lines[1].AccountID)
+	}
+}
+
+func TestCostEntry_NoBudgetItemID_Hard_StillDebitsInventory(t *testing.T) {
+	lookup := &mockBudgetItemLookup{items: map[uint64]budgetItemStub{}}
+	svc, writer, _ := buildServiceWithLookup(lookup)
+
+	req := baseReq()
+	req.ProjectID = 1
+	req.Category = domain.CostCategoryHard
+	req.BudgetItemID = nil // tidak menaut item RAB — jalur FE default
+
+	_, err := svc.CreateCostEntry(context.Background(), 1, req)
+	if err != nil {
+		t.Fatalf("CreateCostEntry: %v", err)
+	}
+	call := writer.calls[0]
+	if call.Lines[0].AccountID != 101 {
+		t.Errorf("debit account = %d, want 101 (1-3100 Persediaan Konstruksi)", call.Lines[0].AccountID)
+	}
+}
+
+// Kategori expense-only (Operational/Marketing/Other) tetap tidak pernah
+// tersentuh jalur kapitalisasi Hard.
+func TestCostEntry_BudgetItemID_ExpenseCategory_NotAffectedByHardRule(t *testing.T) {
+	lookup := &mockBudgetItemLookup{items: map[uint64]budgetItemStub{
+		77: {projectID: 1, costCategory: domain.CostCategoryOperational, isMappable: true},
+	}}
+	svc, _, _ := buildServiceWithLookup(lookup)
+
+	req := baseReq()
+	req.ProjectID = 1
+	req.Category = domain.CostCategoryOperational
+	req.HardSubcategory = ""
+	req.CostTier = domain.CostTierOverhead
+	req.UnitID = nil
+	req.BudgetItemID = ptr64(77)
+
+	if _, err := svc.CreateCostEntry(context.Background(), 1, req); err != nil {
+		t.Errorf("expense-category cost entry harus tetap valid, got %v", err)
+	}
+}
+
 // ── Test: lintas-tenant ditolak ───────────────────────────────────────────────
 
 func TestCostEntry_BudgetItemID_CrossTenant_Rejected(t *testing.T) {
@@ -150,7 +234,8 @@ func TestCostEntry_BudgetItemID_CategoryMismatch_Rejected(t *testing.T) {
 
 	req := baseReq()
 	req.ProjectID = 1
-	req.Category = domain.CostCategorySoft  // cost = soft ≠ land
+	req.Category = domain.CostCategorySoft // cost = soft ≠ land
+	req.HardSubcategory = ""
 	req.BudgetItemID = ptr64(5)
 
 	_, err := svc.CreateCostEntry(context.Background(), 1, req)
@@ -290,14 +375,14 @@ func TestCostEntry_Event1_PostingUnchanged_WithBudgetItemID(t *testing.T) {
 
 	date := time.Date(2025, 9, 1, 0, 0, 0, 0, time.UTC)
 	req := cost.CreateCostEntryRequest{
-		ProjectID:       1,
-		Category:        domain.CostCategoryLand,
-		Amount:          domain.FromInt(200_000_000),
-		PaymentMethod:   cost.PaymentMethodPayable,
-		Date:            date,
-		Vendor:          "PT Tanah Sejahtera",
-		Description:     "Pembebasan lahan kavling B",
-		BudgetItemID:    ptr64(3),
+		ProjectID:     1,
+		Category:      domain.CostCategoryLand,
+		Amount:        domain.FromInt(200_000_000),
+		PaymentMethod: cost.PaymentMethodPayable,
+		Date:          date,
+		Vendor:        "PT Tanah Sejahtera",
+		Description:   "Pembebasan lahan kavling B",
+		BudgetItemID:  ptr64(3),
 	}
 
 	_, err := svc.CreateCostEntry(context.Background(), 1, req)

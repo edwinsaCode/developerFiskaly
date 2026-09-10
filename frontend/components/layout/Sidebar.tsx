@@ -94,7 +94,7 @@ const NAV_GROUPS: NavGroup[] = [
         href: "/accounting/notaris",
         // Jalur warisan: intake sudah pindah ke Biaya Realisasi (master-driven).
         // Menu ditahan supaya titipan lama yang tertahan tetap bisa dibayarkan.
-        label: "Titipan Notaris (warisan)",
+        label: "Titipan Notaris",
         icon: "M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3",
       },
       {
@@ -160,6 +160,11 @@ const NAV_GROUPS: NavGroup[] = [
     label: "ADMIN",
     items: [
       {
+        href: "/panduan",
+        label: "Panduan Sistem",
+        icon: "M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253",
+      },
+      {
         href: "/pengaturan",
         label: "Pengaturan",
         icon: "M12 15a3 3 0 100-6 3 3 0 000 6z M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z",
@@ -190,11 +195,13 @@ function NavIcon({ d }: { d: string }) {
 //
 // Yang sengaja TIDAK ada: Dashboard (KPI keuangan), KPR (pencairan), Komisi,
 // Pembatalan & Refund (uang keluar), seluruh grup KEUANGAN, dan Pengaturan.
+// Panduan Sistem sengaja diikutkan — dokumentasi murni baca, aman untuk semua peran.
 const MARKETING_NAV = new Set([
   "/proyek",
   "/penjualan",
   "/penjualan/sales",
   "/penjualan/booking",
+  "/panduan",
 ]);
 
 export function Sidebar({ drawer = false }: { drawer?: boolean }) {

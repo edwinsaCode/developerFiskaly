@@ -5,12 +5,17 @@
 // seluruh pemanggil lama (`import { validateRupiah } from "@/components/ui/RupiahInput"`)
 // tidak berubah sama sekali.
 
-// Validasi nilai rupiah: harus integer > 0
-export function validateRupiah(raw: string): string | null {
-  if (!raw || raw === "0" || raw === "") return "Jumlah harus diisi";
+// Validasi nilai rupiah: harus integer > 0 (default). `allowZero=true` — hanya
+// dipakai Booking Fee (client final note 2026-09-10: fee 0 = tidak ada uang
+// booking sama sekali, sah) — melonggarkan menjadi >= 0; pemanggil lain TIDAK
+// berubah.
+export function validateRupiah(raw: string, allowZero = false): string | null {
+  if (!raw || raw === "" || (!allowZero && raw === "0")) return "Jumlah harus diisi";
   const n = parseInt(raw, 10);
   if (isNaN(n)) return "Jumlah tidak valid";
-  if (n <= 0) return "Jumlah harus lebih dari Rp 0";
+  if (allowZero ? n < 0 : n <= 0) {
+    return allowZero ? "Jumlah tidak boleh negatif" : "Jumlah harus lebih dari Rp 0";
+  }
   if (raw.includes(".")) return "Jumlah harus rupiah bulat (tanpa sen)";
   return null;
 }

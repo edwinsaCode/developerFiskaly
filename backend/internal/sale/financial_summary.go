@@ -40,6 +40,54 @@ type ContractFinancialSummary struct {
 	NetContract     domain.Money `json:"net_contract"` // GrossAmount — nilai kontrak ditagih
 	TotalPaid       domain.Money `json:"total_paid"`
 	Outstanding     domain.Money `json:"outstanding"` // NetContract − TotalPaid
+
+	// HasLand/LandAmount: komponen Kelebihan Tanah (opsional), dibekukan di
+	// kontrak yang sama & saat yang sama dengan NetContract (CreateContract),
+	// jauh SEBELUM Akad — sehingga bisa dilacak (ditagih) sedini kontrak
+	// dikonversi, bukan menunggu Akad. Rumus IDENTIK internal/land/akad.go
+	// (dpp = harga/m2 × luas, vat = dpp × tarif bila PKP, gross = dpp+vat) agar
+	// proyeksi ini konsisten dengan jurnal Akad yang sesungguhnya nanti.
+	//
+	// LandAmount TIDAK digabung ke NetContract/Outstanding (keduanya LOCKED —
+	// house-only, dipakai validateScheduleSum/KPR/PortfolioFinancials).
+	// TotalContractValue/TotalOutstanding adalah field TAMBAHAN yang
+	// menggabungkan rumah+tanah terhadap SATU kolam pembayaran yang sama
+	// (house & land berbagi akun 2-2000 Uang Muka pra-Akad) — inilah angka
+	// "terutang" yang sesungguhnya harus ditampilkan ke user bila kontrak
+	// punya komponen tanah, karena TotalPaid sudah mencakup pembayaran utk
+	// keduanya.
+	HasLand            bool         `json:"has_land"`
+	LandAmount         domain.Money `json:"land_amount"`          // proyeksi tagihan tanah (DPP+PPN)
+	TotalContractValue domain.Money `json:"total_contract_value"` // NetContract + LandAmount
+	TotalOutstanding   domain.Money `json:"total_outstanding"`    // TotalContractValue − TotalPaid
+
+	// TotalOutstandingActual: berbeda dari TotalOutstanding di atas (proyeksi
+	// pra-Akad dari snapshot kontrak) — field ini memakai nilai tagihan tanah
+	// SESUNGGUHNYA dari baris payment_schedules (type=land, land_sale_id,
+	// migrasi 000095; superseded/dibatalkan diabaikan), anchor AR formal yang
+	// sama dipakai waterfall ReceivePayment, lalu dikurangi TotalPaid SEKALI
+	// (sama seperti TotalOutstanding — BUKAN Outstanding+sisa-tanah-terpisah:
+	// TotalPaid adalah satu kolam gabungan rumah+tanah, jadi menjumlah dua
+	// sisa yang masing-masing sudah mengurangkan kolam yang sama akan
+	// menghitung ganda begitu waterfall meluber dari rumah ke tanah).
+	// Sebelum Akad, tidak ada baris payment_schedules type=land sama sekali →
+	// nilainya sama dengan Outstanding (rumah saja, land belum ditagih formal;
+	// pakai TotalOutstanding/LandAmount di tempat lain untuk proyeksi pra-Akad).
+	// Inilah angka yang benar untuk pratinjau/prefill nominal pembayaran
+	// pasca-Akad (Riwayat Penerimaan).
+	TotalOutstandingActual domain.Money `json:"total_outstanding_actual"`
+
+	// TotalPaidActual: pasangan TotalOutstandingActual — total kas SESUNGGUHNYA
+	// diterima terhadap kolam gabungan rumah+tanah (TotalContractValueActual −
+	// TotalOutstandingActual), BUKAN Σ TotalPaid (yang memfilter
+	// counts_toward_price=TRUE dan karenanya diam-diam MENGECUALIKAN pembayaran
+	// yang 100% meluber ke baris tanah — pembayaran itu sengaja ditandai FALSE
+	// oleh planAllocationsLocked, lihat CountsTowardPrice, supaya tidak
+	// ganda-hitung di Outstanding house-only). Diturunkan dari sisi outstanding
+	// yang sudah benar (schedule-based, sama seperti outstandingForContract)
+	// supaya TotalPaidActual + TotalOutstandingActual == TotalContractValueActual
+	// SELALU, tanpa pengecualian — konsisten dgn Jadwal Pembayaran yg ditampilkan.
+	TotalPaidActual domain.Money `json:"total_paid_actual"`
 }
 
 // ── Agregat portfolio (S3/R4 — reporting membaca ini, bukan SQL sendiri) ─────
@@ -158,6 +206,57 @@ func (s *Service) summarizeContract(ctx context.Context, tenantID uint64, c *Sal
 		TotalPaid:   paid,
 		Outstanding: c.GrossAmount.Sub(paid),
 	}
+
+	landAmount := domain.Zero
+	if c.LandQuantityM2 != nil && c.LandQuantityM2.IsPositive() && c.LandUnitPriceSnapshot != nil {
+		landDPP := domain.FromDecimal(c.LandUnitPriceSnapshot.Decimal().Mul(*c.LandQuantityM2).Round(0))
+		landVAT := domain.Zero
+		if c.IsPKP {
+			landVAT = domain.FromDecimal(landDPP.Decimal().Mul(c.VATRateSnapshot).Round(0))
+		}
+		landAmount = landDPP.Add(landVAT)
+		sum.HasLand = true
+	}
+	sum.LandAmount = landAmount
+	sum.TotalContractValue = c.GrossAmount.Add(landAmount)
+	sum.TotalOutstanding = sum.TotalContractValue.Sub(paid)
+
+	// landAmountActual: Σ nominal TAGIHAN (bukan sisa) baris payment_schedules
+	// type=land yang masih hidup (superseded/dibatalkan diabaikan) — dipakai
+	// utk TotalContractValueActual (dasar TotalPaidActual di bawah).
+	//
+	// TotalOutstandingActual TIDAK LAGI dihitung dgn "GrossAmount+landAmountActual
+	// − paid" (bug UAT 2026-09, sama persis dgn yang sudah diperbaiki di
+	// outstandingForContract/collection.go): `paid` (SumTerminsByUnit) memfilter
+	// counts_toward_price=TRUE, dan pembayaran yang 100% meluber ke baris tanah
+	// ditandai FALSE oleh planAllocationsLocked — jadi ikut terkecualikan dari
+	// "paid" di sini juga, membuat outstanding gabungan tampak masih tersisa
+	// padahal Jadwal Pembayaran (payment_schedules.paid_amount, tidak peduli
+	// counts_toward_price) sudah menunjukkan lunas. Delegasikan ke
+	// outstandingForContract — SATU rumus dgn pratinjau pembayaran (collection.go)
+	// — bukan menghitung ulang dgn asumsi yang sudah terbukti salah.
+	landAmountActual := domain.Zero
+	actualOutstanding := sum.Outstanding
+	if s.contracts != nil {
+		schedules, err := s.contracts.ListSchedulesByContract(ctx, tenantID, c.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, sched := range schedules {
+			if sched.Type != ScheduleTypeLand || sched.Status == ScheduleStatusSuperseded {
+				continue
+			}
+			landAmountActual = landAmountActual.Add(sched.Amount)
+		}
+		ao, err := s.outstandingForContract(ctx, tenantID, c)
+		if err != nil {
+			return nil, err
+		}
+		actualOutstanding = ao
+	}
+	sum.TotalOutstandingActual = actualOutstanding
+	sum.TotalPaidActual = c.GrossAmount.Add(landAmountActual).Sub(actualOutstanding)
+
 	if c.UnitPriceSnapshot != nil && !c.UnitPriceSnapshot.IsZero() {
 		sum.UnitPrice = *c.UnitPriceSnapshot
 		sum.PriceIsSnapshot = true

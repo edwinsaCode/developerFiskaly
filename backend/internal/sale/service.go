@@ -20,6 +20,10 @@ import (
 const (
 	accountCodeUangMuka = "2-2000" // Uang Muka Penjualan (kewajiban) — sebelum BAST
 	accountCodePiutang  = "1-2000" // Piutang Usaha — pelunasan setelah BAST
+	// accountCodeBankFeeExpense (UAT 2026-09-03, Rule #5): provisi/biaya admin
+	// bank yang dipotong saat pencairan KPR, ditanggung developer — BUKAN
+	// titipan customer (K-1/2-2400 tidak berubah). Lihat preparePaymentFunded.
+	accountCodeBankFeeExpense = "5-3200"
 )
 
 // ── Interfaces ────────────────────────────────────────────────────────────────
@@ -49,6 +53,12 @@ type UnitReader interface {
 type TerminStore interface {
 	SaveTermin(ctx context.Context, t *TerminPayment) error
 	SumTerminsByUnit(ctx context.Context, tenantID, unitID uint64) (domain.Money, error)
+	// SumTerminsByUnitAndCreditAccount (7C, UAT 2026-09-07) menjumlahkan
+	// penerimaan sebuah unit yang dikreditkan ke SATU akun tertentu — dasar
+	// menghitung sisa Dana Jaminan Bank secara independen dari Piutang Usaha
+	// (bukan estimasi ulang, langsung dari termin_payments.credit_account_code
+	// yang append-only).
+	SumTerminsByUnitAndCreditAccount(ctx context.Context, tenantID, unitID uint64, creditAccountCode string) (domain.Money, error)
 	// ListTerminsByUnit mengembalikan semua penerimaan (termin) sebuah unit.
 	ListTerminsByUnit(ctx context.Context, tenantID, unitID uint64) ([]*TerminPayment, error)
 	// FindSaleRecord mengembalikan SaleRecord unit (bukti BAST) atau
@@ -154,6 +164,13 @@ type Service struct {
 	// fail-closed HANYA bila kontrak yang sedang diproses memang punya
 	// komponen tanah (kontrak tanpa tanah, mayoritas kasus, tidak terpengaruh).
 	landAkad LandAkadPreparer
+	// landSaleReader (P1 — Kelebihan Tanah outstanding & payment flow,
+	// 2026-09-04, opsional via SetLandSaleReader): membaca rincian satu
+	// land_sale (quantity_m2, harga/m²) untuk ditampilkan pada baris jadwal
+	// tanah di Customer Statement. Nil = baris tanah tetap tampil (jumlah,
+	// outstanding, status tetap benar dari payment_schedules) hanya tanpa
+	// rincian m²/harga satuan — degradasi anggun, bukan kegagalan.
+	landSaleReader LandSaleReader
 }
 
 // WithLandAkadPreparer mengaktifkan pengakuan Kelebihan Tanah bundled-Akad
@@ -161,6 +178,16 @@ type Service struct {
 func WithLandAkadPreparer(p LandAkadPreparer) ServiceOption {
 	return func(s *Service) { s.landAkad = p }
 }
+
+// LandSaleReader membaca detail satu land_sale — implementasi produksi:
+// *land.Service.GetLandSale (interface sempit, pola identik LandAkadPreparer,
+// supaya unit test tidak perlu wiring seluruh paket land).
+type LandSaleReader interface {
+	GetLandSale(ctx context.Context, tenantID, id uint64) (*land.LandSale, error)
+}
+
+// SetLandSaleReader memasang pembaca land_sales (wiring produksi: land.Service).
+func (s *Service) SetLandSaleReader(r LandSaleReader) { s.landSaleReader = r }
 
 // RealizationRecognizer dijalankan DI DALAM transaksi BAST — diimplementasikan
 // package charge via adapter wiring (sale tidak import charge; pola
@@ -373,6 +400,16 @@ func (s *Service) preparePaymentFunded(ctx context.Context, tenantID uint64, req
 	if req.Amount.IsZero() || req.Amount.IsNeg() {
 		return nil, ErrTerminAmountZeroOrNeg
 	}
+	// BankFee=0 (default, semua caller lama) selalu lolos tanpa perubahan
+	// perilaku. BankFee>0 harus rupiah bulat, tidak negatif, dan < Amount
+	// (bukan <=): pencairan harus selalu menyisakan kas bersih > 0, jika tidak
+	// baris debit bank menjadi nol dan jurnal ditolak posting service
+	// (ErrLineInvalid) — dipotong 100% bukan kasus bisnis nyata.
+	if !req.BankFee.IsZero() {
+		if !req.BankFee.IsWholeRupiah() || req.BankFee.IsNeg() || !req.BankFee.LessThan(req.Amount) {
+			return nil, ErrBankFeeInvalid
+		}
+	}
 	// Validasi rekening tujuan COA-driven (bukan hardcode): ada, milik tenant,
 	// aktif, kategori cash/bank.
 	if requireCashBank {
@@ -407,16 +444,56 @@ func (s *Service) preparePaymentFunded(ctx context.Context, tenantID uint64, req
 		// setelah pencairan sisa tagihan sudah direklas ke piutang customer
 		// (T-3), sehingga pelunasan kekurangan mengkredit 1-2000.
 		if contract != nil {
-			if code, ok := s.schemeCreditAccountForPayment(ctx, contract); ok {
+			if code, ok := s.schemeCreditAccountForPayment(ctx, contract, req.Source); ok {
 				creditCode = code
+			}
+		}
+		// 7C guard (UAT 2026-09-07): pencairan KPR dibatasi ke SISA Dana
+		// Jaminan Bank saja (bukan sisa piutang unit gabungan) — supaya
+		// pencairan tak pernah melebihi apa yang benar-benar masih ada di
+		// akun itu, dan supaya kelebihan TIDAK diam-diam "melimpah" ke
+		// Piutang Usaha (tidak ada aturan bisnis untuk itu). Dana Jaminan
+		// Bank sudah lunas → tolak eksplisit, jangan redirect diam-diam.
+		if req.Source == PaymentSourceKPRDisbursement && creditCode != accountCodePiutang && isBAST {
+			finRemaining, ferr := s.financingOutstanding(ctx, tenantID, contract, creditCode)
+			if ferr != nil {
+				return nil, ferr
+			}
+			if req.Amount.GreaterThan(finRemaining) {
+				return nil, ErrDisbursementExceedsFinancing
 			}
 		}
 		// Guard overpayment: penerimaan tidak boleh melebihi sisa piutang
 		// (gross − total diterima sebelum pembayaran ini). Mencegah saldo
 		// Piutang menjadi negatif (kelebihan bayar ditangani terpisah, GAP-7).
-		outstanding, cerr := s.unitOutstanding(ctx, tenantID, saleRec)
-		if cerr != nil {
-			return nil, cerr
+		//
+		// Bug spillover (2026-09-04): unitOutstanding (gross rumah − ΣSemua
+		// termin counts_toward_price) TIDAK BOLEH dipakai lagi begitu ada
+		// pembayaran yang melimpah dari rumah ke tanah dalam SATU termin —
+		// termin campuran itu tetap CountsTowardPrice=true untuk NILAI PENUH
+		// (lihat planAllocationsLocked), jadi bagian yang sebetulnya masuk
+		// tanah ikut mengurangi "collected" rumah, membuat unitOutstanding
+		// negatif sebesar limpahan itu. Menjumlahkannya dengan
+		// landOutstandingForContract (yang sudah benar, berbasis paid_amount
+		// jadwal) lalu MENGURANGI limpahan itu DUA KALI — total tergerus, dan
+		// pelunasan sisa tanah yang sah pun ditolak (ErrPaymentExceedsReceivable)
+		// padahal previewnya valid. outstandingForContract (dipakai juga oleh
+		// PreviewCollectionPayment, SoT yang sama) menghitung house+land
+		// langsung dari payment_schedules.PaidAmount sehingga limpahan sudah
+		// tercermin sekali saja di kedua sisi — aman dipakai di sini.
+		var outstanding domain.Money
+		if contract != nil {
+			var oerr error
+			outstanding, oerr = s.outstandingForContract(ctx, tenantID, contract)
+			if oerr != nil {
+				return nil, oerr
+			}
+		} else {
+			var cerr error
+			outstanding, cerr = s.unitOutstanding(ctx, tenantID, saleRec)
+			if cerr != nil {
+				return nil, cerr
+			}
 		}
 		if req.Amount.GreaterThan(outstanding) {
 			return nil, ErrPaymentExceedsReceivable
@@ -434,18 +511,34 @@ func (s *Service) preparePaymentFunded(ctx context.Context, tenantID uint64, req
 
 	pid := unit.ProjectID
 	uid := req.UnitID
+	netCash := req.Amount.Sub(req.BankFee)
 	lines := []JournalLineInput{
 		{
-			AccountID: bankAccID, Debit: req.Amount,
-			ProjectID: &pid, PhaseID: unit.PhaseID, UnitID: &uid,
-			Description: req.Description,
-		},
-		{
-			AccountID: creditAccID, Credit: req.Amount,
+			AccountID: bankAccID, Debit: netCash,
 			ProjectID: &pid, PhaseID: unit.PhaseID, UnitID: &uid,
 			Description: req.Description,
 		},
 	}
+	// BankFee (UAT 2026-09-03, Rule #5): provisi/administrasi bank yang
+	// dipotong SEBELUM kas diterima developer — dibebankan langsung ke P&L
+	// (5-3200), bukan mengurangi piutang yang diselesaikan (creditAccID tetap
+	// menerima Amount penuh — nilai piutang/DP yang lunas tidak berubah).
+	if !req.BankFee.IsZero() {
+		feeAccID, ferr := s.accounts.FindAccountIDByCode(ctx, tenantID, accountCodeBankFeeExpense)
+		if ferr != nil {
+			return nil, fmt.Errorf("cari akun beban provisi bank %s: %w", accountCodeBankFeeExpense, ferr)
+		}
+		lines = append(lines, JournalLineInput{
+			AccountID: feeAccID, Debit: req.BankFee,
+			ProjectID: &pid, PhaseID: unit.PhaseID, UnitID: &uid,
+			Description: "provisi/administrasi bank — " + req.Description,
+		})
+	}
+	lines = append(lines, JournalLineInput{
+		AccountID: creditAccID, Credit: req.Amount,
+		ProjectID: &pid, PhaseID: unit.PhaseID, UnitID: &uid,
+		Description: req.Description,
+	})
 
 	return &preparedPayment{
 		unitID:     req.UnitID,
@@ -484,6 +577,28 @@ func (s *Service) unitOutstanding(ctx context.Context, tenantID uint64, sr *Sale
 		return domain.Zero, fmt.Errorf("hitung termin terkumpul: %w", err)
 	}
 	return saleRecordGross(sr).Sub(collected), nil
+}
+
+// financingOutstanding (Item 7C, UAT 2026-09-07) menghitung sisa Dana Jaminan
+// Bank kontrak: Nilai Persetujuan KPR Bank (c.LoanAmount, diisi saat Akad —
+// lihat Item 7A) dikurangi Σ pencairan KPR yang SUDAH dikreditkan ke
+// financingCode untuk unit ini. Dibaca langsung dari termin_payments
+// (append-only, SoT), bukan estimasi ulang — sehingga pencairan ke-2/ke-3
+// selalu dibatasi ke sisa yang benar, tidak pernah melimpah diam-diam ke
+// Piutang Usaha.
+func (s *Service) financingOutstanding(ctx context.Context, tenantID uint64, c *SaleContract, financingCode string) (domain.Money, error) {
+	if c == nil || c.LoanAmount == nil {
+		return domain.Zero, nil
+	}
+	disbursed, err := s.store.SumTerminsByUnitAndCreditAccount(ctx, tenantID, c.UnitID, financingCode)
+	if err != nil {
+		return domain.Zero, fmt.Errorf("hitung pencairan KPR terkumpul: %w", err)
+	}
+	remaining := c.LoanAmount.Sub(disbursed)
+	if remaining.IsNeg() {
+		remaining = domain.Zero
+	}
+	return remaining, nil
 }
 
 // ── RecordAkad — Event 3+4 atomik ────────────────────────────────────────────
@@ -577,7 +692,7 @@ func (s *Service) RecordAkad(ctx context.Context, tenantID uint64, req RecordBAS
 		return nil, fmt.Errorf("hitung total termin: %w", err)
 	}
 
-	// ── Validasi advance vs sale price ───────────────────────────────────────
+	// ── Gross harga rumah ──────────────────────────────────────────────────────
 	var gross domain.Money
 	var ppn domain.Money
 	if req.IsVAT {
@@ -586,65 +701,60 @@ func (s *Service) RecordAkad(ctx context.Context, tenantID uint64, req RecordBAS
 	} else {
 		gross = req.SalePrice
 	}
-
-	if totalAdvance.GreaterThan(gross) {
-		return nil, ErrAdvanceExceedsSalePrice
-	}
-
-	// ── Gate Akad scheme (Increment 3/7) + resolusi akun piutang via policy ───
-	// Kontrak legacy / tanpa scheme flow → gate lewat & akun default 1-2000
-	// (perilaku lama). KPR pasca-akad → sisa tagihan didebit ke piutang bank
-	// (ResolveReceivableAccount — approval note #1: dari konfigurasi, bukan hardcode).
-	receivableCode, err := s.schemeAkadGuard(ctx, tenantID, req.UnitID, totalAdvance, gross)
-	if err != nil {
-		return nil, err
-	}
-
-	// Gate Biaya Realisasi (K-2) DICABUT di W-5 — keputusan klien D-3: BAST tidak
-	// boleh mensyaratkan biaya realisasi lunas. Sisanya diakui sebagai Piutang
-	// Customer di dalam transaksi BAST (RealizationRecognizer, dipanggil dari
-	// repository bersama jurnalnya).
-
-	// ── Resolve account IDs ───────────────────────────────────────────────────
-	// UAT Batch 2 §2: akun pendapatan dari mapping Product Catalog unit
-	// (rumah/ruko/kavling/… masing-masing bisa punya akun sendiri, COA-driven).
-	// M-1: kode sudah dipastikan sah oleh resolveUnitPolicy di atas — tidak ada
-	// lagi "kalau resolver error, pakai 4-1000".
-	accIDs, err := s.resolveAccounts(ctx, tenantID, req.IsVAT, receivableCode, policy.RevenueAccountCode)
-	if err != nil {
-		return nil, err
-	}
-
-	// ── Build Event 3 lines ───────────────────────────────────────────────────
 	pid := unit.ProjectID
 	uid := req.UnitID
-	revenueLines := s.buildEvent3Lines(accIDs, pid, uid, unit.PhaseID, req.SalePrice, ppn, totalAdvance, gross)
-
-	// ── Build Event 4 lines ───────────────────────────────────────────────────
-	var cogsLines []JournalLineInput
-	if !hpp.Total().IsZero() {
-		cogsLines, err = s.buildEvent4Lines(ctx, tenantID, accIDs, pid, uid, unit.PhaseID, hpp)
-		if err != nil {
-			return nil, err
-		}
-	}
 
 	// ── Produk Tambahan: Kelebihan Tanah (kelebihan-tanah-booking-integration-2026-08) ──
+	// Disiapkan LEBIH AWAL (bug 2026-09-04) — bukan lagi setelah Event3/4
+	// dibangun — karena validasi advance-vs-harga di bawah butuh gross tanah
+	// (landParams.GrossAmount) untuk kontrak yang membawa komponen tanah.
 	// Kontrak unit ini mungkin punya komponen tanah (dibawa dari Booking atau
 	// diisi langsung saat CreateContract). Disiapkan (BUKAN dieksekusi) di sini
 	// via PrepareBundledAkad — hasilnya diteruskan ke Execute (repository.go)
 	// untuk diposting ATOMIK bersama Event3/4 unit di transaksi yang sama
 	// (§D3: revenue+HPP tanah = jurnal sendiri, timing identik dengan Akad
-	// rumah, akun debit = akun piutang/pembiayaan yang SAMA sudah di-resolve
-	// di atas — tidak ada leg kas/bank kedua).
+	// rumah).
+	//
+	// KOREKSI KLIEN (2026-08-31): akun debit piutang tanah TIDAK BOLEH ikut
+	// accIDs.piutang/receivableCode di bawah — itu hasil ResolveReceivableAccount
+	// milik SKEMA PEMBIAYAAN RUMAH, yang untuk KPR pada state Akad resolve ke
+	// Piutang Bank (1-2200, T-3). Kelebihan Tanah bukan bagian dari KPR — bank
+	// tidak pernah membiayainya — jadi piutangnya SELALU ke Piutang Customer
+	// (accountCodePiutang, 1-2000), independen dari skema pembiayaan rumah.
+	// ── Buyer Credit — resolusi kontrak, dipakai konsumsi otomatis Akad ────────
+	// SaleContractID kini WAJIB diresolusi untuk SEMUA Akad (bukan hanya yang
+	// membawa komponen tanah): BASTAtomicWriter.Execute memakainya utk menutup
+	// SISA saldo kredit buyer yang dikonsumsi oleh netting Uang Muka Penjualan
+	// di Event 3 (lihat consumeRemainingCreditInTx). Kontrak tak ditemukan
+	// (mis. data legacy tanpa SaleContract formal) dibiarkan 0 — Execute hanya
+	// menuntut nilai ini bila memang ada sisa saldo kredit untuk ditutup.
 	var landParams *land.RecordAkadParams
+	var landReceivableID uint64
+	var saleContractID uint64
+	// contract dihoist ke scope RecordAkad (bukan lagi lokal ke blok Kelebihan
+	// Tanah) — Item 7A butuh akses SaleContract penuh untuk resolusi split
+	// Dana Jaminan Bank/Piutang Usaha di bawah.
+	var contract *SaleContract
 	if s.contracts != nil {
-		if contract, cerr := s.contracts.FindContractByUnitID(ctx, tenantID, req.UnitID); cerr == nil && contract.LandStockID != nil {
+		var cerr error
+		contract, cerr = s.contracts.FindContractByUnitID(ctx, tenantID, req.UnitID)
+		if cerr != nil && !errors.Is(cerr, ErrContractNotFound) {
+			return nil, fmt.Errorf("resolve kontrak unit %d: %w", req.UnitID, cerr)
+		}
+		if cerr == nil {
+			saleContractID = contract.ID
+		}
+		if cerr == nil && contract.LandStockID != nil {
 			if contract.LandReservationID == nil || contract.LandQuantityM2 == nil {
 				return nil, ErrLandComponentRequiresLandStock
 			}
 			if s.landAkad == nil {
 				return nil, ErrLandAkadPreparerNotConfigured
+			}
+			var aerr error
+			landReceivableID, aerr = s.accounts.FindAccountIDByCode(ctx, tenantID, accountCodePiutang)
+			if aerr != nil {
+				return nil, fmt.Errorf("resolve akun piutang Kelebihan Tanah: %w", aerr)
 			}
 			var priceSnapshot domain.Money
 			if contract.LandUnitPriceSnapshot != nil {
@@ -663,8 +773,8 @@ func (s *Service) RecordAkad(ctx context.Context, tenantID uint64, req RecordBAS
 				UnitPriceSnapshot:     priceSnapshot,
 				IsPKP:                 req.IsVAT,
 				VATRateSnapshot:       req.VATRate,
-				ReceivableAccountID:   accIDs.piutang,
-				ReceivableAccountCode: receivableCode,
+				ReceivableAccountID:   landReceivableID,
+				ReceivableAccountCode: accountCodePiutang,
 				RecognitionDate:       req.BASTDate,
 				CreatedBy:             req.CreatedBy,
 			})
@@ -675,28 +785,146 @@ func (s *Service) RecordAkad(ctx context.Context, tenantID uint64, req RecordBAS
 		}
 	}
 
+	// ── Pemisahan advance rumah vs Kelebihan Tanah + validasi vs harga (bug 2026-09-04) ──
+	// totalAdvance adalah SATU angka gabungan: kontrak Tunai lump-sum tanpa
+	// baris payment_schedules pra-Akad menaruh SELURUH termin (rumah+tanah)
+	// sebagai satu Uang Muka Penjualan. Bagian rumah untuk Event 3 di-cap ke
+	// gross rumah — tanpa cap ini "piutang := gross.Sub(advance)" di
+	// buildEvent3Lines bisa jadi NEGATIF dan ditolak posting service
+	// (ErrLineNegative). Sisa (landAdvance) secara ekonomi milik Kelebihan
+	// Tanah, dinetkan terpisah ke piutang tanah (landAdvanceLines di bawah) —
+	// bukan hilang, bukan double count.
+	houseAdvance := totalAdvance
+	if houseAdvance.GreaterThan(gross) {
+		houseAdvance = gross
+	}
+	landAdvance := totalAdvance.Sub(houseAdvance)
+	landGross := domain.Zero
+	if landParams != nil {
+		landGross = landParams.GrossAmount
+	}
+	if landAdvance.GreaterThan(landGross) {
+		return nil, ErrAdvanceExceedsSalePrice
+	}
+
+	// ── Gate Akad scheme (Increment 3/7) + resolusi akun piutang via policy ───
+	// Kontrak legacy / tanpa scheme flow → gate lewat & akun default 1-2000
+	// (perilaku lama). KPR pasca-akad → sisa tagihan didebit ke piutang bank
+	// (ResolveReceivableAccount — approval note #1: dari konfigurasi, bukan hardcode).
+	receivableCode, err := s.schemeAkadGuard(ctx, tenantID, req.UnitID, totalAdvance, gross)
+	if err != nil {
+		return nil, err
+	}
+
+	// ── Item 7A (UAT 2026-09-07): split Dana Jaminan Bank vs Piutang Usaha ────
+	// Kontrak KPR-financed (FinancingReceivableAccount terkonfigurasi di
+	// scheme params) memecah sisa tagihan (piutangTotal = gross − houseAdvance)
+	// menjadi DUA baris SEKALIGUS di Akad: Dana Jaminan Bank = min(Nilai
+	// Persetujuan KPR Bank, piutangTotal); sisanya (jika ada, mis. selisih DP
+	// bank vs harga unit) = Piutang Usaha — BUKAN direklas belakangan saat
+	// pencairan (itu bug lama, sudah dicabut di reclassOnStateChange/7C).
+	// Kontrak non-KPR/legacy: perilaku lama persis (financingCode="" →
+	// financingAmount selalu nol, receivableCode dari schemeAkadGuard dipakai
+	// apa adanya).
+	piutangTotal := gross.Sub(houseAdvance)
+	if piutangTotal.IsNeg() {
+		piutangTotal = domain.Zero
+	}
+	financingCode := ""
+	financingAmount := domain.Zero
+	receivableAmount := piutangTotal
+	if contract != nil {
+		candidateFinancingCode, defaultReceivableCode := s.schemeAkadSplitAccounts(ctx, contract)
+		// Split hanya aktif bila state SAAT INI sudah `akad` — dibuktikan
+		// dengan receivableCode (hasil schemeAkadGuard, berbasis state) SUDAH
+		// SAMA dengan kode financing. BAST yang terjadi SEBELUM Akad (mis.
+		// gate dp_paid) tetap 100% ke Piutang Usaha di sini; pemecahan baru
+		// terjadi nanti saat event Akad benar-benar dipicu pasca-BAST (lihat
+		// reclassOnStateChange/reclassToFinancingIfBAST) — bukan diantisipasi
+		// lebih awal, karena bank belum tentu approve di titik BAST ini.
+		if candidateFinancingCode != "" && receivableCode == candidateFinancingCode {
+			financingCode = candidateFinancingCode
+			approved, aerr := s.resolveBankApprovedAmount(ctx, tenantID, contract, req.BankApprovedAmount)
+			if aerr != nil {
+				return nil, aerr
+			}
+			financingAmount = approved
+			if financingAmount.GreaterThan(piutangTotal) {
+				financingAmount = piutangTotal
+			}
+			receivableAmount = piutangTotal.Sub(financingAmount)
+			if defaultReceivableCode != "" {
+				receivableCode = defaultReceivableCode
+			}
+		}
+	}
+
+	// Gate Biaya Realisasi (K-2) DICABUT di W-5 — keputusan klien D-3: BAST tidak
+	// boleh mensyaratkan biaya realisasi lunas. Sisanya diakui sebagai Piutang
+	// Customer di dalam transaksi BAST (RealizationRecognizer, dipanggil dari
+	// repository bersama jurnalnya).
+
+	// ── Resolve account IDs ───────────────────────────────────────────────────
+	// UAT Batch 2 §2: akun pendapatan dari mapping Product Catalog unit
+	// (rumah/ruko/kavling/… masing-masing bisa punya akun sendiri, COA-driven).
+	// M-1: kode sudah dipastikan sah oleh resolveUnitPolicy di atas — tidak ada
+	// lagi "kalau resolver error, pakai 4-1000".
+	accIDs, err := s.resolveAccountsWithFinancing(ctx, tenantID, req.IsVAT, receivableCode, financingCode, policy.RevenueAccountCode)
+	if err != nil {
+		return nil, err
+	}
+
+	// ── Build Event 3 lines — advance di-cap ke gross rumah (houseAdvance) ────
+	revenueLines := s.buildEvent3Lines(accIDs, pid, uid, unit.PhaseID, req.SalePrice, ppn, houseAdvance, financingAmount, receivableAmount)
+
+	// ── Build Event 4 lines ───────────────────────────────────────────────────
+	var cogsLines []JournalLineInput
+	if !hpp.Total().IsZero() {
+		cogsLines, err = s.buildEvent4Lines(ctx, tenantID, accIDs, pid, uid, unit.PhaseID, hpp)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// ── Netting advance Kelebihan Tanah (bug 2026-09-04) ──────────────────────
+	// Bagian uang muka gabungan yang melebihi harga rumah (landAdvance) sudah
+	// dikapitalisasi sebagai kas diterima, tapi TIDAK dinolkan oleh Event 3
+	// (yang cuma menyentuh houseAdvance) — tanpa jurnal ini saldo Uang Muka
+	// Penjualan menyisakan landAdvance selamanya (yatim, tak pernah dinolkan)
+	// SEKALIGUS piutang Kelebihan Tanah yang baru dibuat Execute tampak utuh
+	// padahal sebagian/seluruhnya sudah lunas pra-Akad. Konsumsi sub-ledgernya
+	// (credit_applications + payment_allocations + cache paid_amount jadwal
+	// tanah) dilakukan di Execute (repository.go), atomik bersama jurnal ini.
+	var landAdvanceLines []JournalLineInput
+	if !landAdvance.IsZero() && !landAdvance.IsNeg() {
+		landAdvanceLines = s.buildLandAdvanceNettingLines(accIDs.ump, landReceivableID, pid, uid, unit.PhaseID, landAdvance)
+	}
+
 	// ── Eksekusi atomik (Event 3+4 + update unit status) ─────────────────────
 	params := BASTAtomicParams{
-		TenantID:     tenantID,
-		UnitID:       req.UnitID,
-		ProjectID:    unit.ProjectID,
-		PhaseID:      unit.PhaseID,
-		BASTDate:     req.BASTDate,
-		BuyerRef:     req.BuyerRef,
-		CreatedBy:    req.CreatedBy,
-		SalePrice:    req.SalePrice,
-		IsVAT:        req.IsVAT,
-		VATRate:      req.VATRate,
-		TotalAdvance: totalAdvance,
-		HPPLand:      hpp.Land,
-		HPPHard:      hpp.Hard,
-		HPPSoft:      hpp.Soft,
-		HPPFinancing: hpp.Financing,
-		HPPMethod:    hppMethod,
-		Snapshot:     snapshot,
-		RevenueLines: revenueLines,
-		COGSLines:    cogsLines,
-		Land:         landParams,
+		TenantID:         tenantID,
+		UnitID:           req.UnitID,
+		ProjectID:        unit.ProjectID,
+		PhaseID:          unit.PhaseID,
+		BASTDate:         req.BASTDate,
+		BuyerRef:         req.BuyerRef,
+		CreatedBy:        req.CreatedBy,
+		SalePrice:        req.SalePrice,
+		IsVAT:            req.IsVAT,
+		VATRate:          req.VATRate,
+		TotalAdvance:     totalAdvance,
+		HPPLand:          hpp.Land,
+		HPPHard:          hpp.Hard,
+		HPPSoft:          hpp.Soft,
+		HPPFinancing:     hpp.Financing,
+		HPPMethod:        hppMethod,
+		Snapshot:         snapshot,
+		RevenueLines:     revenueLines,
+		COGSLines:        cogsLines,
+		LandAdvance:      landAdvance,
+		LandAdvanceLines: landAdvanceLines,
+		Land:             landParams,
+		SaleContractID:   saleContractID,
 	}
 	rec, err := s.bastWriter.Execute(ctx, params)
 	if err != nil {
@@ -758,6 +986,10 @@ type resolvedAccounts struct {
 	hard       uint64
 	soft       uint64
 	financing  uint64
+	// financingReceivable (Item 7A, UAT 2026-09-07): akun Dana Jaminan Bank
+	// (mis. 1-2200) — TERPISAH dari `financing` (1-3300, biaya HPP financing).
+	// Hanya di-resolve saat kontrak KPR-financed (schemeAkadSplitAccounts).
+	financingReceivable uint64
 }
 
 // resolveAccounts me-resolve seluruh akun jurnal BAST. receivableCode berasal
@@ -768,11 +1000,19 @@ type resolvedAccounts struct {
 // Kode pendapatan selalu berasal dari domain.ProductPolicy yang sudah divalidasi
 // (resolveUnitPolicy); kosong berarti seam salah pasang → tolak sebelum jurnal.
 func (s *Service) resolveAccounts(ctx context.Context, tenantID uint64, needPPN bool, receivableCode, revenueCode string) (resolvedAccounts, error) {
+	return s.resolveAccountsWithFinancing(ctx, tenantID, needPPN, receivableCode, "", revenueCode)
+}
+
+// resolveAccountsWithFinancing (Item 7A, UAT 2026-09-07) tambahan dari
+// resolveAccounts: financingReceivableCode kosong = perilaku lama persis
+// (ra.financingReceivable tetap 0). Non-kosong = kontrak KPR-financed di
+// Akad ini — resolve akun Dana Jaminan Bank juga.
+func (s *Service) resolveAccountsWithFinancing(ctx context.Context, tenantID uint64, needPPN bool, receivableCode, financingReceivableCode, revenueCode string) (resolvedAccounts, error) {
 	var ra resolvedAccounts
 	var err error
 
 	lookup := func(code string, dest *uint64) {
-		if err != nil {
+		if err != nil || code == "" {
 			return
 		}
 		*dest, err = s.accounts.FindAccountIDByCode(ctx, tenantID, code)
@@ -783,6 +1023,7 @@ func (s *Service) resolveAccounts(ctx context.Context, tenantID uint64, needPPN 
 	}
 	lookup("2-2000", &ra.ump)
 	lookup(receivableCode, &ra.piutang)
+	lookup(financingReceivableCode, &ra.financingReceivable)
 	lookup(revenueCode, &ra.pendapatan)
 	if needPPN {
 		lookup("2-3000", &ra.ppnKeluar)
@@ -798,11 +1039,20 @@ func (s *Service) resolveAccounts(ctx context.Context, tenantID uint64, needPPN 
 
 // buildEvent3Lines membangun baris jurnal Event 3 (pengakuan pendapatan).
 // Hanya baris dengan nominal > 0 yang disertakan (karena PostingService menolak baris nol).
+//
+// financingAmount+receivableAmount HARUS persis sama dengan (gross − advance)
+// — caller (RecordAkad) yang menjamin ini (Item 7A, UAT 2026-09-07): untuk
+// kontrak non-KPR/legacy, financingAmount selalu nol dan receivableAmount =
+// gross−advance persis seperti perilaku lama (satu baris piutang). Untuk
+// kontrak KPR-financed, financingAmount = min(Nilai Persetujuan KPR Bank,
+// gross−advance) ke Dana Jaminan Bank, sisanya ke Piutang Usaha — dua baris
+// terpisah, diposting BERSAMAAN saat Akad (bukan direklas belakangan).
 func (s *Service) buildEvent3Lines(
 	acc resolvedAccounts,
 	projectID, unitID uint64,
 	phaseID *uint64,
-	salePrice, ppn, advance, gross domain.Money,
+	salePrice, ppn, advance domain.Money,
+	financingAmount, receivableAmount domain.Money,
 ) []JournalLineInput {
 	pid := projectID
 	uid := unitID
@@ -817,11 +1067,19 @@ func (s *Service) buildEvent3Lines(
 		})
 	}
 
-	// Dr Piutang (sisa yang belum dibayar, bruto jika PKP)
-	piutang := gross.Sub(advance)
-	if !piutang.IsZero() {
+	// Dr Dana Jaminan Bank (KPR) — hanya kontrak KPR-financed (Item 7A)
+	if !financingAmount.IsZero() {
 		lines = append(lines, JournalLineInput{
-			AccountID: acc.piutang, Debit: piutang,
+			AccountID: acc.financingReceivable, Debit: financingAmount,
+			ProjectID: &pid, PhaseID: phaseID, UnitID: &uid,
+			Description: "Dana Jaminan Bank (KPR) saat Akad — Nilai Persetujuan KPR Bank",
+		})
+	}
+
+	// Dr Piutang (sisa di luar Dana Jaminan Bank, bruto jika PKP)
+	if !receivableAmount.IsZero() {
+		lines = append(lines, JournalLineInput{
+			AccountID: acc.piutang, Debit: receivableAmount,
 			ProjectID: &pid, PhaseID: phaseID, UnitID: &uid,
 			Description: "piutang usaha saat BAST",
 		})
@@ -844,6 +1102,36 @@ func (s *Service) buildEvent3Lines(
 	}
 
 	return lines
+}
+
+// buildLandAdvanceNettingLines membangun jurnal penolan (netting) bagian
+// Uang Muka Penjualan yang secara ekonomi milik Kelebihan Tanah — bug
+// 2026-09-04: pada kontrak Tunai lump-sum, termin pra-Akad rumah+tanah
+// tercampur jadi satu Uang Muka Penjualan; Event 3 (buildEvent3Lines) hanya
+// menolkan bagian rumah (dicap ke gross rumah), sehingga sisanya
+// (landAdvance) harus dinolkan di sini terhadap piutang Kelebihan Tanah yang
+// baru dibuat Akad ini. Dr UMP / Cr Piutang Kelebihan Tanah — balanced,
+// tanpa baris negatif (dipanggil hanya saat landAdvance > 0).
+func (s *Service) buildLandAdvanceNettingLines(
+	umpAccountID, landReceivableAccountID uint64,
+	projectID, unitID uint64,
+	phaseID *uint64,
+	landAdvance domain.Money,
+) []JournalLineInput {
+	pid := projectID
+	uid := unitID
+	return []JournalLineInput{
+		{
+			AccountID: umpAccountID, Debit: landAdvance,
+			ProjectID: &pid, PhaseID: phaseID, UnitID: &uid,
+			Description: "nolkan uang muka penjualan (bagian Kelebihan Tanah) saat BAST",
+		},
+		{
+			AccountID: landReceivableAccountID, Credit: landAdvance,
+			ProjectID: &pid, PhaseID: phaseID, UnitID: &uid,
+			Description: "netting piutang Kelebihan Tanah dari uang muka pra-Akad",
+		},
+	}
 }
 
 // buildEvent4Lines membangun baris jurnal Event 4 (pengakuan HPP).
@@ -972,16 +1260,13 @@ func (s *Service) CreateContract(ctx context.Context, tenantID uint64, req Creat
 	// aktif (idempoten) sekaligus memvalidasi req.CustomerID != nil.
 	c.CustomerID = req.CustomerID
 
-	// kelebihan-tanah-booking-integration-2026-08: kontrak dibuat LANGSUNG tanpa
-	// Booking (req.BookingID nil) — komponen tanah (bila ada) diambil dari
-	// req.LandQuantityM2 di sini; s.contracts.SaveContract di bawah (jalur
-	// non-booking) reservasi atomik lewat land.ReserveTx saat c.LandQuantityM2
-	// != nil. Jalur booking (req.BookingID != nil) mengisi field yang sama dari
-	// Booking.Land* setelah ini — assignment di sini tidak boleh menimpanya,
-	// jadi hanya berlaku bila BookingID kosong.
-	if req.BookingID == nil {
-		c.LandQuantityM2 = req.LandQuantityM2
-	}
+	// kelebihan-tanah-konversi-kontrak-2026-08: komponen tanah (bila ada)
+	// SELALU diambil dari req.LandQuantityM2 di sini — baik kontrak langsung
+	// (BookingID nil, SaveContract mereservasi atomik lewat land.ReserveTx)
+	// maupun konversi booking (BookingID != nil, ConvertWithContractAtomic
+	// mereservasi atomik dengan pola yang sama). Booking TIDAK LAGI membawa
+	// komponen tanahnya sendiri — dipilih di Konversi Kontrak, bukan Booking.
+	c.LandQuantityM2 = req.LandQuantityM2
 
 	// Increment 3: dengan scheme flow aktif, kontrak baru WAJIB scheme + customer
 	// + sales person (approval note #4); params scheme dibekukan sebagai Terms
@@ -997,20 +1282,12 @@ func (s *Service) CreateContract(ctx context.Context, tenantID uint64, req Creat
 	// titipan→uang muka + buyer credit + booking converted + unit booked→reserved).
 	// Tanpa booking → jalur SaveContract lama.
 	if req.BookingID != nil {
-		bk, err := s.validateBookingForConversion(ctx, tenantID, *req.BookingID, req)
-		if err != nil {
+		if _, err := s.validateBookingForConversion(ctx, tenantID, *req.BookingID, req); err != nil {
 			return nil, err
 		}
-		// kelebihan-tanah-booking-integration-2026-08: bawa komponen tanah dari
-		// booking ke kontrak SEBELUM convertBookingWithContract men-Create(c) —
-		// reservasi tanah tetap `active` melewati konversi (lihat land.CloseReservationTx:
-		// hanya dipanggil saat release/Akad, bukan saat booking→kontrak).
-		if bk.LandQuantityM2 != nil {
-			c.LandStockID = bk.LandStockID
-			c.LandReservationID = bk.LandReservationID
-			c.LandQuantityM2 = bk.LandQuantityM2
-			c.LandUnitPriceSnapshot = bk.LandUnitPriceSnapshot
-		}
+		// Kelebihan Tanah (bila c.LandQuantityM2 != nil, diisi di atas dari
+		// req.LandQuantityM2) direservasi atomik DI DALAM ConvertWithContractAtomic
+		// — pola identik SaveContract, lihat booking_repo.go.
 		if err := s.convertBookingWithContract(ctx, tenantID, *req.BookingID, c, req.CreatedBy); err != nil {
 			return nil, fmt.Errorf("konversi booking: %w", err)
 		}

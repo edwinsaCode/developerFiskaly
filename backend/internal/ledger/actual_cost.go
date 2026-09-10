@@ -28,6 +28,13 @@ type ActualCostScope struct {
 	PhaseID         *uint64 // nil = semua fase
 	UnitID          *uint64 // non-nil = hanya baris ber-tag unit ini
 	ProjectWideOnly bool    // true = hanya baris unit_id IS NULL
+
+	// ExcludeSource, bila diisi, mengecualikan SELURUH jurnal ber-source ini
+	// dari pembacaan (bukan hanya dari netting reversal). "" = tanpa
+	// pengecualian. Dipakai budget.GetRealisasiByProject untuk mengecualikan
+	// jurnal kapitalisasi RAB (source "rab_capitalization") dari realisasi
+	// Construction/Hard — lihat komentar di sana untuk alasan lengkapnya.
+	ExcludeSource string
 }
 
 // ActualCostByCode mengembalikan biaya aktual (netting kanonik) per kode akun.
@@ -37,7 +44,7 @@ func (q *QueryService) ActualCostByCode(ctx context.Context, tenantID uint64, co
 	}
 	qq := q.db.WithContext(ctx).
 		Table("journal_lines jl").
-		Select("a.code AS code, " + actualCostNettingExpr + " AS total").
+		Select("a.code AS code, "+actualCostNettingExpr+" AS total").
 		Joins("JOIN journal_entries je ON je.id = jl.journal_entry_id").
 		Joins("JOIN accounts a ON a.id = jl.account_id AND a.tenant_id = jl.tenant_id").
 		Where("jl.tenant_id = ? AND je.posted_at IS NOT NULL", tenantID).
@@ -55,6 +62,9 @@ func (q *QueryService) ActualCostByCode(ctx context.Context, tenantID uint64, co
 	}
 	if sc.ProjectWideOnly {
 		qq = qq.Where("jl.unit_id IS NULL")
+	}
+	if sc.ExcludeSource != "" {
+		qq = qq.Where("je.source <> ?", sc.ExcludeSource)
 	}
 
 	var rows []struct {

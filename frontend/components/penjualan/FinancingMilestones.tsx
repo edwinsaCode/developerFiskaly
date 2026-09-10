@@ -221,6 +221,7 @@ export function FinancingMilestones({ unitId, token, onPaymentRecorded, refreshK
           unitId={unitId}
           listPrice={contract.dpp_amount}
           token={token}
+          isKPR
           onBeforeSubmit={async () => {
             // GateAkad KPR mensyaratkan state SUDAH "akad" saat RecordAkad
             // dipanggil — pindahkan state dulu (bank_approved → akad), baru

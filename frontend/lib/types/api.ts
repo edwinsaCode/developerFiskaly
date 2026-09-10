@@ -226,12 +226,15 @@ export interface Unit {
 
 export type BudgetPlanStatus = "draft" | "active" | "superseded";
 
-// 6 kategori untuk BudgetItem (RAB). marketing + other = expense-only (bukan Persediaan).
+// 6 kategori untuk BudgetItem (RAB). RULE KLIEN FREEZE (2026-09-04): HANYA
+// land + construction yang dikapitalisasi ke Persediaan/HPP. soft, operational
+// (dahulu "financing"), marketing, other = expense-only — beban periode saat
+// realisasi, bukan HPP walaupun tercatat di RAB.
 export type BudgetCategory =
   | "land"
   | "construction"
   | "soft"
-  | "financing"
+  | "operational"
   | "marketing"
   | "other";
 
@@ -284,9 +287,13 @@ export interface RABvsRealisasiReport {
 }
 
 // ── Biaya (Cost Entry) ────────────────────────────────────────────────────────
-// 4 kategori valid untuk CostEntry (backend menolak marketing/other di endpoint ini).
-// marketing/other adalah expense-only, dicatat melalui jurnal manual terpisah.
-export type CostCategory = "land" | "hard" | "soft" | "financing";
+// 6 kategori valid untuk CostEntry (client final note 2026-09-10: Pemasaran +
+// Lain-lain kini tersedia di Form Biaya, sama seperti RAB — lihat BudgetCategory).
+// RULE KLIEN FREEZE (2026-09-04): hanya land + hard yang dikapitalisasi ke
+// Persediaan/HPP. soft + operational (dahulu "financing") + marketing + other
+// tetap valid di sini tapi selalu diposting sebagai beban (tier overhead, tidak
+// boleh unit_id) — lihat resolveTier di backend internal/cost/service.go.
+export type CostCategory = "land" | "hard" | "soft" | "operational" | "marketing" | "other";
 export type PaymentMethod = "bank" | "payable";
 
 export interface CostEntry {
@@ -295,6 +302,13 @@ export interface CostEntry {
   unit_id?: number;
   phase_id?: number;
   category: CostCategory;
+  /**
+   * Subkategori Konstruksi (UAT 2026-09-07): produksi_subsidi|produksi_komersial|
+   * sarana_prasarana|perizinan. Hanya bermakna saat category="hard"; wajib diisi
+   * bila biaya ini tidak ditautkan ke unit tertentu (pool project-wide), karena
+   * itulah yang menentukan unit mana yang berhak menerima alokasi HPP-nya.
+   */
+  hard_subcategory?: string;
   amount: string;
   payment_method: PaymentMethod;
   bank_account_code?: string;
@@ -438,7 +452,7 @@ export interface DepreciationRunResult {
 // ── Penjualan ─────────────────────────────────────────────────────────────────
 
 export type SalePaymentType  = "kpr" | "tunai";
-export type ScheduleType     = "dp" | "installment" | "final";
+export type ScheduleType     = "dp" | "installment" | "final" | "land";
 export type ScheduleStatus   = "scheduled" | "received" | "overdue";
 
 export interface SaleRecord {
@@ -502,7 +516,7 @@ export interface SaleContract {
 
 // ── Billing: Invoice ──────────────────────────────────────────────────────────
 
-export type InvoiceType   = "DP" | "TERMIN" | "PELUNASAN" | "KEKURANGAN";
+export type InvoiceType   = "DP" | "TERMIN" | "PELUNASAN" | "KEKURANGAN" | "REALISASI" | "KELEBIHAN_TANAH";
 export type InvoiceStatus = "issued" | "paid" | "overdue" | "cancelled";
 
 export interface Invoice {
@@ -527,7 +541,7 @@ export interface InvoiceSummary extends Invoice {
 }
 
 /** W-13: label bisnis terstruktur "Jenis Penerimaan" — lihat backend internal/sale/model.go. */
-export type TerminKind = "dp" | "installment" | "final_payment" | "other" | "bank_disbursement";
+export type TerminKind = "dp" | "installment" | "final_payment" | "other" | "bank_disbursement" | "land_excess";
 
 export interface TerminPayment {
   id: number;
@@ -649,6 +663,8 @@ export interface NeracaLine {
 
 export interface NeracaReport {
   as_of: string;
+  /** Item 5: batas bawah filter tanggal, hadir hanya bila user mengisi Start Date */
+  from?: string;
   aset: NeracaLine[];
   kewajiban: NeracaLine[];
   ekuitas: NeracaLine[];
@@ -658,6 +674,8 @@ export interface NeracaReport {
   /** total_ekuitas + laba berjalan — angka "Total Ekuitas" yang benar untuk display */
   total_ekuitas_efektif?: string;
   laba_rugi_tahun_berjalan: string;
+  /** Item 5: Laba Rugi jendela [from, as_of] — MURNI INFORMASI, tidak ikut Total Ekuitas/IsBalanced */
+  laba_rugi_periode_terpilih?: string;
   total_kewajiban_ekuitas: string;
   is_balanced: boolean;
 }
@@ -674,6 +692,8 @@ export interface PLLine {
 // (-) Beban Pajak = Laba Bersih Setelah Pajak (laba_rugi_bersih).
 export interface PLReport {
   as_of: string;
+  /** Item 5: batas bawah filter tanggal, hadir hanya bila user mengisi Start Date */
+  from?: string;
   project_id?: number;
 
   pendapatan: PLLine[];
@@ -816,6 +836,11 @@ export interface StatementScheduleLine {
   termin_payment_id?: number; // untuk cetak kwitansi
   overdue: boolean;
   days_overdue: number;
+  // P1 Kelebihan Tanah: hadir hanya pada baris type="land" — sumber otoritatif
+  // detail produk (m², harga/m²) untuk kartu PEMBAYARAN di Unit Detail.
+  land_sale_id?: number;
+  land_quantity_m2?: string;
+  land_unit_price?: string;
 }
 
 // ── Collection Transaction Flow ───────────────────────────────────────────────
@@ -936,6 +961,10 @@ export interface CustomerStatement {
 export interface StatementExposure {
   house_outstanding: string;
   house_overdue: string;
+  /** Piutang Kelebihan Tanah (payment_schedules type=land) — terpisah dari
+   *  house_outstanding sejak migrasi label ini (sebelumnya tergabung diam-diam). */
+  land_outstanding: string;
+  land_overdue: string;
   realization_outstanding: string;
   realization_overdue: string;
   total_outstanding: string;
@@ -1211,7 +1240,7 @@ export interface APInvoiceLine {
   project_id?: number;   // kosong untuk tagihan overhead tanpa proyek
   unit_id?: number;      // hanya terisi untuk cost_tier "direct"
   phase_id?: number;
-  category: string;      // land|hard|soft|financing|marketing|other
+  category: string;      // land|hard|soft|operational|marketing|other
   cost_tier: string;     // direct|shared|overhead
   amount: string;        // DPP baris ini — rupiah, string
   date: string;

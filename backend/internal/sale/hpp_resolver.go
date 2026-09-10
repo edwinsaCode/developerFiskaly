@@ -98,14 +98,17 @@ func (r *BudgetedHPPResolver) ResolveHPP(ctx context.Context, tenantID, projectI
 	}
 
 	var breakdown domain.UnitCostBreakdown
-	var unitWeight decimal.Decimal
+	var unitWeight, unitLandWeight decimal.Decimal
 	totalWeight := decimal.Zero
+	totalLandWeight := decimal.Zero
 	found := false
 	for _, res := range results {
-		totalWeight = totalWeight.Add(res.Weight) // denominator basis (Σ semua unit)
+		totalWeight = totalWeight.Add(res.Weight)             // denominator basis Hard/Soft/Financing (Σ semua unit)
+		totalLandWeight = totalLandWeight.Add(res.LandWeight) // denominator Land = Σ land_area unit (Item 9 — lihat engine.go)
 		if res.UnitID == unitID {
 			breakdown = res.Allocated // porsi RAB murni; Direct diabaikan (hindari double-count)
 			unitWeight = res.Weight
+			unitLandWeight = res.LandWeight
 			found = true
 		}
 	}
@@ -118,17 +121,27 @@ func (r *BudgetedHPPResolver) ResolveHPP(ctx context.Context, tenantID, projectI
 	if totalWeight.IsPositive() {
 		pct = unitWeight.Div(totalWeight).Mul(decimal.NewFromInt(100))
 	}
+	// Land TIDAK PERNAH ikut basis Hard/Soft/Financing (rule klien UAT #1) —
+	// punya basisnya sendiri, land_area per unit (Item 9, UAT 2026-09-07) —
+	// audit trail-nya harus mencerminkan itu, bukan basis/pct yang sama dengan
+	// kelas lain, supaya "Amount ≈ pool_kelas × pct%" tetap benar untuk Land.
+	landPct := decimal.Zero
+	if totalLandWeight.IsPositive() {
+		landPct = unitLandWeight.Div(totalLandWeight).Mul(decimal.NewFromInt(100))
+	}
 
 	draft := &SnapshotDraft{
-		ProjectID:            projectID,
-		PhaseID:              phaseID,
-		UnitID:               unitID,
-		BudgetPlanID:         basis.PlanID,
-		BudgetPlanVersion:    basis.Version,
-		Basis:                string(allocBasis),
-		BasisValue:           unitWeight,
-		AllocationPercentage: pct,
-		Breakdown:            breakdown,
+		ProjectID:                projectID,
+		PhaseID:                  phaseID,
+		UnitID:                   unitID,
+		BudgetPlanID:             basis.PlanID,
+		BudgetPlanVersion:        basis.Version,
+		Basis:                    string(allocBasis),
+		BasisValue:               unitWeight,
+		AllocationPercentage:     pct,
+		LandBasisValue:           unitLandWeight,
+		LandAllocationPercentage: landPct,
+		Breakdown:                breakdown,
 	}
 	// P0-4 D1: pin version basis alokasi (best-effort; kegagalan pin tidak
 	// membatalkan BAST — snapshot tanpa pin diperlakukan legacy oleh true-up).

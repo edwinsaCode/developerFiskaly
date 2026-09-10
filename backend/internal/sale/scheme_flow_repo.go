@@ -10,6 +10,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"esaproperti/internal/domain"
 	"esaproperti/internal/scheme"
 )
 
@@ -47,6 +48,23 @@ func (r *GORMRepository) UpdateContractSchemeFields(ctx context.Context, tenantI
 		Updates(updates)
 	if res.Error != nil {
 		return fmt.Errorf("UpdateContractSchemeFields: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrContractNotFound
+	}
+	return nil
+}
+
+// UpdateContractLoanAmount (Item 7A, UAT 2026-09-07) menyimpan Nilai
+// Persetujuan KPR Bank — diisi SAAT AKAD, dasar pemisahan Dana Jaminan Bank
+// vs Piutang Usaha di Event 3 (lihat RecordAkad) dan sisa pencairan di
+// financingOutstanding.
+func (r *GORMRepository) UpdateContractLoanAmount(ctx context.Context, tenantID, contractID uint64, amount domain.Money) error {
+	res := r.db.WithContext(ctx).Model(&SaleContract{}).
+		Where("id = ? AND tenant_id = ?", contractID, tenantID).
+		Updates(map[string]interface{}{"loan_amount": amount})
+	if res.Error != nil {
+		return fmt.Errorf("UpdateContractLoanAmount: %w", res.Error)
 	}
 	if res.RowsAffected == 0 {
 		return ErrContractNotFound
@@ -95,11 +113,18 @@ func (r *GORMRepository) ListPaymentEvents(ctx context.Context, tenantID, contra
 // SupersedeUnpaidSchedules menandai baris jadwal TANPA pembayaran menjadi
 // superseded (BS-5). Baris dengan paid_amount > 0 atau status received TIDAK
 // disentuh — alokasinya adalah fakta sub-ledger.
+//
+// type <> 'land' DISENGAJA: reschedule/konversi scheme KPR hanya menyangkut
+// cicilan unit — Kelebihan Tanah bukan bagian dari skema pembiayaan rumah
+// (v. service.go komentar "akun debit piutang tanah TIDAK BOLEH ikut
+// receivableCode skema") dan tidak boleh ikut disupersede saat unit
+// reschedule/konversi scheme.
 func (r *GORMRepository) SupersedeUnpaidSchedules(ctx context.Context, tenantID, contractID uint64) error {
 	err := r.db.WithContext(ctx).Model(&PaymentSchedule{}).
-		Where("tenant_id = ? AND sale_contract_id = ? AND status IN ? AND paid_amount = 0",
+		Where("tenant_id = ? AND sale_contract_id = ? AND status IN ? AND paid_amount = 0 AND type <> ?",
 			tenantID, contractID,
-			[]ScheduleStatus{ScheduleStatusScheduled, ScheduleStatusOverdue}).
+			[]ScheduleStatus{ScheduleStatusScheduled, ScheduleStatusOverdue},
+			ScheduleTypeLand).
 		Update("status", ScheduleStatusSuperseded).Error
 	if err != nil {
 		return fmt.Errorf("SupersedeUnpaidSchedules: %w", err)

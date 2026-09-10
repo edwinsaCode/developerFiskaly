@@ -50,6 +50,34 @@ func bankLabel(code string) string {
 	}
 }
 
+// terminKindLabel memetakan termin_payments.kind (sale.TerminKind, dibaca
+// sebagai string mentah — billing tidak boleh mengimpor sale, lihat catatan
+// LoadReceiptPrintData) ke label bisnis customer-facing yang dicetak di
+// kolom Keterangan kwitansi. Nilai string HARUS tetap sinkron dengan
+// sale.TerminKindLabel; kosong (termin lama tanpa kind, atau kwitansi tanpa
+// termin terkait mis. booking/realisasi yang judulnya sudah jelas) → "".
+func terminKindLabel(kind string, installmentNo *int) string {
+	switch kind {
+	case "dp":
+		return "DP (Uang Muka)"
+	case "installment":
+		if installmentNo != nil && *installmentNo > 0 && *installmentNo < 9999 {
+			return "Cicilan ke-" + strconv.Itoa(*installmentNo)
+		}
+		return "Cicilan"
+	case "final_payment":
+		return "Pelunasan"
+	case "land_excess":
+		return "Kelebihan Tanah"
+	case "bank_disbursement":
+		return "Pencairan Dana Bank"
+	case "other":
+		return "Lainnya"
+	default:
+		return ""
+	}
+}
+
 // ── Terbilang (angka → kata) untuk kwitansi ──────────────────────────────────
 
 var terbilangUnits = [...]string{
@@ -223,7 +251,7 @@ table.rincian td.num { text-align: right; font-variant-numeric: tabular-nums; }
 <body>
 
 <div class="print-bar">
-  <h1>{{.CompanyName}} — {{if eq .ReceiptType "booking"}}Kwitansi Booking{{else if eq .ReceiptType "realization"}}Kwitansi Biaya Realisasi{{else if eq .ReceiptType "kpr_disbursement"}}Kwitansi Pencairan KPR{{else}}Bukti Pembayaran{{end}}</h1>
+  <h1>{{.CompanyName}} — {{if eq .ReceiptType "booking"}}Kwitansi Booking{{else if eq .ReceiptType "realization"}}Kwitansi Biaya Realisasi{{else if eq .ReceiptType "kpr_disbursement"}}Kwitansi Pencairan KPR{{else if .KindLabel}}Bukti Pembayaran — {{.KindLabel}}{{else}}Bukti Pembayaran{{end}}</h1>
   <button class="btn-print" onclick="window.print()">&#128438; Cetak / Simpan PDF</button>
 </div>
 
@@ -239,7 +267,7 @@ table.rincian td.num { text-align: right; font-variant-numeric: tabular-nums; }
       </div>
     </div>
     <div class="hdr-right">
-      <span class="doc-title">{{if eq .ReceiptType "booking"}}Kwitansi Booking{{else if eq .ReceiptType "realization"}}Kwitansi Biaya Realisasi{{else if eq .ReceiptType "kpr_disbursement"}}Kwitansi Pencairan KPR{{else}}Bukti Pembayaran{{end}}</span>
+      <span class="doc-title">{{if eq .ReceiptType "booking"}}Kwitansi Booking{{else if eq .ReceiptType "realization"}}Kwitansi Biaya Realisasi{{else if eq .ReceiptType "kpr_disbursement"}}Kwitansi Pencairan KPR{{else if .KindLabel}}Bukti Pembayaran — {{.KindLabel}}{{else}}Bukti Pembayaran{{end}}</span>
       {{/*
         Tidak ada baris keterangan akuntansi di bawah judul kwitansi.
 
@@ -304,9 +332,16 @@ table.rincian td.num { text-align: right; font-variant-numeric: tabular-nums; }
       <tr>
         <td>{{.ReceiptNumber}}</td>
         <td>{{fmtDate .ReceivedAt}}</td>
-        <td class="num">{{if .HasChargeSummary}}{{rupiah .ChargeOutstanding}}{{else if .HasSummary}}{{rupiah .Outstanding}}{{else}}&mdash;{{end}}</td>
+        {{/* Gap 2 (UAT 2026-09-08): kwitansi Booking WAJIB tampilkan Terutang
+             Rp0 secara eksplisit — TIDAK boleh jatuh ke "—" hanya karena unit
+             belum punya SaleContract (booking selalu terjadi sebelum kontrak
+             dibuat, ini adalah kondisi NORMAL, bukan data hilang). .Outstanding
+             sudah dipaksa domain.Zero utk Booking di GetReceiptPrintData
+             (Rule A tanpa syarat) — di sini tinggal dipastikan tampil terlepas
+             dari .HasSummary. */}}
+        <td class="num">{{if eq .ReceiptType "booking"}}{{rupiah .Outstanding}}{{else if .HasChargeSummary}}{{rupiah .ChargeOutstanding}}{{else if .HasSummary}}{{rupiah .Outstanding}}{{else}}&mdash;{{end}}</td>
         <td class="num">{{rupiah .Amount}}</td>
-        <td>Unit {{.UnitCode}} — {{.UnitType}}, {{.ProjectName}}{{if .Notes}}<br/><span style="font-size:0.76rem;color:#4a3d34">{{.Notes}}</span>{{end}}<br/><span style="font-size:0.74rem;color:#4a3d34">{{paymentTypeLabel .PaymentType}} · {{bankLabel .BankAccountCode}}</span></td>
+        <td>{{if and .KindLabel (eq .ReceiptType "house_payment")}}<strong>{{.KindLabel}}</strong> — {{end}}Unit {{.UnitCode}} — {{.UnitType}}, {{.ProjectName}}{{if .Notes}}<br/><span style="font-size:0.76rem;color:#4a3d34">{{.Notes}}</span>{{end}}<br/><span style="font-size:0.74rem;color:#4a3d34">{{paymentTypeLabel .PaymentType}} · {{bankLabel .BankAccountCode}}</span></td>
         <td class="num">{{if .HasSummary}}{{rupiah .Discount}}{{else}}&mdash;{{end}}</td>
       </tr>
     </tbody>
@@ -332,13 +367,21 @@ table.rincian td.num { text-align: right; font-variant-numeric: tabular-nums; }
   {{if and .HasSummary (not .HasChargeSummary)}}
   <!-- Ringkasan finansial kontrak — SATU sumber: sale.ContractFinancialSummary.
        Nilai NOL tetap ditampilkan (requirement). Terutang = nilai kontrak −
-       seluruh pembayaran yang telah diakui sistem (termasuk pencairan KPR). -->
+       seluruh pembayaran yang telah diakui sistem (termasuk pencairan KPR).
+       UAT 2026-09-03 #1: bila pembayaran ini ditarget ke SATU jadwal (mis.
+       Kelebihan Tanah), sel "Terutang" WAJIB memakai sisa jadwal itu sendiri
+       — bukan Outstanding gabungan seluruh kontrak (bug: kwitansi Kelebihan
+       Tanah menampilkan sisa harga rumah). -->
   <div class="summary-grid">
     <div class="sum-cell"><div class="sk">Harga Unit{{if not .PriceIsSnapshot}}*{{end}}</div><div class="sv">{{rupiah .UnitPrice}}</div></div>
     <div class="sum-cell"><div class="sk">Diskon</div><div class="sv">{{rupiah .Discount}}</div></div>
     <div class="sum-cell"><div class="sk">Nilai Kontrak</div><div class="sv">{{rupiah .NetContract}}</div></div>
     <div class="sum-cell"><div class="sk">Sudah Dibayar</div><div class="sv">{{rupiah .TotalPaid}}</div></div>
+    {{if .HasScheduleOutstanding}}
+    <div class="sum-cell terutang"><div class="sk">Sisa {{.ScheduleTypeLabel}}</div><div class="sv">{{rupiah .ScheduleOutstanding}}</div></div>
+    {{else}}
     <div class="sum-cell terutang"><div class="sk">Terutang</div><div class="sv">{{rupiah .Outstanding}}</div></div>
+    {{end}}
   </div>
   {{if not .PriceIsSnapshot}}<div class="sum-note">*&nbsp;Kontrak dibuat sebelum pencatatan harga unit — harga mengikuti nilai kontrak (DPP), diskon 0.</div>{{end}}
   {{end}}

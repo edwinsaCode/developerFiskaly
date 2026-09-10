@@ -33,6 +33,7 @@ export function BulkUnitWizard({ token, projectId, phases }: Props) {
   const [unitType, setUnitType] = useState("");
   const [typeLabel, setTypeLabel] = useState("");
   const [area, setArea] = useState("");
+  const [landArea, setLandArea] = useState("");
   const [listPrice, setListPrice] = useState("");
   const [phaseId, setPhaseId] = useState("");
   const [loading, setLoading] = useState(false);
@@ -65,7 +66,7 @@ export function BulkUnitWizard({ token, projectId, phases }: Props) {
 
   function reset() {
     setBlock(""); setUnitStart("1"); setUnitEnd(""); setUnitType("");
-    setTypeLabel(""); setArea(""); setListPrice(""); setPhaseId("");
+    setTypeLabel(""); setArea(""); setLandArea(""); setListPrice(""); setPhaseId("");
   }
 
   async function handleSubmit() {
@@ -79,6 +80,7 @@ export function BulkUnitWizard({ token, projectId, phases }: Props) {
         unit_type: unitType,
         type_label: typeLabel.trim() || undefined,
         saleable_area: area || undefined,
+        land_area: landArea || undefined,
         list_price: listPrice,
         phase_id: phaseId ? Number(phaseId) : undefined,
       });
@@ -128,7 +130,10 @@ export function BulkUnitWizard({ token, projectId, phases }: Props) {
             <Input label="Tipe (label)" value={typeLabel} onChange={(e) => setTypeLabel(e.target.value)} placeholder='mis. "36/72"' />
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Input label="Luas Tanah (m²)" type="number" step="0.01" value={area} onChange={(e) => setArea(e.target.value)} placeholder="72" />
+            <Input label="Luas Bangunan (m²)" type="number" step="0.01" value={area} onChange={(e) => setArea(e.target.value)} placeholder="72" />
+            <Input label="Luas Tanah (m²)" type="number" step="0.01" value={landArea} onChange={(e) => setLandArea(e.target.value)} placeholder="mis. 90 (sama semua unit di blok)" />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <RupiahInput label="Harga List (sama semua)" value={listPrice} onChange={setListPrice} error={listPrice && priceErr ? priceErr : undefined} />
           </div>
           {phases.length > 0 && (

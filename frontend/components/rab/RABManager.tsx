@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { BudgetPlan, BudgetItem, BudgetCategory, ProjectPhase } from "@/lib/types/api";
+import { CONSTRUCTION_SUBCATEGORIES, constructionSubcategoryLabel } from "@/lib/constants/constructionSubcategory";
 import { Rupiah } from "@/components/format/Rupiah";
 import { Persen } from "@/components/format/Persen";
 import { Tanggal } from "@/components/format/Tanggal";
@@ -32,18 +33,35 @@ import {
 
 // ── Konstanta kategori ────────────────────────────────────────────────────────
 
+// RULE KLIEN FREEZE (2026-09-04): HPP hanya land + construction (Tanah +
+// Hard Cost). soft dan operational (dahulu "financing") BUKAN lagi
+// kapitalisasi walaupun tercatat di RAB — isBeban=true untuk keduanya, sama
+// seperti marketing/other.
 const BUDGET_CATEGORIES: { value: BudgetCategory; label: string; isBeban: boolean }[] = [
-  { value: "land",         label: "Tanah",              isBeban: false },
-  { value: "construction", label: "Konstruksi",         isBeban: false },
-  { value: "soft",         label: "Biaya Lunak",        isBeban: false },
-  { value: "financing",    label: "Pendanaan",          isBeban: false },
-  { value: "marketing",    label: "Pemasaran (Beban)",  isBeban: true  },
-  { value: "other",        label: "Lain-lain (Beban)",  isBeban: true  },
+  { value: "land",         label: "Tanah",                                          isBeban: false },
+  { value: "construction", label: "Konstruksi (Produksi Subsidi/Komersial, Sarana & Prasarana, Perizinan)", isBeban: false },
+  { value: "soft",         label: "Biaya Lunak (Desain, Legal) — Beban, bukan HPP", isBeban: true  },
+  { value: "operational",  label: "Operasional — Beban, bukan HPP",                 isBeban: true  },
+  { value: "marketing",    label: "Pemasaran (Beban)",                              isBeban: true  },
+  { value: "other",        label: "Lain-lain (Beban)",                              isBeban: true  },
 ];
+
+function isBebanCategory(cat: BudgetCategory): boolean {
+  return BUDGET_CATEGORIES.find(c => c.value === cat)?.isBeban ?? false;
+}
 
 function categoryLabel(cat: BudgetCategory): string {
   return BUDGET_CATEGORIES.find(c => c.value === cat)?.label ?? cat;
 }
+
+// Saran subkategori untuk kategori NON-Konstruksi — HANYA memandu penamaan
+// agar konsisten. Kategori "construction" TIDAK lagi memakai saran bebas-teks:
+// pilihannya WAJIB salah satu dari CONSTRUCTION_SUBCATEGORIES di atas (lihat
+// AddItemForm), karena "Produksi" saja tidak cukup untuk menentukan HPP mana
+// (Subsidi/Komersial) yang menerima alokasi biayanya.
+const SUBCATEGORY_SUGGESTIONS: Partial<Record<BudgetCategory, string[]>> = {
+  soft: ["Desain", "Legal"],
+};
 
 // ── Props ─────────────────────────────────────────────────────────────────────
 
@@ -272,13 +290,17 @@ function PlanCard({ plan, items, phases, projectId, userEmail, canWrite, expande
                   <TableRow key={item.id}>
                     <Td>
                       <span className={`text-xs font-medium px-1.5 py-0.5 rounded
-                        ${["marketing","other"].includes(item.category)
+                        ${isBebanCategory(item.category)
                           ? "bg-warning-bg text-warning"
                           : "bg-accent-light text-accent"}`}>
                         {categoryLabel(item.category)}
                       </span>
                     </Td>
-                    <Td>{item.subcategory || <span className="text-text-tertiary">—</span>}</Td>
+                    <Td>
+                      {item.subcategory
+                        ? (item.category === "construction" ? constructionSubcategoryLabel(item.subcategory) : item.subcategory)
+                        : <span className="text-text-tertiary">—</span>}
+                    </Td>
                     <Td>{item.description || <span className="text-text-tertiary">—</span>}</Td>
                     <Td right><Rupiah value={item.budgeted_amount} /></Td>
                     {isDraft && canWrite && (
@@ -376,9 +398,16 @@ function AddItemForm({ projectId, planId, onAdded, onCancel, toast }: AddItemFor
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, startSave] = useTransition();
 
+  const isConstruction = form.category === "construction";
+
   function validate(): boolean {
     const e: Record<string, string> = {};
     if (!form.category) e.category = "Pilih kategori";
+    if (isConstruction && !CONSTRUCTION_SUBCATEGORIES.some(s => s.value === form.subcategory)) {
+      // UAT 2026-09-07: "Produksi" tunggal tidak cukup untuk menentukan HPP —
+      // wajib pilih salah satu dari 4 subkategori kanonik.
+      e.subcategory = "Pilih subkategori Konstruksi";
+    }
     const amountErr = validateRupiah(form.budgeted_amount);
     if (amountErr) e.budgeted_amount = amountErr;
     setErrors(e);
@@ -408,7 +437,12 @@ function AddItemForm({ projectId, planId, onAdded, onCancel, toast }: AddItemFor
         label="Kategori"
         required
         value={form.category}
-        onChange={e => setForm(f => ({ ...f, category: e.target.value as BudgetCategory }))}
+        onChange={e => {
+          const category = e.target.value as BudgetCategory;
+          // Ganti kategori → reset subkategori: nilai lama (mis. dari
+          // Konstruksi) tidak relevan untuk kategori lain, dan sebaliknya.
+          setForm(f => ({ ...f, category, subcategory: "" }));
+        }}
         error={errors.category}
       >
         <option value="">Pilih...</option>
@@ -416,12 +450,41 @@ function AddItemForm({ projectId, planId, onAdded, onCancel, toast }: AddItemFor
           <option key={c.value} value={c.value}>{c.label}</option>
         ))}
       </Select>
-      <Input
-        label="Subkategori"
-        placeholder="mis. Material"
-        value={form.subcategory}
-        onChange={e => setForm(f => ({ ...f, subcategory: e.target.value }))}
-      />
+      {isConstruction ? (
+        <Select
+          label="Subkategori"
+          required
+          value={form.subcategory}
+          onChange={e => setForm(f => ({ ...f, subcategory: e.target.value }))}
+          error={errors.subcategory}
+          hint="Produksi Subsidi dan Komersial dihitung terpisah — HPP masing-masing hanya jatuh ke unit dengan klasifikasi yang sama"
+        >
+          <option value="">Pilih...</option>
+          {CONSTRUCTION_SUBCATEGORIES.map(s => (
+            <option key={s.value} value={s.value}>{s.label}</option>
+          ))}
+        </Select>
+      ) : (
+        <>
+          <Input
+            label="Subkategori"
+            placeholder="mis. Material"
+            value={form.subcategory}
+            onChange={e => setForm(f => ({ ...f, subcategory: e.target.value }))}
+            list="subcategory-suggestions"
+            hint={
+              SUBCATEGORY_SUGGESTIONS[form.category as BudgetCategory]
+                ? "Opsional — sekadar penamaan konsisten"
+                : undefined
+            }
+          />
+          <datalist id="subcategory-suggestions">
+            {(SUBCATEGORY_SUGGESTIONS[form.category as BudgetCategory] ?? []).map(s => (
+              <option key={s} value={s} />
+            ))}
+          </datalist>
+        </>
+      )}
       <Input
         label="Deskripsi"
         placeholder="Uraian singkat"

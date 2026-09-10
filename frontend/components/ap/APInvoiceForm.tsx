@@ -20,6 +20,7 @@ import { RupiahInput } from "@/components/ui/RupiahInput";
 import { Table, TableBody, TableHead, TableRow, Td, Th } from "@/components/ui/Table";
 import { useToast } from "@/components/ui/Toast";
 import { Rupiah, formatRupiah } from "@/components/format/Rupiah";
+import { CONSTRUCTION_SUBCATEGORIES, constructionSubcategoryLabel } from "@/lib/constants/constructionSubcategory";
 import type {
   APPreviewResult,
   BudgetItem,
@@ -372,7 +373,12 @@ export function APInvoiceForm({ vendors, projects, today }: Props) {
                       label="Kategori"
                       required
                       value={ln.category}
-                      onChange={(e) => setLine(i, { category: e.target.value })}
+                      onChange={(e) =>
+                        setLine(i, {
+                          category: e.target.value,
+                          hard_subcategory: e.target.value === "hard" ? ln.hard_subcategory : "",
+                        })
+                      }
                       error={le.category}
                     >
                       <option value="">Pilih kategori...</option>
@@ -409,6 +415,28 @@ export function APInvoiceForm({ vendors, projects, today }: Props) {
                         readOnly
                         disabled
                       />
+                    )}
+
+                    {form.scope === "proyek" && ln.category === "hard" && (
+                      <Select
+                        label="Subkategori Konstruksi"
+                        required={ln.cost_tier !== "direct"}
+                        value={ln.hard_subcategory}
+                        onChange={(e) => setLine(i, { hard_subcategory: e.target.value })}
+                        error={le.hard_subcategory}
+                        hint={
+                          ln.cost_tier === "direct"
+                            ? "Opsional — biaya langsung sudah tahu Subsidi/Komersial lewat unitnya"
+                            : "Wajib — biaya bersama tidak ditautkan unit, subkategori inilah yang menentukan pool HPP-nya"
+                        }
+                      >
+                        <option value="">Pilih subkategori...</option>
+                        {CONSTRUCTION_SUBCATEGORIES.map((s) => (
+                          <option key={s.value} value={s.value}>
+                            {s.label}
+                          </option>
+                        ))}
+                      </Select>
                     )}
 
                     <RupiahInput
@@ -648,7 +676,14 @@ function APInvoicePreview({
             <TableBody>
               {form.lines.map((ln, i) => (
                 <TableRow key={i}>
-                  <Td>{ln.category}</Td>
+                  <Td>
+                    {ln.category}
+                    {ln.hard_subcategory && (
+                      <div className="mt-0.5 text-[10px] text-text-tertiary">
+                        {constructionSubcategoryLabel(ln.hard_subcategory)}
+                      </div>
+                    )}
+                  </Td>
                   <Td>{ln.cost_tier}</Td>
                   <Td>{ln.unit_id ? unitCode(ln.unit_id) : "—"}</Td>
                   <Td>{ln.budget_item_id ? itemLabel(ln.budget_item_id) : "—"}</Td>

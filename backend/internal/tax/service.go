@@ -32,6 +32,16 @@ type ProjectTaxCategoryReader interface {
 	GetProjectTaxCategory(ctx context.Context, tenantID, projectID uint64) (domain.TaxCategory, error)
 }
 
+// UnitProductPolicyReader membaca kebijakan produk (termasuk TaxCategory bila
+// diset eksplisit di katalog) milik unit — rule klien UAT #3: subsidi/komersial
+// adalah klasifikasi PRODUK (kode "rumah_subsidi"/"rumah_komersial"), bukan
+// cuma atribut proyek. Bila TaxCategory produk terisi, itu MENANG atas
+// projects.tax_category — satu proyek boleh menjual rumah subsidi dan
+// komersial sekaligus.
+type UnitProductPolicyReader interface {
+	ResolveUnitProductPolicy(ctx context.Context, tenantID, unitID uint64) (domain.ProductPolicy, error)
+}
+
 // AccountFinder melihat ID akun berdasarkan kode COA (tenant-scoped).
 type AccountFinder interface {
 	FindAccountIDByCode(ctx context.Context, tenantID uint64, code string) (uint64, error)
@@ -100,6 +110,7 @@ type Service struct {
 	// (GetCurrentRate + akun default) — unit test lama tetap valid.
 	ruleResolver      TaxRuleResolver
 	projectCategories ProjectTaxCategoryReader
+	unitProducts      UnitProductPolicyReader
 	// formulas: seam perhitungan (hardening). NewService memasang default
 	// (proportional); formula baru = Register, tanpa ubah resolver/flow.
 	formulas *FormulaRegistry
@@ -125,6 +136,14 @@ func WithRuleResolution(rr TaxRuleResolver, pc ProjectTaxCategoryReader) Service
 		s.ruleResolver = rr
 		s.projectCategories = pc
 	}
+}
+
+// WithUnitProductPolicy mengaktifkan penentu tarif per PRODUK unit (rule
+// klien UAT #3): rumah_subsidi/rumah_komersial menang atas kategori proyek
+// bila keduanya sama-sama terpasang. nil (default) = jalur legacy murni
+// per-proyek, perilaku tenant lama tidak berubah.
+func WithUnitProductPolicy(r UnitProductPolicyReader) ServiceOption {
+	return func(s *Service) { s.unitProducts = r }
 }
 
 // WithFormulaRegistry mengganti registry formula (default: proportional saja).
@@ -159,6 +178,41 @@ func NewService(rates TaxRateProvider, accounts AccountFinder, journals JournalW
 // // TODO(tax-advisor): konfirmasi bahwa basis = nilai pengalihan bruto (bukan DPP PPN)
 // dan pajak ini final (tidak dapat dikreditkan). Konfirmasi perlakuan HGB/leasehold LITHOS.
 func (s *Service) AccrueTax(ctx context.Context, tenantID uint64, req AccrueTaxRequest) (*TaxObligation, error) {
+	plan, err := s.ResolveAccrualPlan(ctx, tenantID, req)
+	if err != nil {
+		return nil, err
+	}
+
+	var unitDesc string
+	if plan.UnitID != nil {
+		unitDesc = fmt.Sprintf("%d", *plan.UnitID)
+	} else {
+		unitDesc = "?"
+	}
+	journalID, err := s.journals.CreateJournal(ctx, tenantID, plan.AccrualDate,
+		fmt.Sprintf("Akrual PPh Final Event 5a — unit %s", unitDesc), plan.JournalLines())
+	if err != nil {
+		return nil, fmt.Errorf("buat jurnal 5a: %w", err)
+	}
+	// Akrual: Dr Beban PPh / Cr Utang PPh — belum ada kas yang bergerak.
+	if err := s.journals.PostJournal(ctx, tenantID, journalID, false); err != nil {
+		return nil, fmt.Errorf("posting jurnal 5a: %w", err)
+	}
+
+	obligation := plan.BuildObligation(tenantID, journalID, nil)
+	if err := s.store.SaveObligation(ctx, obligation); err != nil {
+		return nil, fmt.Errorf("simpan obligation: %w", err)
+	}
+	return obligation, nil
+}
+
+// ResolveAccrualPlan resolves the tax rule, formula, and journal accounts for
+// a PPh Final accrual WITHOUT creating any journal or obligation row — the
+// pure computation shared by AccrueTax (unit/BAST) and any other caller that
+// must post the IDENTICAL accounting treatment inside its own transaction
+// (e.g. Land Kelebihan Tanah RecordAkad). This is the single place the rate/
+// rule/formula/account resolution logic lives — no second tax engine.
+func (s *Service) ResolveAccrualPlan(ctx context.Context, tenantID uint64, req AccrueTaxRequest) (*AccrualPlan, error) {
 	if !req.TransferValue.IsWholeRupiah() {
 		return nil, ErrTransferValueFractional
 	}
@@ -183,6 +237,20 @@ func (s *Service) AccrueTax(ctx context.Context, tenantID uint64, req AccrueTaxR
 			category, err = s.projectCategories.GetProjectTaxCategory(ctx, tenantID, *req.ProjectID)
 			if err != nil {
 				return nil, err
+			}
+		}
+		// Rule klien UAT #3: subsidi/komersial adalah klasifikasi PRODUK unit
+		// (kode "rumah_subsidi"/"rumah_komersial"), bukan cuma atribut proyek.
+		// Bila katalog produk unit ini menyatakan TaxCategory secara eksplisit,
+		// itu MENANG atas kategori proyek. Kode legacy "rumah" (TaxCategory nil)
+		// atau kegagalan resolusi sengaja DIABAIKAN di sini — jatuh kembali ke
+		// kategori proyek yang sudah terverifikasi di atas, bukan memblokir
+		// akrual pajak karena lapis tambahan ini.
+		if req.UnitID != nil && s.unitProducts != nil {
+			if policy, perr := s.unitProducts.ResolveUnitProductPolicy(ctx, tenantID, *req.UnitID); perr == nil {
+				if policy.TaxCategory != nil && policy.TaxCategory.Valid() {
+					category = *policy.TaxCategory
+				}
 			}
 		}
 		taxRate, err = s.ruleResolver.ResolveRule(ctx, tenantID, req.RateCode, category, req.AccrualDate)
@@ -216,30 +284,6 @@ func (s *Service) AccrueTax(ctx context.Context, tenantID uint64, req AccrueTaxR
 		return nil, fmt.Errorf("cari akun %s: %w", creditCode, err)
 	}
 
-	// Build jurnal 5a: Dr 5-2000 / Cr 2-4000.
-	lines := []JournalLineInput{
-		{AccountID: bebanAccID, Debit: taxAmount, UnitID: req.UnitID, ProjectID: req.ProjectID,
-			Description: fmt.Sprintf("PPh Final pengalihan — tarif %s", taxRate.Rate.String())},
-		{AccountID: hutangAccID, Credit: taxAmount, UnitID: req.UnitID, ProjectID: req.ProjectID,
-			Description: fmt.Sprintf("Hutang PPh Final pengalihan — tarif %s", taxRate.Rate.String())},
-	}
-
-	var unitDesc string
-	if req.UnitID != nil {
-		unitDesc = fmt.Sprintf("%d", *req.UnitID)
-	} else {
-		unitDesc = "?"
-	}
-	journalID, err := s.journals.CreateJournal(ctx, tenantID, req.AccrualDate,
-		fmt.Sprintf("Akrual PPh Final Event 5a — unit %s", unitDesc), lines)
-	if err != nil {
-		return nil, fmt.Errorf("buat jurnal 5a: %w", err)
-	}
-	// Akrual: Dr Beban PPh / Cr Utang PPh — belum ada kas yang bergerak.
-	if err := s.journals.PostJournal(ctx, tenantID, journalID, false); err != nil {
-		return nil, fmt.Errorf("posting jurnal 5a: %w", err)
-	}
-
 	// Provenance rule (Increment 4): rule mana yang dipakai + cakupannya —
 	// audit "kenapa unit ini kena 1%" terjawab dari obligation itu sendiri.
 	var ruleID *uint64
@@ -253,25 +297,21 @@ func (s *Service) AccrueTax(ctx context.Context, tenantID uint64, req AccrueTaxR
 		}
 		ruleRevision = &rev
 	}
-	obligation := &TaxObligation{
-		TenantID:       tenantID,
-		UnitID:         req.UnitID,
-		ProjectID:      req.ProjectID,
-		RateCode:       req.RateCode,
-		TransferValue:  req.TransferValue,
-		Rate:           taxRate.Rate, // snapshot tarif saat akrual
-		TaxAmount:      taxAmount,
-		Status:         ObligationStatusOutstanding,
-		AccrualDate:    req.AccrualDate,
-		JournalEntryID: journalID,
+
+	return &AccrualPlan{
+		RateCode:        req.RateCode,
+		TransferValue:   req.TransferValue,
+		Rate:            taxRate.Rate, // snapshot tarif saat akrual
+		TaxAmount:       taxAmount,
+		AccrualDate:     req.AccrualDate,
+		DebitAccountID:  bebanAccID,
+		CreditAccountID: hutangAccID,
+		UnitID:          req.UnitID,
+		ProjectID:       req.ProjectID,
 		TaxRuleID:       ruleID,
 		TaxRuleRevision: ruleRevision,
 		AppliesTo:       string(taxRate.AppliesTo),
-	}
-	if err := s.store.SaveObligation(ctx, obligation); err != nil {
-		return nil, fmt.Errorf("simpan obligation: %w", err)
-	}
-	return obligation, nil
+	}, nil
 }
 
 // ── PayTax — Event 5b ─────────────────────────────────────────────────────────
@@ -542,15 +582,23 @@ func (s *Service) GetTaxReport(ctx context.Context, tenantID uint64, from, to ti
 	items := make([]TaxReportItem, 0, len(obligations))
 
 	for _, o := range obligations {
-		totalObl = totalObl.Add(o.TaxAmount)
-		if o.Status == ObligationStatusPaid {
+		// Obligation cancelled (mis. land sale dibatalkan) sudah dibalik di
+		// ledger — jangan dihitung ke total kewajiban manapun, tapi tetap
+		// tampil di items untuk audit trail.
+		switch o.Status {
+		case ObligationStatusPaid:
+			totalObl = totalObl.Add(o.TaxAmount)
 			totalPaid = totalPaid.Add(o.TaxAmount)
-		} else {
+		case ObligationStatusCancelled:
+			// excluded from totals — reversed, no longer owed.
+		default:
+			totalObl = totalObl.Add(o.TaxAmount)
 			totalOutstanding = totalOutstanding.Add(o.TaxAmount)
 		}
 		items = append(items, TaxReportItem{
 			ObligationID:  o.ID,
 			UnitID:        o.UnitID,
+			LandSaleID:    o.LandSaleID,
 			RateCode:      o.RateCode,
 			TransferValue: o.TransferValue.String(),
 			Rate:          o.Rate.String(),

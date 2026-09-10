@@ -2,10 +2,10 @@ import { Fragment } from "react";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { fetchUnit, fetchProject } from "@/lib/api/projects";
-import { fetchSaleRecord, fetchContractByUnit, fetchSchedulesByContract, fetchContractAllocations } from "@/lib/api/sale";
+import { fetchSaleRecord, fetchContractByUnit, fetchSchedulesByContract, fetchContractAllocations, fetchCustomerStatement } from "@/lib/api/sale";
 import { fetchAllocationCompute } from "@/lib/api/allocation";
 import { ApiError } from "@/lib/api/client";
-import { AllocationResult, SaleRecord, SaleContract, PaymentSchedule, ScheduleStatus, ScheduleType, AllocationView } from "@/lib/types/api";
+import { AllocationResult, SaleRecord, SaleContract, PaymentSchedule, ScheduleStatus, ScheduleType, AllocationView, CustomerStatement } from "@/lib/types/api";
 import { Card, CardHeader, CardTitle } from "@/components/ui/Card";
 import { StatusBadge, Badge, type BadgeVariant } from "@/components/ui/Badge";
 import { Table, TableBody, TableRow, Th, Td, TableHead } from "@/components/ui/Table";
@@ -14,6 +14,8 @@ import { Rupiah } from "@/components/format/Rupiah";
 import { Tanggal } from "@/components/format/Tanggal";
 import { UnitCostBreakdown } from "@/components/proyek/CostBreakdownTable";
 import { LandAreaEditButton } from "@/components/proyek/LandAreaEditButton";
+import { RecordPaymentButton } from "@/components/billing/RecordPaymentButton";
+import { PrintReceiptButton } from "@/components/billing/PrintReceiptButton";
 import { getTokenAndRole } from "@/lib/auth";
 import { unitLabel, buyerRoleLabel } from "@/lib/unit-label";
 
@@ -85,6 +87,15 @@ export default async function UnitDetailPage({ params }: PageProps) {
     }
     // Breakdown alokasi (FE-2 · P4) — best-effort; kegagalan tidak menjatuhkan halaman.
     allocations = await fetchContractAllocations(token, contract.id).catch(() => []);
+  }
+
+  // P1 Kelebihan Tanah: statement (mesin AR yang sama dengan halaman Piutang)
+  // adalah SATU-SATUNYA sumber outstanding/status untuk kartu "Pembayaran" di
+  // bawah — tidak dihitung ulang dari asumsi FE agar tidak pernah menyimpang
+  // dari angka di Piutang.
+  let statement: CustomerStatement | null = null;
+  if (contract) {
+    statement = await fetchCustomerStatement(token, contract.id).catch(() => null);
   }
 
   return (
@@ -175,17 +186,28 @@ export default async function UnitDetailPage({ params }: PageProps) {
         </Card>
       ) : null}
 
-      {/* ── Kontrak & jadwal cicilan ──────────────────────────────────────────── */}
-      {!saleRecord && (
-        <ContractScheduleSection
-          contract={contract}
-          schedules={schedules}
-          allocations={allocations}
-          unitId={unitIdNum}
-          unitStatus={unit.status}
-          buyerRef={unit.buyer_ref}
-        />
+      {/* ── Pembayaran (P1 Kelebihan Tanah) ──────────────────────────────────────
+          Dulu tidak ada tempat di Unit Detail untuk melihat/menyelesaikan
+          outstanding Kelebihan Tanah — user harus pindah ke halaman Piutang.
+          Selalu ditampilkan begitu ada kontrak, terlepas dari saleRecord (lihat
+          catatan di bawah). */}
+      {contract && (
+        <PaymentSummarySection token={token} contract={contract} statement={statement} />
       )}
+
+      {/* ── Kontrak & jadwal cicilan ────────────────────────────────────────────
+          Sebelumnya section ini disembunyikan begitu unit sudah Akad
+          (`!saleRecord`), sehingga jadwal cicilan/piutang pasca-Akad — termasuk
+          cicilan Kelebihan Tanah — tidak pernah terlihat di sini. Akad & jadwal
+          adalah dua hal berbeda: keduanya harus tetap tampil bersisian. */}
+      <ContractScheduleSection
+        contract={contract}
+        schedules={schedules}
+        allocations={allocations}
+        unitId={unitIdNum}
+        unitStatus={unit.status}
+        buyerRef={unit.buyer_ref}
+      />
     </div>
   );
 }
@@ -276,12 +298,16 @@ function SaleRecordSection({
             <Td><span className="font-semibold">HPP — Konstruksi</span></Td>
             <Td right><Rupiah value={record.hpp_hard} /></Td>
           </TableRow>
+          {/* RULE KLIEN FREEZE (2026-09-04): HPP baru hanya Tanah + Konstruksi.
+              Kedua baris di bawah legacy — selalu Rp 0 untuk penjualan setelah
+              tanggal freeze, tapi tetap ditampilkan agar HPP historis (sebelum
+              reklasifikasi) tetap terbaca apa adanya. */}
           <TableRow>
-            <Td><span className="font-semibold">HPP — Biaya Lunak</span></Td>
+            <Td><span className="font-semibold">HPP — Biaya Lunak (legacy)</span></Td>
             <Td right><Rupiah value={record.hpp_soft} /></Td>
           </TableRow>
           <TableRow>
-            <Td><span className="font-semibold">HPP — Pendanaan</span></Td>
+            <Td><span className="font-semibold">HPP — Pendanaan/Operasional (legacy)</span></Td>
             <Td right><Rupiah value={record.hpp_financing} /></Td>
           </TableRow>
           <TableRow>
@@ -335,6 +361,167 @@ function hppTotal(record: SaleRecord): string {
   return `${neg ? "-" : ""}${whole}.${frac}`;
 }
 
+// ── Pembayaran (P1 Kelebihan Tanah) ─────────────────────────────────────────────
+// Rumah vs Kelebihan Tanah dikelompokkan dari statement.schedules per `type` —
+// PERSIS sumber yang sama dipakai backend untuk StatementExposure (house vs
+// land outstanding di halaman Piutang), jadi kedua tempat tidak pernah
+// menyimpang (invariant task #7).
+
+type GroupStatus = "BELUM_LUNAS" | "SEBAGIAN" | "LUNAS";
+
+const GROUP_STATUS_META: Record<GroupStatus, { label: string; variant: BadgeVariant }> = {
+  BELUM_LUNAS: { label: "Belum Lunas", variant: "danger" },
+  SEBAGIAN:    { label: "Sebagian",    variant: "warning" },
+  LUNAS:       { label: "Lunas",       variant: "success" },
+};
+
+function PaymentSummarySection({
+  token,
+  contract,
+  statement,
+}: {
+  token: string;
+  contract: SaleContract;
+  statement: CustomerStatement | null;
+}) {
+  if (!statement) {
+    return (
+      <Card>
+        <p className="text-sm text-danger">Gagal memuat ringkasan pembayaran.</p>
+      </Card>
+    );
+  }
+
+  const houseLines = statement.schedules.filter((l) => l.type !== "land");
+  const landLines = statement.schedules.filter((l) => l.type === "land");
+  const hasLand = landLines.length > 0;
+
+  const houseTotal = sumMoneyExact(houseLines.map((l) => l.amount));
+  const housePaid = sumMoneyExact(houseLines.map((l) => l.paid));
+  const houseOutstanding = sumMoneyExact(houseLines.map((l) => l.outstanding));
+  const houseStatus = groupStatus(houseOutstanding, housePaid);
+
+  const landTotal = sumMoneyExact(landLines.map((l) => l.amount));
+  const landPaid = sumMoneyExact(landLines.map((l) => l.paid));
+  const landOutstanding = sumMoneyExact(landLines.map((l) => l.outstanding));
+  const landStatus = groupStatus(landOutstanding, landPaid);
+  // Kelebihan Tanah bundled = satu schedule per kontrak (sentinel installment
+  // ke-9999); ambil detail produk (m², harga/m²) dari baris itu.
+  const landLine = landLines[0];
+  const landReceiptTerminId = [...landLines].reverse().find((l) => l.termin_payment_id)?.termin_payment_id;
+  const landNotes = landLine
+    ? `Kelebihan Tanah${landLine.land_quantity_m2 ? ` ${landLine.land_quantity_m2} m²` : ""}${landLine.land_unit_price ? ` x Rp${landLine.land_unit_price}/m²` : ""}`
+    : undefined;
+
+  return (
+    <Card padding="none">
+      <CardHeader className="px-5 pt-5">
+        <CardTitle>Pembayaran</CardTitle>
+      </CardHeader>
+      <div className="px-5 pb-5 space-y-5">
+        <PaymentGroupBlock title="Rumah" total={houseTotal} paid={housePaid} outstanding={houseOutstanding} status={houseStatus} />
+
+        {hasLand && (
+          <div className="pt-4 border-t border-border space-y-3">
+            <PaymentGroupBlock
+              title="Kelebihan Tanah"
+              subtitle={landLine?.land_quantity_m2 ? `${landLine.land_quantity_m2} m²` : undefined}
+              unitPrice={landLine?.land_unit_price}
+              total={landTotal}
+              paid={landPaid}
+              outstanding={landOutstanding}
+              status={landStatus}
+            />
+            <div>
+              {landStatus !== "LUNAS" ? (
+                <RecordPaymentButton
+                  token={token}
+                  contractId={contract.id}
+                  outstanding={landOutstanding}
+                  scheduleId={landLine?.schedule_id}
+                  buyerName={contract.buyer_name}
+                  label="Bayar Kelebihan Tanah"
+                  defaultNotes={landNotes}
+                />
+              ) : landReceiptTerminId ? (
+                <PrintReceiptButton
+                  token={token}
+                  terminId={landReceiptTerminId}
+                  variant="button"
+                  label="Cetak Kwitansi"
+                  notes={`${landNotes ?? "Kelebihan Tanah"} — ${contract.buyer_name}`}
+                />
+              ) : null}
+            </div>
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function PaymentGroupBlock({
+  title, subtitle, unitPrice, total, paid, outstanding, status,
+}: {
+  title: string;
+  subtitle?: string;
+  unitPrice?: string;
+  total: string;
+  paid: string;
+  outstanding: string;
+  status: GroupStatus;
+}) {
+  const meta = GROUP_STATUS_META[status];
+  return (
+    <div>
+      <div className="flex items-baseline gap-2 mb-2">
+        <h3 className="text-sm font-semibold text-text-primary">{title}</h3>
+        {subtitle && <span className="text-xs text-text-secondary">{subtitle}</span>}
+      </div>
+      {unitPrice && (
+        <p className="text-xs text-text-secondary mb-2">
+          Harga/m² <Rupiah value={unitPrice} colorSign={false} />
+        </p>
+      )}
+      <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
+        <InfoRow label="Total"    value={<Rupiah value={total} colorSign={false} />} />
+        <InfoRow label="Terbayar" value={<Rupiah value={paid} colorSign={false} />} />
+        <InfoRow label="Sisa"     value={<Rupiah value={outstanding} colorSign={false} />} />
+        <InfoRow label="Status"   value={<Badge variant={meta.variant}>{meta.label}</Badge>} />
+      </dl>
+    </div>
+  );
+}
+
+// toMinorUnitsExact/sumMoneyExact/groupStatus — sama pola dengan remainingExact
+// di bawah: DECIMAL(20,4) via BigInt, TIDAK PERNAH float (invariant #2).
+function toMinorUnitsExact(raw: string): bigint {
+  const SCALE = BigInt(10000);
+  const cleaned = String(raw ?? "0").replace(",", ".").trim();
+  const neg = cleaned.startsWith("-");
+  const [intPart, fracPart = ""] = cleaned.replace("-", "").split(".");
+  const frac = (fracPart + "0000").slice(0, 4);
+  const v = BigInt(intPart || "0") * SCALE + BigInt(frac || "0");
+  return neg ? -v : v;
+}
+
+function sumMoneyExact(values: string[]): string {
+  const SCALE = BigInt(10000);
+  let sum = BigInt(0);
+  for (const v of values) sum += toMinorUnitsExact(v);
+  const neg = sum < BigInt(0);
+  const abs = neg ? -sum : sum;
+  const whole = abs / SCALE;
+  const frac = (abs % SCALE).toString().padStart(4, "0");
+  return `${neg ? "-" : ""}${whole}.${frac}`;
+}
+
+function groupStatus(outstanding: string, paid: string): GroupStatus {
+  if (toMinorUnitsExact(outstanding) <= BigInt(0)) return "LUNAS";
+  if (toMinorUnitsExact(paid) > BigInt(0)) return "SEBAGIAN";
+  return "BELUM_LUNAS";
+}
+
 // ── Kontrak & jadwal cicilan ────────────────────────────────────────────────────
 
 const SCHEDULE_STATUS: Record<ScheduleStatus, { label: string; variant: BadgeVariant }> = {
@@ -347,6 +534,7 @@ const SCHEDULE_TYPE: Record<ScheduleType, string> = {
   dp:          "DP / Uang Muka",
   installment: "Termin",
   final:       "Pelunasan",
+  land:        "Kelebihan Tanah",
 };
 
 const PAYMENT_TYPE_LABEL: Record<string, string> = { kpr: "KPR", tunai: "Tunai" };

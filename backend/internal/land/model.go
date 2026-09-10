@@ -29,9 +29,14 @@ type LandStock struct {
 	TotalQuantityM2    decimal.Decimal `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'" json:"total_quantity_m2"`
 	ReservedQuantityM2 decimal.Decimal `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'" json:"reserved_quantity_m2"`
 	SoldQuantityM2     decimal.Decimal `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'" json:"sold_quantity_m2"`
-	UnitPrice          domain.Money    `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'" json:"unit_price"`
-	CreatedAt          time.Time       `json:"created_at"`
-	UpdatedAt          time.Time       `json:"updated_at"`
+	// UnitPrice (Harga Jual) dipakai di reservasi/Akad/DPP (pendapatan).
+	// PurchasePrice (Harga Beli) adalah tarif HPP per m² — dipakai LANGSUNG
+	// oleh PurchasePriceLandHPPResolver saat Akad (koreksi klien 2026-08-31;
+	// lihat hpp_resolver.go). Bukan lagi murni referensi.
+	UnitPrice     domain.Money `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'" json:"unit_price"`
+	PurchasePrice domain.Money `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'" json:"purchase_price"`
+	CreatedAt     time.Time    `json:"created_at"`
+	UpdatedAt     time.Time    `json:"updated_at"`
 }
 
 func (LandStock) TableName() string { return "land_stock" }

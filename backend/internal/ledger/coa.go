@@ -32,19 +32,25 @@ var defaultCOA = []coaEntry{
 	{"1-1500", "Bank — BRI", domain.AccountAsset, domain.NormalBalanceDebit, false, ""},
 	{"1-2000", "Piutang Usaha", domain.AccountAsset, domain.NormalBalanceDebit, true, ""},
 	{"1-2100", "Piutang Lain-lain", domain.AccountAsset, domain.NormalBalanceDebit, false, ""},
-	{"1-2200", "Piutang Bank (KPR)", domain.AccountAsset, domain.NormalBalanceDebit, true,
+	{"1-2200", "Dana Jaminan Bank (KPR)", domain.AccountAsset, domain.NormalBalanceDebit, true,
 		"Piutang kepada bank KPR dalam jendela akad → pencairan. Setelah bank mencairkan, " +
 			"bank selesai pada nilai pencairan aktualnya: sisa tagihan direklas ke 1-2000 Piutang Usaha (customer)"},
 	{"1-3000", "Persediaan Real Estat — Tanah", domain.AccountAsset, domain.NormalBalanceDebit, true,
 		"★ Biaya tanah yang dikapitalisasi sebagai persediaan"},
 	{"1-3100", "Persediaan Real Estat — Hard Cost", domain.AccountAsset, domain.NormalBalanceDebit, true,
-		"★ Biaya konstruksi yang dikapitalisasi"},
+		"★ Biaya konstruksi (produksi, sarana & prasarana, perizinan pembangunan fisik — IMB/SLF/dll) yang dikapitalisasi. " +
+			"RULE KLIEN (UAT 2026-09-03): HPP Konstruksi = Produksi + Sarana & Prasarana + Perizinan."},
 	{"1-3200", "Persediaan Real Estat — Soft Cost", domain.AccountAsset, domain.NormalBalanceDebit, true,
-		"★ Desain, perizinan, legal yang dikapitalisasi"},
+		"LEGACY/BEKU (RULE KLIEN FREEZE 2026-09-04): akun ini TIDAK DIPAKAI LAGI untuk transaksi baru — " +
+			"Soft Cost (desain, legal) direklasifikasi jadi beban periode (lihat 5-4700). Dipertahankan " +
+			"hanya agar saldo/histori Persediaan Soft Cost pra-reklasifikasi tetap terbaca benar di neraca."},
 	{"1-3300", "Persediaan Real Estat — Biaya Pembiayaan", domain.AccountAsset, domain.NormalBalanceDebit, true,
-		"★ Bunga/biaya pinjaman yang dikapitalisasi"},
+		"LEGACY/BEKU (RULE KLIEN 2026-09-04): akun ini TIDAK DIPAKAI LAGI untuk transaksi baru — biaya " +
+			"pembiayaan direklasifikasi jadi CostCategoryOperational (beban periode, lihat 5-4600). " +
+			"Dipertahankan hanya agar saldo/histori pra-reklasifikasi tetap terbaca benar di neraca."},
 	{"1-4000", "Aset Tetap — Peralatan Kantor", domain.AccountAsset, domain.NormalBalanceDebit, false, ""},
 	{"1-4100", "Aset Tetap — Kendaraan", domain.AccountAsset, domain.NormalBalanceDebit, false, ""},
+	{"1-4200", "Aset Tetap — Gedung/Bangunan", domain.AccountAsset, domain.NormalBalanceDebit, false, ""},
 	{"1-4900", "Akumulasi Penyusutan", domain.AccountAsset, domain.NormalBalanceCredit, true,
 		"Kontra-aset; normal balance kredit"},
 	{"1-5000", "Biaya Dibayar di Muka", domain.AccountAsset, domain.NormalBalanceDebit, false, ""},
@@ -97,12 +103,22 @@ var defaultCOA = []coaEntry{
 		"★ 2,5% nilai pengalihan (PP 34/2016)"},
 	{"5-3000", "Beban Pemasaran", domain.AccountExpense, domain.NormalBalanceDebit, false, ""},
 	{"5-3100", "Beban Komisi Penjualan", domain.AccountExpense, domain.NormalBalanceDebit, false, ""},
+	{"5-3200", "Beban Provisi & Administrasi Bank KPR", domain.AccountExpense, domain.NormalBalanceDebit, false,
+		"★ Provisi/biaya administrasi yang dipotong bank saat pencairan KPR — DITANGGUNG DEVELOPER (bukan titipan customer, beda dari 2-2400). Diakui saat pencairan diterima."},
 	{"5-4000", "Beban Umum & Administrasi", domain.AccountExpense, domain.NormalBalanceDebit, false, ""},
 	{"5-4100", "Beban Gaji & Tunjangan", domain.AccountExpense, domain.NormalBalanceDebit, false, ""},
 	{"5-4200", "Beban Sewa Kantor", domain.AccountExpense, domain.NormalBalanceDebit, false, ""},
 	{"5-4300", "Beban Utilitas", domain.AccountExpense, domain.NormalBalanceDebit, false, ""},
 	{"5-4400", "Beban Perjalanan Dinas", domain.AccountExpense, domain.NormalBalanceDebit, false, ""},
 	{"5-4500", "Beban Penyusutan", domain.AccountExpense, domain.NormalBalanceDebit, false, ""},
+	{"5-4600", "Beban Operasional", domain.AccountExpense, domain.NormalBalanceDebit, true,
+		"★ Akun beban untuk CostCategoryOperational (dahulu \"Pendanaan\"/financing). RULE KLIEN " +
+			"(2026-09-04): biaya operasional diakui LANGSUNG sebagai beban periode saat realisasi terjadi, " +
+			"tidak pernah dikapitalisasi ke Persediaan (lihat domain.CostCategoryOperational)."},
+	{"5-4700", "Beban Soft Cost (Desain & Legal)", domain.AccountExpense, domain.NormalBalanceDebit, true,
+		"★ Akun beban untuk CostCategorySoft. RULE KLIEN FREEZE (2026-09-04): HPP hanya Tanah + " +
+			"Konstruksi/Hard Cost — Soft Cost (desain, legal) diakui sebagai beban periode saat realisasi " +
+			"terjadi, tidak pernah dikapitalisasi ke Persediaan (lihat domain.CostCategorySoft)."},
 	{"5-5000", "Beban Bunga", domain.AccountExpense, domain.NormalBalanceDebit, false,
 		"Bunga yang tidak dikapitalisasi (sudah terealisasi)"},
 }

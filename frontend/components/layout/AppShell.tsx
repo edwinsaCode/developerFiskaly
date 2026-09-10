@@ -26,7 +26,7 @@ export function AppShell({ children, user, periodLabel, token }: AppShellProps) 
               konsisten antar halaman). max-w menjaga baris data tetap terbaca
               di layar ultrawide, mx-auto menjaga konten terpusat — bukan
               menempel kiri dengan ruang kosong menganga di kanan. */}
-          <main className="flex-1 overflow-auto">
+          <main className="flex-1">
             <div className="mx-auto w-full max-w-[1560px] px-4 py-5 sm:px-6 sm:py-6 lg:px-8">
               {children}
             </div>

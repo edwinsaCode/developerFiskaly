@@ -2,6 +2,7 @@ package sale
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -99,16 +100,43 @@ const (
 	TerminKindFinalPayment     TerminKind = "final_payment"
 	TerminKindOther            TerminKind = "other"
 	TerminKindBankDisbursement TerminKind = "bank_disbursement"
+	// TerminKindLandExcess: penerimaan atas piutang Kelebihan Tanah (baris
+	// jadwal ScheduleTypeLand) — sebelumnya tidak punya kind sendiri sehingga
+	// jatuh ke TerminKindInstallment ("Cicilan 9999") lewat resolveTerminKind.
+	TerminKindLandExcess TerminKind = "land_excess"
 )
 
 // ValidTerminKind menolak nilai di luar daftar terkenal (fail-closed ringan —
 // bukan invariant akuntansi, hanya menjaga dropdown tetap konsisten).
 func ValidTerminKind(k TerminKind) bool {
 	switch k {
-	case TerminKindDP, TerminKindInstallment, TerminKindFinalPayment, TerminKindOther, TerminKindBankDisbursement:
+	case TerminKindDP, TerminKindInstallment, TerminKindFinalPayment, TerminKindOther, TerminKindBankDisbursement, TerminKindLandExcess:
 		return true
 	default:
 		return false
+	}
+}
+
+// TerminKindLabel mengembalikan label bisnis customer-facing untuk sebuah
+// Kind — dipakai kwitansi/riwayat penerimaan supaya keterangan dokumen
+// SELALU jelas untuk apa (tanpa terkecuali), bukan istilah ledger internal.
+func TerminKindLabel(k TerminKind, installmentNo *int) string {
+	switch k {
+	case TerminKindDP:
+		return "DP (Uang Muka)"
+	case TerminKindInstallment:
+		if installmentNo != nil && *installmentNo > 0 && *installmentNo < 9999 {
+			return fmt.Sprintf("Cicilan ke-%d", *installmentNo)
+		}
+		return "Cicilan"
+	case TerminKindFinalPayment:
+		return "Pelunasan"
+	case TerminKindLandExcess:
+		return "Kelebihan Tanah"
+	case TerminKindBankDisbursement:
+		return "Pencairan Dana Bank"
+	default:
+		return "Lainnya"
 	}
 }
 
@@ -216,6 +244,13 @@ type RecordTerminRequest struct {
 	CreatedBy       *uint64       // audit: user yang mencatat (opsional)
 	IdempotencyKey  *string       // proteksi double-submit (opsional)
 	Source          PaymentSource // asal pencatatan (audit)
+	// BankFee (UAT 2026-09-03, Rule #5): provisi/biaya administrasi yang
+	// dipotong bank dari nominal pencairan (mis. KPR), DITANGGUNG DEVELOPER —
+	// bukan titipan customer (K-1 tidak berubah). Nol (default) = jurnal 2
+	// baris seperti sebelumnya, tanpa perubahan perilaku. >0 = Amount tetap
+	// nilai piutang yang diselesaikan (kredit tidak berubah), tapi debit
+	// dipecah: kas bersih (Amount-BankFee) + Beban Provisi Bank (5-3200).
+	BankFee domain.Money
 }
 
 // RecordBASTRequest adalah input untuk Event 3+4 (BAST — pengakuan pendapatan + HPP).
@@ -227,6 +262,12 @@ type RecordBASTRequest struct {
 	VATRate   decimal.Decimal // e.g. 0.11; wajib > 0 jika IsVAT = true
 	BuyerRef  string
 	BASTDate  time.Time
+	// BankApprovedAmount (Item 7A, UAT 2026-09-07): Nilai Persetujuan KPR
+	// Bank — diisi SAAT AKAD untuk kontrak ber-scheme KPR, bukan saat
+	// pembuatan kontrak. Dasar Dana Jaminan Bank (min(approved, gross-advance));
+	// sisanya (jika ada) diposting sebagai Piutang Usaha. nil/kosong untuk
+	// kontrak non-KPR — perilaku lama (satu baris piutang) tetap berlaku.
+	BankApprovedAmount *domain.Money
 }
 
 // PhysicalHandoverParams adalah input eksekusi atomik serah terima fisik
@@ -275,6 +316,16 @@ type BASTAtomicParams struct {
 	// Pre-built journal lines untuk validasi di test (dan posting di repo).
 	RevenueLines []JournalLineInput // Event 3
 	COGSLines    []JournalLineInput // Event 4; nil jika HPP total = 0
+	// LandAdvance/LandAdvanceLines (bug 2026-09-04): bagian TotalAdvance yang
+	// melebihi gross rumah pada kontrak Tunai lump-sum bercampur tanah — sudah
+	// dikapitalisasi sebagai kas diterima tapi TIDAK disentuh Event 3 (yang
+	// cuma menolkan sampai gross rumah). LandAdvanceLines (Dr UMP / Cr Piutang
+	// Kelebihan Tanah) dinolkan Execute ATOMIK bersama landSchedule yang baru
+	// dibuat, supaya paid_amount cache & sub-ledger credit_applications tidak
+	// menganggap piutang tanah masih 100% outstanding. Zero/nil bila tidak
+	// ada tanah atau tidak ada advance berlebih.
+	LandAdvance      domain.Money
+	LandAdvanceLines []JournalLineInput
 	// CreatedBy: aktor BAST — ikut tercatat pada jurnal pengakuan piutang biaya
 	// realisasi yang terbit di dalam transaksi ini (W-5).
 	CreatedBy *uint64
@@ -287,6 +338,24 @@ type BASTAtomicParams struct {
 	// ke land.RecordAkadTx di DALAM transaksi yang sama dengan Event3/4 unit,
 	// sehingga rumah dan tanah diakui atomik bersama, pada Akad yang sama.
 	Land *land.RecordAkadParams
+	// SaleContractID: diresolusi untuk SEMUA Akad (bukan hanya yang membawa
+	// tanah — diperluas saat perbaikan bug Saldo Kredit Buyer, 2026-09-04).
+	// Dua pemakai:
+	//   1. Bila Land != nil — WAJIB, menautkan baris payment_schedules
+	//      (ScheduleTypeLand, migrasi 000095) yang dibuat atomik bersama
+	//      land.RecordAkadTx, sehingga land_sales menjadi anchor AR yang
+	//      terlihat oleh ReceivePayment/planAllocation (bug UAT: piutang
+	//      Kelebihan Tanah sebelumnya tidak pernah muncul di Penerimaan
+	//      meski sudah benar di Neraca).
+	//   2. Execute memakainya sebagai FK audit (opsional) saat menutup SISA
+	//      saldo kredit buyer yang dikonsumsi oleh netting Uang Muka
+	//      Penjualan Event 3 (consumeRemainingCreditInTx) — bila nilai ini 0
+	//      (kontrak tak ditemukan, data legacy) konsumsi tetap dicatat
+	//      (sale_contract_id NULL di credit_applications), TIDAK di-skip dan
+	//      TIDAK error, karena unit_id sudah cukup untuk audit & mencegah
+	//      saldo itu terus terlihat "tersedia".
+	// 0 bila kontrak tidak ditemukan (data legacy tanpa SaleContract formal).
+	SaleContractID uint64
 }
 
 // Validasi rekening pembayaran kini COA-driven (lihat AccountFinder.ValidateCashBankAccount).

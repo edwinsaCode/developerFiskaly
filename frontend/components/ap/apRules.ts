@@ -19,21 +19,26 @@ import type { APInvoiceStatus } from "@/lib/types/api";
 import type { APInvoiceBody, APInvoiceLineBody, VendorBody } from "@/lib/api/ap";
 
 // ── Taksonomi baris biaya ───────────────────────────────────────────────────
-// Cermin domain.CostTier × domain.CostCategory di backend:
-//   direct/shared → kategori kapitalisasi (land|hard|soft|financing)
-//   overhead      → kategori beban (marketing|other)
+// Cermin domain.CostTier × domain.CostCategory di backend. RULE KLIEN FREEZE
+// (2026-09-04): HPP hanya Tanah + Hard Cost — itu SATU-SATUNYA yang boleh
+// bertier direct/shared (kapitalisasi). Soft Cost dan Operasional (dahulu
+// "financing") pindah ke sini sebagai kategori overhead: selalu beban
+// periode, tidak pernah dikapitalisasi, walaupun tercatat sebagai tagihan
+// vendor terkait proyek.
+//   direct/shared → kategori kapitalisasi (land|hard)
+//   overhead      → kategori beban (marketing|other|soft|operational)
 // Kombinasi di luar matriks ditolak backend; layar tidak menawarkannya.
 
 export const AP_PROJECT_CATEGORIES = [
   { value: "land", label: "Tanah" },
-  { value: "hard", label: "Hard Cost (Konstruksi)" },
-  { value: "soft", label: "Soft Cost (Perizinan, Desain)" },
-  { value: "financing", label: "Biaya Pendanaan" },
+  { value: "hard", label: "Hard Cost (Produksi Subsidi/Komersial, Sarana & Prasarana, Perizinan)" },
 ] as const;
 
 export const AP_OVERHEAD_CATEGORIES = [
   { value: "marketing", label: "Pemasaran" },
   { value: "other", label: "Umum & Administrasi" },
+  { value: "soft", label: "Soft Cost (Desain, Legal)" },
+  { value: "operational", label: "Operasional" },
 ] as const;
 
 export const AP_PROJECT_TIERS = [
@@ -171,6 +176,12 @@ export function buildVendorBody(f: VendorFormState, forUpdate = false): VendorBo
 export interface InvoiceLineState {
   category: string;
   cost_tier: string;
+  // UAT 2026-09-07: produksi_subsidi|produksi_komersial|sarana_prasarana|
+  // perizinan — hanya berlaku saat category="hard". Wajib diisi saat
+  // cost_tier="shared" (pool project-wide, tidak ditautkan unit) karena
+  // itulah satu-satunya sinyal yang menentukan unit Subsidi/Komersial mana
+  // yang menerima alokasi HPP-nya (lihat allocation.ComputeHardPool backend).
+  hard_subcategory: string;
   unit_id: string;
   budget_item_id: string;
   amount: string;
@@ -198,6 +209,7 @@ export function emptyInvoiceLine(scope: APScope): InvoiceLineState {
   return {
     category: "",
     cost_tier: scope === "overhead" ? "overhead" : "shared",
+    hard_subcategory: "",
     unit_id: "",
     budget_item_id: "",
     amount: "",
@@ -281,6 +293,15 @@ export function validateInvoice(
     if (ln.cost_tier !== "direct" && ln.unit_id) {
       e.unit_id = "Hanya biaya langsung yang boleh menunjuk unit";
     }
+    // UAT 2026-09-07: Hard Cost tanpa unit (pool bersama proyek) wajib
+    // menyatakan subkategori — "Produksi" saja tidak cukup untuk menentukan
+    // unit Subsidi/Komersial mana yang berhak menerima HPP-nya.
+    if (ln.category === "hard" && ln.cost_tier !== "direct" && !ln.hard_subcategory) {
+      e.hard_subcategory = "Pilih subkategori — wajib diisi karena biaya ini tidak ditautkan ke unit";
+    }
+    if (ln.category !== "hard" && ln.hard_subcategory) {
+      e.hard_subcategory = "Subkategori hanya berlaku untuk kategori Hard Cost";
+    }
     if (Object.keys(e).length > 0) lines[i] = e;
   });
 
@@ -312,6 +333,7 @@ export function buildInvoiceBody(f: InvoiceFormState): APInvoiceBody {
     cost_tier: ln.cost_tier,
     amount: ln.amount.trim(),
     description: ln.description.trim(),
+    ...(ln.category === "hard" && ln.hard_subcategory ? { hard_subcategory: ln.hard_subcategory } : {}),
     ...(ln.unit_id ? { unit_id: Number(ln.unit_id) } : {}),
     ...(ln.budget_item_id ? { budget_item_id: Number(ln.budget_item_id) } : {}),
   }));

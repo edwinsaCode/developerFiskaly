@@ -155,11 +155,16 @@ func TestService_GetBasis_NotFound(t *testing.T) {
 
 // ── Tests: ComputeAllocation ──────────────────────────────────────────────────
 
+// LandAreaM2 (Item 9, UAT 2026-09-07): fail-closed sejak HPP Tanah dialokasikan
+// proporsional terhadap land_area unit — nilai di sini sengaja BERBEDA dari
+// SaleableArea (bukan sekadar mengulang angka yang sama) supaya test yang
+// membandingkan hasil Land vs Hard/Soft tidak diam-diam benar karena kedua
+// basis kebetulan identik.
 func makeUnits() []allocation.UnitInput {
 	return []allocation.UnitInput{
-		{UnitID: 1, SaleableArea: decimal.NewFromInt(150), SalesValue: rupiah(2_800_000_000)},
-		{UnitID: 2, SaleableArea: decimal.NewFromInt(200), SalesValue: rupiah(3_500_000_000)},
-		{UnitID: 3, SaleableArea: decimal.NewFromInt(250), SalesValue: rupiah(4_200_000_000)},
+		{UnitID: 1, SaleableArea: decimal.NewFromInt(150), LandAreaM2: decimal.NewFromInt(120), SalesValue: rupiah(2_800_000_000)},
+		{UnitID: 2, SaleableArea: decimal.NewFromInt(200), LandAreaM2: decimal.NewFromInt(160), SalesValue: rupiah(3_500_000_000)},
+		{UnitID: 3, SaleableArea: decimal.NewFromInt(250), LandAreaM2: decimal.NewFromInt(200), SalesValue: rupiah(4_200_000_000)},
 	}
 }
 

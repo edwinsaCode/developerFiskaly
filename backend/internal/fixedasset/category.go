@@ -312,6 +312,7 @@ func isDuplicateCategoryCode(err error) bool {
 var defaultCategories = []Category{
 	{Code: "peralatan-kantor", Name: "Peralatan Kantor", AssetAccountCode: "1-4000", AccumulatedDepreciationAccountCode: "1-4900", DepreciationExpenseAccountCode: "5-4500", DefaultUsefulLifeMonths: 48},
 	{Code: "kendaraan", Name: "Kendaraan", AssetAccountCode: "1-4100", AccumulatedDepreciationAccountCode: "1-4900", DepreciationExpenseAccountCode: "5-4500", DefaultUsefulLifeMonths: 96},
+	{Code: "gedung-bangunan", Name: "Gedung/Bangunan", AssetAccountCode: "1-4200", AccumulatedDepreciationAccountCode: "1-4900", DepreciationExpenseAccountCode: "5-4500", DefaultUsefulLifeMonths: 240},
 }
 
 // SeedDefaultCategories menyemai master untuk tenant BARU (idempoten).

@@ -29,7 +29,7 @@ func TestPreview_AutoAllocation_MultiSchedule(t *testing.T) {
 		sched(4, 4, 300_000_000), // Termin 4
 	})
 
-	p, err := svc.PreviewCollectionPayment(context.Background(), 1, contract, domain.FromInt(500_000_000), "1-1300")
+	p, err := svc.PreviewCollectionPayment(context.Background(), 1, contract, domain.FromInt(500_000_000), "1-1300", domain.Zero, 0, sale.PaymentSourceCollection)
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestPreview_OverpayBeforeBAST_ShowsBuyerCredit(t *testing.T) {
 	svc, contract := previewSetup(1_000_000_000, "reserved", []*sale.PaymentSchedule{
 		sched(1, 1, 1_000_000_000),
 	})
-	p, err := svc.PreviewCollectionPayment(context.Background(), 1, contract, domain.FromInt(1_200_000_000), "1-1300")
+	p, err := svc.PreviewCollectionPayment(context.Background(), 1, contract, domain.FromInt(1_200_000_000), "1-1300", domain.Zero, 0, sale.PaymentSourceCollection)
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestPreview_OverpayAfterBAST_Invalid(t *testing.T) {
 	svc, _, ts := buildServiceWithContracts(units, nil, cs)
 	ts.SetSaleRecord(&sale.SaleRecord{ID: 1, TenantID: tenant, UnitID: unit, SalePrice: domain.FromInt(1_000_000_000)}, tenant)
 
-	p, err := svc.PreviewCollectionPayment(context.Background(), tenant, contract, domain.FromInt(1_200_000_000), "1-1300")
+	p, err := svc.PreviewCollectionPayment(context.Background(), tenant, contract, domain.FromInt(1_200_000_000), "1-1300", domain.Zero, 0, sale.PaymentSourceCollection)
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestPreview_OverpayAfterBAST_Invalid(t *testing.T) {
 // Preview menampilkan baris jurnal Dr Bank / Cr Uang Muka (pra-BAST).
 func TestPreview_JournalLines_PreBAST(t *testing.T) {
 	svc, contract := previewSetup(1_000_000_000, "reserved", []*sale.PaymentSchedule{sched(1, 1, 1_000_000_000)})
-	p, err := svc.PreviewCollectionPayment(context.Background(), 1, contract, domain.FromInt(400_000_000), "1-1300")
+	p, err := svc.PreviewCollectionPayment(context.Background(), 1, contract, domain.FromInt(400_000_000), "1-1300", domain.Zero, 0, sale.PaymentSourceCollection)
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}

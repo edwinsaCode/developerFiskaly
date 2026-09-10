@@ -13,7 +13,7 @@ func TestCostCategory_Valid(t *testing.T) {
 		domain.CostCategoryLand,
 		domain.CostCategoryHard,
 		domain.CostCategorySoft,
-		domain.CostCategoryFinancing,
+		domain.CostCategoryOperational,
 		domain.CostCategoryMarketing,
 		domain.CostCategoryOther,
 	}
@@ -31,9 +31,11 @@ func TestCostCategory_Valid(t *testing.T) {
 }
 
 func TestCostCategory_CapitalizableVsExpense_Disjoint(t *testing.T) {
-	// AllCostCategories (pool HPP, BCA-1) tetap TEPAT 4 kategori kapitalisasi.
-	if len(domain.AllCostCategories) != 4 {
-		t.Fatalf("AllCostCategories harus tetap 4 (taxonomy HPP), got %d", len(domain.AllCostCategories))
+	// AllCostCategories (pool HPP, BCA-1) tetap TEPAT 2 kategori kapitalisasi
+	// (RULE KLIEN FREEZE 2026-09-04: HPP hanya Tanah + Konstruksi/Hard Cost —
+	// Soft Cost menyusul Operasional keluar dari HPP).
+	if len(domain.AllCostCategories) != 2 {
+		t.Fatalf("AllCostCategories harus tetap 2 (taxonomy HPP), got %d", len(domain.AllCostCategories))
 	}
 	for _, c := range domain.AllCostCategories {
 		if !c.IsCapitalizable() || c.IsExpense() {
@@ -60,6 +62,8 @@ func TestCostCategory_ExpenseAccountCode(t *testing.T) {
 	}{
 		{domain.CostCategoryMarketing, "5-3000"},
 		{domain.CostCategoryOther, "5-4000"},
+		{domain.CostCategoryOperational, "5-4600"},
+		{domain.CostCategorySoft, "5-4700"},
 	}
 	for _, tc := range cases {
 		if got := tc.cat.ExpenseAccountCode(); got != tc.want {
@@ -78,14 +82,17 @@ func TestCostCategory_InventoryAccountCode(t *testing.T) {
 	}{
 		{domain.CostCategoryLand, "1-3000"},
 		{domain.CostCategoryHard, "1-3100"},
-		{domain.CostCategorySoft, "1-3200"},
-		{domain.CostCategoryFinancing, "1-3300"},
 	}
 	for _, tc := range cases {
 		got := tc.cat.InventoryAccountCode()
 		if got != tc.want {
 			t.Errorf("CostCategory(%q).InventoryAccountCode() = %q, want %q", tc.cat, got, tc.want)
 		}
+	}
+	// RULE KLIEN FREEZE (2026-09-04): Soft Cost bukan lagi kategori kapitalisasi
+	// — InventoryAccountCode() harus kosong seperti kategori beban lainnya.
+	if got := domain.CostCategorySoft.InventoryAccountCode(); got != "" {
+		t.Errorf("CostCategorySoft.InventoryAccountCode() = %q, want empty (bukan HPP lagi)", got)
 	}
 	// Unknown category returns empty string.
 	if got := domain.CostCategory("unknown").InventoryAccountCode(); got != "" {

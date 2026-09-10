@@ -93,7 +93,6 @@ func (r *GORMRepository) FindUserEmail(ctx context.Context, tenantID, userID uin
 // SATU definisi via AccountRoleRegistry (S1) — dulu kembar dgn cost/repository.go.
 var inventoryCodes = ledger.RoleCodeList(ledger.RoleInventory)
 
-
 // GetProjectWideCosts mengambil biaya project-wide (unit_id IS NULL) dari jurnal.
 func (r *GORMRepository) GetProjectWideCosts(ctx context.Context, tenantID, projectID uint64) (domain.UnitCostBreakdown, error) {
 	return r.queryCosts(ctx, tenantID, projectID, "project-wide", 0)
@@ -119,6 +118,8 @@ func (r *GORMRepository) queryCosts(ctx context.Context, tenantID, projectID uin
 	if err != nil {
 		return domain.UnitCostBreakdown{}, fmt.Errorf("queryCosts(%s): %w", filter, err)
 	}
+	// AllCostCategories hanya land|hard (RULE KLIEN FREEZE 2026-09-04) — b.Soft
+	// tidak pernah diisi dari sini (field itu legacy-only untuk baca data historis).
 	var b domain.UnitCostBreakdown
 	for _, c := range domain.AllCostCategories {
 		if m, ok := byCode[c.InventoryAccountCode()]; ok {
@@ -127,10 +128,6 @@ func (r *GORMRepository) queryCosts(ctx context.Context, tenantID, projectID uin
 				b.Land = m
 			case domain.CostCategoryHard:
 				b.Hard = m
-			case domain.CostCategorySoft:
-				b.Soft = m
-			case domain.CostCategoryFinancing:
-				b.Financing = m
 			}
 		}
 	}
@@ -147,6 +144,7 @@ type unitRow struct {
 	Category     *string         `gorm:"column:category"` // NULL = unit_type tak terdaftar di katalog
 	SaleableArea decimal.Decimal `gorm:"column:saleable_area"`
 	ListPrice    domain.Money    `gorm:"column:list_price"`
+	LandAreaM2   decimal.Decimal `gorm:"column:land_area"`
 }
 
 // GetUnitInputs mengambil unit sebuah proyek YANG IKUT HPP beserta area dan
@@ -168,7 +166,7 @@ func (r *GORMRepository) GetUnitInputs(ctx context.Context, tenantID, projectID 
 	var rows []unitRow
 	err := r.db.WithContext(ctx).
 		Table("units u").
-		Select("u.id, u.code, u.unit_type, pt.category, u.saleable_area, u.list_price").
+		Select("u.id, u.code, u.unit_type, pt.category, u.saleable_area, u.list_price, u.land_area").
 		Joins("LEFT JOIN product_types pt ON pt.tenant_id = u.tenant_id AND pt.code = u.unit_type").
 		Where("u.tenant_id = ? AND u.project_id = ?", tenantID, projectID).
 		Order("u.id ASC").
@@ -193,6 +191,7 @@ func (r *GORMRepository) GetUnitInputs(ctx context.Context, tenantID, projectID 
 			UnitID:       row.ID,
 			SaleableArea: row.SaleableArea,
 			SalesValue:   row.ListPrice,
+			LandAreaM2:   row.LandAreaM2,
 			Direct:       direct,
 		})
 	}
@@ -250,18 +249,20 @@ func (r *GORMRepository) GetLandPoolParticipants(ctx context.Context, tenantID, 
 	var stock struct {
 		ID              uint64          `gorm:"column:id"`
 		TotalQuantityM2 decimal.Decimal `gorm:"column:total_quantity_m2"`
+		PurchasePrice   domain.Money    `gorm:"column:purchase_price"`
 	}
 	err = r.db.WithContext(ctx).
 		Table("land_stock").
-		Select("id, total_quantity_m2").
+		Select("id, total_quantity_m2, purchase_price").
 		Where("tenant_id = ? AND project_id = ?", tenantID, projectID).
 		Take(&stock).Error
 	switch {
 	case err == nil:
 		participants = append(participants, LandPoolParticipant{
-			Kind:        LandPoolParticipantLandStock,
-			LandStockID: stock.ID,
-			LandAreaM2:  stock.TotalQuantityM2,
+			Kind:               LandPoolParticipantLandStock,
+			LandStockID:        stock.ID,
+			LandAreaM2:         stock.TotalQuantityM2,
+			PurchasePricePerM2: stock.PurchasePrice,
 		})
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		// Proyek tanpa land_stock: tidak opt-in Kelebihan Tanah — tidak ada
@@ -271,4 +272,116 @@ func (r *GORMRepository) GetLandPoolParticipants(ctx context.Context, tenantID, 
 	}
 
 	return participants, nil
+}
+
+// ── HardPoolSource / UnitTaxCategorySource implementation (UAT 2026-09-07) ──
+
+// hardSubpoolRow adalah proyeksi hasil GROUP BY hard_subcategory dari
+// cost_entries — biaya Konstruksi (Hard) project-wide (tier=shared,
+// unit_id IS NULL) yang SUDAH ter-posting dan belum dibatalkan.
+type hardSubpoolRow struct {
+	HardSubcategory *string      `gorm:"column:hard_subcategory"`
+	Total           domain.Money `gorm:"column:total"`
+}
+
+// GetHardSubpools memecah biaya Konstruksi project-wide sebuah proyek menjadi
+// 3 pool (ProduksiSubsidi/ProduksiKomersial/General) berdasarkan
+// cost_entries.hard_subcategory (migration 000103).
+//
+// Sumber kebenaran = cost_entries, BUKAN journal_lines seperti queryCosts —
+// hard_subcategory adalah atribut transaksi (cost_entries), bukan atribut
+// akun, sehingga tidak bisa diturunkan dari kode akun Persediaan generik.
+// Filter posted (je.posted_at IS NOT NULL) dan belum dibatalkan (LEFT JOIN
+// rev ... rev.id IS NULL) mereplikasi pola exact yang sama dengan
+// expenseStatusOf di internal/cost/expense_query.go — satu cost_entry yang
+// jurnalnya sudah dibalik tidak lagi dihitung sebagai biaya aktual (reversing
+// journal menetralkan penuh, jadi exclude == netting ke nol, Invariant #5).
+// unit_id IS NULL + cost_tier=shared menyaring HANYA baris "Produksi
+// Unit/Blok" project-wide yang memang melalui allocation engine — baris
+// tier=direct (sudah ber-unit_id) sudah 1:1 ke unit lewat GetUnitDirectCosts,
+// tidak boleh dobel dihitung di sini (Invariant #3).
+func (r *GORMRepository) GetHardSubpools(ctx context.Context, tenantID, projectID uint64) (HardSubpools, error) {
+	var rows []hardSubpoolRow
+	err := r.db.WithContext(ctx).
+		Table("cost_entries ce").
+		Select("ce.hard_subcategory AS hard_subcategory, SUM(ce.amount) AS total").
+		Joins("JOIN journal_entries je ON je.id = ce.journal_entry_id AND je.tenant_id = ce.tenant_id").
+		Joins("LEFT JOIN journal_entries rev ON rev.reverses_id = je.id AND rev.tenant_id = ce.tenant_id AND rev.posted_at IS NOT NULL").
+		Where("ce.tenant_id = ? AND ce.project_id = ? AND ce.category = ? AND ce.cost_tier = ? AND ce.unit_id IS NULL",
+			tenantID, projectID, domain.CostCategoryHard, domain.CostTierShared).
+		Where("je.posted_at IS NOT NULL AND rev.id IS NULL").
+		Group("ce.hard_subcategory").
+		Scan(&rows).Error
+	if err != nil {
+		return HardSubpools{}, fmt.Errorf("GetHardSubpools: %w", err)
+	}
+
+	var pools HardSubpools
+	for _, row := range rows {
+		var sub domain.ConstructionSubcategory
+		if row.HardSubcategory != nil {
+			sub = domain.ConstructionSubcategory(*row.HardSubcategory)
+		}
+		switch sub {
+		case domain.ConstructionProduksiSubsidi:
+			pools.ProduksiSubsidi = row.Total
+		case domain.ConstructionProduksiKomersial:
+			pools.ProduksiKomersial = row.Total
+		default:
+			// Sarana & Prasarana, Perizinan, NULL (baris legacy pra-migration
+			// 000103) — semuanya digabung General, perilaku identik dengan
+			// sebelum fitur ini.
+			pools.General = pools.General.Add(row.Total)
+		}
+	}
+	return pools, nil
+}
+
+// unitTaxRow adalah proyeksi TaxCategory efektif mentah (belum diresolusi)
+// untuk satu unit: TaxCategory product_type (override, boleh NULL) dan
+// TaxCategory proyek (default, boleh NULL/kosong pada proyek legacy).
+type unitTaxRow struct {
+	UnitID            uint64  `gorm:"column:id"`
+	ProductTypeTaxCat *string `gorm:"column:pt_tax_category"`
+	ProjectTaxCat     *string `gorm:"column:project_tax_category"`
+}
+
+// GetUnitTaxCategories mengembalikan TaxCategory efektif setiap unit dalam
+// sebuah proyek, mereplikasi algoritma resolusi tax.Service persis
+// (internal/tax/service.go: product_type.tax_category MENANG atas
+// projects.tax_category bila diset) via raw SQL — TIDAK mengimpor package
+// tax/project untuk menghindari import cycle (allocation di-import tax? —
+// tidak, tapi project meng-import allocation, jadi arah sebaliknya juga harus
+// dihindari untuk konsistensi arsitektur).
+//
+// Unit yang keduanya (product_type dan project) tidak punya TaxCategory valid
+// TIDAK dimasukkan ke map — ComputeHardPool memperlakukan unit yang tidak ada
+// di map sebagai "tidak ikut pool Subsidi maupun Komersial" (hanya General).
+func (r *GORMRepository) GetUnitTaxCategories(ctx context.Context, tenantID, projectID uint64) (map[uint64]domain.TaxCategory, error) {
+	var rows []unitTaxRow
+	err := r.db.WithContext(ctx).
+		Table("units u").
+		Select("u.id, pt.tax_category AS pt_tax_category, p.tax_category AS project_tax_category").
+		Joins("LEFT JOIN product_types pt ON pt.tenant_id = u.tenant_id AND pt.code = u.unit_type").
+		Joins("JOIN projects p ON p.tenant_id = u.tenant_id AND p.id = u.project_id").
+		Where("u.tenant_id = ? AND u.project_id = ?", tenantID, projectID).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("GetUnitTaxCategories: %w", err)
+	}
+
+	out := make(map[uint64]domain.TaxCategory, len(rows))
+	for _, row := range rows {
+		cat := domain.TaxCategory("")
+		if row.ProjectTaxCat != nil {
+			cat = domain.TaxCategory(*row.ProjectTaxCat)
+		}
+		if row.ProductTypeTaxCat != nil && *row.ProductTypeTaxCat != "" {
+			cat = domain.TaxCategory(*row.ProductTypeTaxCat)
+		}
+		if cat.Valid() {
+			out[row.UnitID] = cat
+		}
+	}
+	return out, nil
 }

@@ -18,12 +18,17 @@ export function BookingStatusBadge({ status, expired }: { status: BookingStatus;
 export function FeeDispositionBadge({ d }: { d: FeeDisposition }) {
   const map: Record<FeeDisposition, { v: "accent" | "success" | "neutral" | "warning"; label: string }> = {
     recognized:     { v: "success", label: "Pendapatan Booking" },
-    // Legacy (baris histori pra-rule 2026-07-29):
-    held:           { v: "accent",  label: "Titipan (legacy)" },
+    // Item 3 (2026-09): "held"/"pending_refund"/"refunded" kini juga dipakai
+    // booking BARU yang ditandai Refundable saat dibuat — bukan lagi
+    // eksklusif baris legacy pra-rule 2026-07-29.
+    held:           { v: "accent",  label: "Titipan Booking (refundable)" },
+    pending_refund: { v: "warning", label: "Menunggu Refund" },
+    refunded:       { v: "success", label: "Sudah Direfund" },
+    // Masih legacy-only: booking baru tidak pernah mencapai state ini
+    // (forfeited hanya utk held+non-refundable, yang tidak lagi bisa dibuat;
+    // transferred hanya jalur konversi legacy CountsTowardPrice=true).
     transferred:    { v: "success", label: "→ Saldo Kredit Buyer (legacy)" },
     forfeited:      { v: "neutral", label: "Hangus (legacy)" },
-    pending_refund: { v: "warning", label: "Menunggu Refund (legacy)" },
-    refunded:       { v: "success", label: "Sudah Direfund (legacy)" },
   };
   const m = map[d];
   return <Badge variant={m.v}>{m.label}</Badge>;

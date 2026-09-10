@@ -94,6 +94,9 @@ func main() {
 	summaryAdapter := &contractSummaryAdapter{svc: saleHandler.Svc()}
 	billingSvc.SetContractSummaryProvider(summaryAdapter)
 	billingHandler.ReceiptSvc().SetContractSummaryProvider(summaryAdapter)
+	// UAT 2026-09-03 #1: kwitansi pembayaran ber-target satu jadwal (mis.
+	// Kelebihan Tanah) mencetak sisa JADWAL itu, bukan Outstanding kontrak.
+	billingHandler.ReceiptSvc().SetScheduleOutstandingLoader(billing.NewGORMRepository(gdb))
 	// R1 KPR Realization: auto-invoice kekurangan (kebijakan tenant, default off).
 	billingSvc.SetTenantPolicyReader(billing.NewGORMRepository(gdb))
 	saleHandler.Svc().SetShortfallInvoicer(billingSvc)
@@ -104,11 +107,11 @@ func main() {
 	cancellationHandler := cancellation.NewHandler(gdb)
 	commissionHandler := commission.NewHandler(gdb)
 	crmHandler := crm.NewHandler(gdb)
-	notaryHandler := notary.NewHandler(gdb)         // UAT Batch 2 §3
-	documentHandler := document.NewHandler(gdb)     // W-2 — Document Domain
-	histfinHandler := histfin.NewHandler(gdb)       // W-6 — Snapshot Keuangan Historis (non-ledger)
-	landHandler := land.NewHandler(gdb)             // LT-3..LT-5 — Kelebihan Tanah: pool, reservasi, Akad (kelebihan-tanah-final-architecture-2026-08.md)
-	fixedAssetHandler := fixedasset.NewHandler(gdb) // Fixed Asset Register + Penyusutan (straight-line)
+	notaryHandler := notary.NewHandler(gdb)               // UAT Batch 2 §3
+	documentHandler := document.NewHandler(gdb)           // W-2 — Document Domain
+	histfinHandler := histfin.NewHandler(gdb)             // W-6 — Snapshot Keuangan Historis (non-ledger)
+	landHandler := land.NewHandler(gdb, taxHandler.Svc()) // LT-3..LT-5 — Kelebihan Tanah: pool, reservasi, Akad (kelebihan-tanah-final-architecture-2026-08.md); PPh Final otomatis via tax.Service yang sama dipakai unit/BAST
+	fixedAssetHandler := fixedasset.NewHandler(gdb)       // Fixed Asset Register + Penyusutan (straight-line)
 	// Toggle "Jenis Pembelian: Fixed Asset" di /expenses — SATU pintu masuk
 	// pengeluaran yang sudah ada (W-10), bukan endpoint baru.
 	costHandler.SetFixedAssetService(fixedAssetHandler.Service())
@@ -141,6 +144,10 @@ func main() {
 	// berjumlah — persis cacat yang W-4 tutup.
 	// W-5 — pembatalan penjualan ikut membalik piutang biaya realisasi unit.
 	cancellationHandler.Svc().SetRealizationReleaser(chargeSvc)
+	// Bug fix Saldo Kredit Buyer (2026-09-04) — pembatalan menutup sisa saldo
+	// kredit buyer yang belum terpakai, simetris dgn penutupan otomatis saat
+	// Akad (sale.Service.ConsumeRemainingCreditInTx, dipanggil BASTAtomicWriter).
+	cancellationHandler.Svc().SetBuyerCreditConsumer(saleHandler.Svc())
 	reportingHandler.SetRealizationReceivable(chargeSvc)
 	saleHandler.Svc().SetRealizationExposure(chargeSvc)
 	// T-1 (keputusan klien 2026-08-05): transfer titipan = transfer INTERNAL —
@@ -173,6 +180,10 @@ func main() {
 	// ber-BAST tanpa jadwal tidak terhitung sama sekali — dua kesalahan yang
 	// berjalan bersamaan dan tak satu pun terlihat dari layar mana pun.
 	reportingHandler.SetHouseReceivable(saleHandler.Svc())
+	// Piutang Kelebihan Tanah (bug ditemukan 2026-08-31): land_sales sebelumnya
+	// tidak pernah dibaca AR/collection dashboard sama sekali — lihat
+	// internal/land/receivable.go.
+	reportingHandler.SetLandReceivable(landHandler.Svc())
 
 	// R-1: pintu pembalikan jurnal umum menolak jurnal yang punya sub-ledger.
 	// Pembatalan penjualan tetap membalik lewat PostingService yang sama — yang
@@ -252,7 +263,7 @@ func (a *contractSummaryAdapter) SummaryByContractID(ctx context.Context, tenant
 	if err != nil {
 		return nil, err
 	}
-	return mapContractSummary(sum), nil
+	return a.mapWithSplit(ctx, tenantID, sum)
 }
 
 func (a *contractSummaryAdapter) SummaryByUnitID(ctx context.Context, tenantID, unitID uint64) (*billing.ContractSummary, error) {
@@ -260,7 +271,25 @@ func (a *contractSummaryAdapter) SummaryByUnitID(ctx context.Context, tenantID, 
 	if err != nil {
 		return nil, err
 	}
-	return mapContractSummary(sum), nil
+	return a.mapWithSplit(ctx, tenantID, sum)
+}
+
+// mapWithSplit (Gap 2, UAT 2026-09-08) melengkapi ringkasan dgn split Dana
+// Jaminan Bank vs Piutang Usaha (sale.Service.HouseControlSplit) — SUMBER YANG
+// SAMA dipakai HouseARRows/laporan Piutang, bukan rumus kedua untuk kwitansi.
+func (a *contractSummaryAdapter) mapWithSplit(ctx context.Context, tenantID uint64, sum *sale.ContractFinancialSummary) (*billing.ContractSummary, error) {
+	cs := mapContractSummary(sum)
+	cs.TotalOutstandingActual = sum.TotalOutstandingActual
+	_, finRemaining, _, err := a.svc.HouseControlSplit(ctx, tenantID, sum.UnitID)
+	if err != nil {
+		return nil, err
+	}
+	if finRemaining.GreaterThan(sum.TotalOutstandingActual) {
+		finRemaining = sum.TotalOutstandingActual
+	}
+	cs.FinancingRemaining = finRemaining
+	cs.CustomerReceivableRemaining = sum.TotalOutstandingActual.Sub(finRemaining)
+	return cs, nil
 }
 
 func mapContractSummary(sum *sale.ContractFinancialSummary) *billing.ContractSummary {

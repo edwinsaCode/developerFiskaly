@@ -10,6 +10,10 @@ interface Props {
   error: boolean;
 }
 
+function fmtID(dateStr: string): string {
+  return new Date(dateStr).toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" });
+}
+
 export function NeracaSection({ data, error }: Props) {
   if (error) {
     return (
@@ -39,9 +43,23 @@ export function NeracaSection({ data, error }: Props) {
           : "bg-danger-bg border border-danger/30 text-danger"}`}>
         <span className="text-lg">{data.is_balanced ? "✓" : "✗"}</span>
         {data.is_balanced
-          ? `Neraca seimbang per ${new Date(data.as_of).toLocaleDateString("id-ID", { day:"numeric", month:"long", year:"numeric" })}`
+          ? `Neraca seimbang per ${fmtID(data.as_of)}`
           : "PERINGATAN: Neraca tidak seimbang — ada jurnal yang belum balance"}
       </div>
+
+      {data.from && (
+        <div className="rounded-lg px-4 py-3 bg-surface border border-border text-sm -mt-2">
+          <p className="text-text-secondary">
+            Laba/Rugi Periode Terpilih ({fmtID(data.from)} s/d {fmtID(data.as_of)}):{" "}
+            <span className="font-semibold text-text-primary">
+              <Rupiah value={data.laba_rugi_periode_terpilih ?? "0"} colorSign={false} />
+            </span>
+          </p>
+          <p className="text-xs text-text-tertiary mt-1">
+            Angka ini murni informasi — Neraca (Aset/Kewajiban/Ekuitas dan Laba/Rugi Tahun Berjalan di bawah) selalu snapshot kumulatif s/d {fmtID(data.as_of)} dan tidak dipengaruhi Start Date.
+          </p>
+        </div>
+      )}
 
       {/* Ringkasan totals */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

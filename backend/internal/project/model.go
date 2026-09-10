@@ -218,8 +218,14 @@ const (
 	EventUnblocked            TransitionEvent = "unblocked"
 	EventMaintenanceStarted   TransitionEvent = "maintenance_started"
 	EventMaintenanceFinished  TransitionEvent = "maintenance_finished"
-	EventManual               TransitionEvent = "manual"   // transisi operator via endpoint (kompat)
-	EventBackfill             TransitionEvent = "backfill" // baris sintetis titik awal audit
+	// EventBookingTransferredOut/In (Item 3, 2026-09): booking active dipindah
+	// ke unit lain TANPA jurnal (fee sudah tercatat final/held di unit asal —
+	// append-only). Dua log per transfer: unit lama booked→available (Out),
+	// unit baru available→booked (In), satu ReferenceID (booking) menautkan.
+	EventBookingTransferredOut TransitionEvent = "booking_transferred_out"
+	EventBookingTransferredIn  TransitionEvent = "booking_transferred_in"
+	EventManual                TransitionEvent = "manual"   // transisi operator via endpoint (kompat)
+	EventBackfill              TransitionEvent = "backfill" // baris sintetis titik awal audit
 )
 
 // Valid returns true if e is a recognized TransitionEvent.
@@ -230,6 +236,7 @@ func (e TransitionEvent) Valid() bool {
 		EventContractCancelled, EventAkadExecuted, EventCancelledPostBAST,
 		EventPhysicallyOccupied, EventAdminHold, EventHoldReleased, EventLegalBlock,
 		EventUnblocked, EventMaintenanceStarted, EventMaintenanceFinished,
+		EventBookingTransferredOut, EventBookingTransferredIn,
 		EventManual, EventBackfill:
 		return true
 	}
@@ -261,6 +268,8 @@ var eventTransitions = map[TransitionEvent][][2]UnitStatus{
 	EventUnblocked:            {{UnitStatusBlocked, UnitStatusAvailable}},
 	EventMaintenanceStarted:   {{UnitStatusOccupied, UnitStatusMaintenance}},
 	EventMaintenanceFinished:  {{UnitStatusMaintenance, UnitStatusOccupied}},
+	EventBookingTransferredOut: {{UnitStatusBooked, UnitStatusAvailable}},
+	EventBookingTransferredIn:  {{UnitStatusAvailable, UnitStatusBooked}},
 }
 
 // Allows reports whether event e may label the transition from → to.

@@ -7,6 +7,7 @@ import { ApiError } from "@/lib/api/client";
 import type { JournalEntry, JournalSource } from "@/lib/types/api";
 import { Can } from "@/components/ui/Can";
 import { JournalDocumentPanel, type DocumentSelection } from "./JournalDocumentPanel";
+import { LinkifiedText } from "@/components/documents/LinkifiedText";
 import { todayLocalStr } from "@/lib/date";
 
 interface Props {
@@ -164,7 +165,9 @@ export function JournalDetail({ token, id }: Props) {
                 <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-warning-bg text-warning">Pembalik</span>
               )}
             </div>
-            <h2 className="text-lg font-semibold text-text-primary">{journal.description}</h2>
+            <h2 className="text-lg font-semibold text-text-primary">
+              <LinkifiedText token={token} text={journal.description} />
+            </h2>
           </div>
           <div className="text-right text-sm text-text-secondary shrink-0">
             <div className="font-medium text-text-primary">{formatDate(journal.date)}</div>
@@ -226,7 +229,9 @@ export function JournalDetail({ token, id }: Props) {
                     <span className="text-text-secondary">Akun #{line.account_id}</span>
                   )}
                 </td>
-                <td className="px-4 py-3 text-text-secondary">{line.description || "—"}</td>
+                <td className="px-4 py-3 text-text-secondary">
+                  {line.description ? <LinkifiedText token={token} text={line.description} /> : "—"}
+                </td>
                 <td className="px-4 py-3 text-right font-mono text-text-primary">
                   {parseFloat(line.debit) > 0 ? formatRupiah(line.debit) : "—"}
                 </td>

@@ -82,6 +82,12 @@ func (h *Handler) SetLegacyReceivable(r LegacyReceivableReader) {
 	h.svc.WithLegacyReader(r)
 }
 
+// SetLandReceivable memasang sumber piutang Kelebihan Tanah (land.Service).
+// Belum terpasang berarti sumber ini tidak muncul di laporan piutang.
+func (h *Handler) SetLandReceivable(r LandReceivableReader) {
+	h.svc.WithLandReader(r)
+}
+
 // SetTaxReader (S7) memasang pembaca kanonik laporan pajak (tax.Service).
 func (h *Handler) SetTaxReader(t TaxReader) {
 	h.svc.WithTaxReader(t)
@@ -127,8 +133,9 @@ func (h *Handler) balanceSheet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	asOf := parseDate(r.URL.Query().Get("as_of"), time.Now())
+	startDate := parseOptionalDate(r.URL.Query().Get("start_date"))
 
-	neraca, err := h.svc.GetNeraca(r.Context(), tenantID, asOf)
+	neraca, err := h.svc.GetNeraca(r.Context(), tenantID, startDate, asOf)
 	if err != nil {
 		writeReportError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -161,8 +168,9 @@ func (h *Handler) incomeStatement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	asOf := parseDate(r.URL.Query().Get("as_of"), time.Now())
+	startDate := parseOptionalDate(r.URL.Query().Get("start_date"))
 
-	rpt, err := h.svc.GetKonsolidasiPL(r.Context(), tenantID, asOf)
+	rpt, err := h.svc.GetKonsolidasiPL(r.Context(), tenantID, startDate, asOf)
 	if err != nil {
 		writeReportError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -187,8 +195,9 @@ func (h *Handler) projectPL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	asOf := parseDate(r.URL.Query().Get("as_of"), time.Now())
+	startDate := parseOptionalDate(r.URL.Query().Get("start_date"))
 
-	rpt, err := h.svc.GetProjectPL(r.Context(), tenantID, projectID, asOf)
+	rpt, err := h.svc.GetProjectPL(r.Context(), tenantID, projectID, startDate, asOf)
 	if err != nil {
 		writeReportError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -451,7 +460,8 @@ func (h *Handler) balanceSheetPrint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	asOf := parseDate(r.URL.Query().Get("as_of"), time.Now())
-	rpt, err := h.svc.GetNeraca(r.Context(), tenantID, asOf)
+	startDate := parseOptionalDate(r.URL.Query().Get("start_date"))
+	rpt, err := h.svc.GetNeraca(r.Context(), tenantID, startDate, asOf)
 	if err != nil {
 		writeReportError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -467,7 +477,8 @@ func (h *Handler) incomeStatementPrint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	asOf := parseDate(r.URL.Query().Get("as_of"), time.Now())
-	rpt, err := h.svc.GetKonsolidasiPL(r.Context(), tenantID, asOf)
+	startDate := parseOptionalDate(r.URL.Query().Get("start_date"))
+	rpt, err := h.svc.GetKonsolidasiPL(r.Context(), tenantID, startDate, asOf)
 	if err != nil {
 		writeReportError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -488,7 +499,8 @@ func (h *Handler) projectPLPrint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	asOf := parseDate(r.URL.Query().Get("as_of"), time.Now())
-	rpt, err := h.svc.GetProjectPL(r.Context(), tenantID, projectID, asOf)
+	startDate := parseOptionalDate(r.URL.Query().Get("start_date"))
+	rpt, err := h.svc.GetProjectPL(r.Context(), tenantID, projectID, startDate, asOf)
 	if err != nil {
 		writeReportError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -690,6 +702,20 @@ func parseDate(s string, fallback time.Time) time.Time {
 		return fallback
 	}
 	return t
+}
+
+// parseOptionalDate (Item 5): sama seperti parseDate tapi nil bila kosong/invalid,
+// dipakai untuk query param opsional seperti start_date pada Neraca/L/R (tanpa
+// batas bawah = perilaku lama).
+func parseOptionalDate(s string) *time.Time {
+	if s == "" {
+		return nil
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return nil
+	}
+	return &t
 }
 
 func plToCSVRows(rpt *PLReport) [][]string {

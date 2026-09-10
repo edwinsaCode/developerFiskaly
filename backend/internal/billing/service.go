@@ -117,12 +117,21 @@ func (s *Service) GenerateInvoice(
 
 // ── R1: Invoice Kekurangan Pembayaran ─────────────────────────────────────────
 
-// GenerateShortfallInvoice membuat invoice KEKURANGAN sebesar Outstanding
-// kontrak (SATU rumus — ContractFinancialSummary via provider). Aturan:
-//   - Outstanding harus > 0 (ErrNoOutstanding).
+// GenerateShortfallInvoice membuat invoice KEKURANGAN sebesar sisa kewajiban
+// CUSTOMER sendiri (SATU rumus — ContractFinancialSummary + HouseControlSplit
+// via provider, SoT yang sama dengan Piutang Usaha/Customer Statement). Aturan:
+//   - CustomerReceivableRemaining harus > 0 (ErrNoOutstanding).
 //   - Maksimal SATU invoice KEKURANGAN yang belum dibayar per kontrak
 //     (ErrShortfallInvoiceExists) — mencegah tagihan ganda saat pencairan
 //     bertahap; invoice lama harus diselesaikan/dibatalkan dulu.
+//
+// KPR bertahap (temuan UAT 2026-09-09): field Outstanding lama adalah proyeksi
+// naif NetContract−TotalPaid — ia TIDAK tahu bagian KPR yang sudah cair tapi
+// masih menjadi Dana Jaminan Bank (bukan kewajiban customer). Memakainya di
+// sini menagih customer atas bagian yang sebetulnya komitmen bank.
+// CustomerReceivableRemaining sudah menetokan bagian itu (mapWithSplit di
+// wiring, via sale.Service.HouseControlSplit) — dipakai di sini, bukan rumus
+// baru.
 // TIDAK memposting jurnal (invoice = dokumen tagihan, bukan pengakuan).
 func (s *Service) GenerateShortfallInvoice(ctx context.Context, tenantID, contractID, createdBy uint64, dueDate time.Time, notes string) (*Invoice, error) {
 	if s.summary == nil {
@@ -135,7 +144,7 @@ func (s *Service) GenerateShortfallInvoice(ctx context.Context, tenantID, contra
 	if err != nil {
 		return nil, fmt.Errorf("hitung outstanding: %w", err)
 	}
-	if cs.Outstanding.IsZero() || cs.Outstanding.IsNeg() {
+	if cs.CustomerReceivableRemaining.IsZero() || cs.CustomerReceivableRemaining.IsNeg() {
 		return nil, ErrNoOutstanding
 	}
 	// Dedup: satu KEKURANGAN unpaid per kontrak.
@@ -158,7 +167,7 @@ func (s *Service) GenerateShortfallInvoice(ctx context.Context, tenantID, contra
 		InvoiceType:    TypeKekurangan,
 		IssueDate:      time.Now(),
 		DueDate:        dueDate,
-		Amount:         cs.Outstanding,
+		Amount:         cs.CustomerReceivableRemaining,
 		Status:         StatusIssued,
 		Notes:          notes,
 		CreatedBy:      createdBy,
@@ -372,17 +381,18 @@ func (s *Service) MaybeAutoShortfallInvoice(ctx context.Context, tenantID, contr
 	_, _ = s.GenerateShortfallInvoice(ctx, tenantID, contractID, createdBy, time.Time{}, "Dibuat otomatis pasca pencairan bank (kebijakan tenant)")
 }
 
-// SettleShortfallIfPaid implements sale.ShortfallInvoicer: bila outstanding
-// kontrak (satu rumus — ContractFinancialSummary) sudah nol, seluruh invoice
-// KEKURANGAN yang masih terbuka ditandai paid. Best-effort — tidak pernah
-// menggagalkan pembayaran; invoice kekurangan tak terikat schedule sehingga
-// jalur MarkPaidByScheduleID tidak menjangkaunya.
+// SettleShortfallIfPaid implements sale.ShortfallInvoicer: bila sisa
+// kewajiban CUSTOMER sendiri (CustomerReceivableRemaining — SoT yang sama
+// dengan GenerateShortfallInvoice, bukan proyeksi Outstanding naif) sudah nol,
+// seluruh invoice KEKURANGAN yang masih terbuka ditandai paid. Best-effort —
+// tidak pernah menggagalkan pembayaran; invoice kekurangan tak terikat
+// schedule sehingga jalur MarkPaidByScheduleID tidak menjangkaunya.
 func (s *Service) SettleShortfallIfPaid(ctx context.Context, tenantID, contractID uint64) {
 	if s.summary == nil {
 		return
 	}
 	cs, err := s.summary.SummaryByContractID(ctx, tenantID, contractID)
-	if err != nil || !(cs.Outstanding.IsZero() || cs.Outstanding.IsNeg()) {
+	if err != nil || !(cs.CustomerReceivableRemaining.IsZero() || cs.CustomerReceivableRemaining.IsNeg()) {
 		return
 	}
 	invs, err := s.invoices.ListByContract(ctx, tenantID, contractID)
@@ -424,7 +434,10 @@ func (s *Service) GetPrintData(ctx context.Context, tenantID, invoiceID uint64) 
 				data.Discount = cs.Discount
 				data.NetContract = cs.NetContract
 				data.TotalPaid = cs.TotalPaid
-				data.Outstanding = cs.Outstanding
+				// KPR bertahap: "Terutang" di cetakan invoice memakai rumus SAMA
+				// dengan kwitansi (CustomerReceivableRemaining) — bukan proyeksi
+				// naif yang ikut menghitung bagian KPR yang masih Dana Jaminan Bank.
+				data.Outstanding = cs.CustomerReceivableRemaining
 				data.PriceIsSnapshot = cs.PriceIsSnapshot
 			}
 		}

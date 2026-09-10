@@ -42,6 +42,7 @@ const typeLabel: Record<ScheduleType, string> = {
   dp: "Uang Muka",
   installment: "Termin",
   final: "Pelunasan",
+  land: "Kelebihan Tanah",
 };
 
 const paymentTypeLabel: Record<string, string> = {
@@ -90,6 +91,7 @@ const invStatusLabel: Record<InvoiceStatus, string> = {
 };
 const invTypeLabel: Record<string, string> = {
   DP: "Uang Muka", TERMIN: "Termin", PELUNASAN: "Pelunasan", KEKURANGAN: "Kekurangan",
+  REALISASI: "Biaya Realisasi", KELEBIHAN_TANAH: "Kelebihan Tanah",
 };
 
 const schemeStateLabel: Record<string, string> = {
@@ -524,15 +526,16 @@ function ExposureCard({
   asOf: string;
 }) {
   const menunggak = exposure.total_overdue !== "0";
+  const hasLand = exposure.land_outstanding !== "0";
   return (
     <Card>
       <CardHeader>
         <CardTitle>Total Tagihan Customer</CardTitle>
         <p className="text-xs text-text-secondary mt-0.5">
-          Harga rumah dan biaya realisasi, per {asOf}.
+          Harga rumah{hasLand ? ", Kelebihan Tanah," : ""} dan biaya realisasi, per {asOf}.
         </p>
       </CardHeader>
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-3">
+      <div className={`grid grid-cols-1 sm:grid-cols-2 ${hasLand ? "md:grid-cols-4" : "md:grid-cols-3"} gap-4 mt-3`}>
         <div>
           <p className="text-xs text-text-secondary uppercase tracking-wide mb-1">Harga Rumah</p>
           <p className="text-lg font-bold tabular-nums text-text-primary">
@@ -542,6 +545,18 @@ function ExposureCard({
             Menunggak <Rupiah value={exposure.house_overdue} colorSign={false} />
           </p>
         </div>
+
+        {hasLand && (
+          <div>
+            <p className="text-xs text-text-secondary uppercase tracking-wide mb-1">Kelebihan Tanah</p>
+            <p className="text-lg font-bold tabular-nums text-text-primary">
+              <Rupiah value={exposure.land_outstanding} colorSign={false} />
+            </p>
+            <p className="text-[11px] text-text-tertiary mt-0.5">
+              Menunggak <Rupiah value={exposure.land_overdue} colorSign={false} />
+            </p>
+          </div>
+        )}
 
         <div>
           <p className="text-xs text-text-secondary uppercase tracking-wide mb-1">Biaya Realisasi</p>

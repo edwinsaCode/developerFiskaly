@@ -13,6 +13,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"esaproperti/internal/domain"
+	"esaproperti/internal/tax"
 )
 
 // Akun COA tetap (bukan dari Product Catalog — Kelebihan Tanah bukan produk
@@ -134,6 +135,12 @@ func (s *Service) RecordAkad(ctx context.Context, tenantID uint64, req RecordAka
 		cogsLines = buildLandCOGSLines(acc, req.ProjectID, hppTotal)
 	}
 
+	// ── PPh Final Pengalihan (Event 5a) — otomatis, pola identik unit/BAST ──
+	pphPlan, err := s.resolveLandPPhPlan(ctx, tenantID, req.ProjectID, req.DPPAmount, req.RecognitionDate)
+	if err != nil {
+		return nil, err
+	}
+
 	return s.store.RecordAkad(ctx, tenantID, RecordAkadParams{
 		ProjectID:                 req.ProjectID,
 		LandStockID:               pool.ID,
@@ -151,6 +158,7 @@ func (s *Service) RecordAkad(ctx context.Context, tenantID uint64, req RecordAka
 		CreatedBy:                 req.CreatedBy,
 		RevenueLines:              revenueLines,
 		COGSLines:                 cogsLines,
+		PPhPlan:                   pphPlan,
 		HPPRatePerM2:              hppRes.RatePerM2,
 		HPPTotal:                  hppTotal,
 		Basis:                     basis,
@@ -226,8 +234,8 @@ func (s *Service) resolveLandAccounts(ctx context.Context, tenantID uint64, need
 // resolveLandRevenueAccounts resolves everything RecordAkad needs EXCEPT the
 // debit ("payment") leg — used both by resolveLandAccounts (standalone
 // tunai/lunas flow, ra.payment = a cash/bank account) and by
-// PrepareBundledAkad (booking-embedded flow, ra.payment = the unit's own
-// piutang/financing account, resolved by the caller).
+// PrepareBundledAkad (booking-embedded flow, ra.payment = the fixed Piutang
+// Customer account 1-2000, resolved by the caller).
 func (s *Service) resolveLandRevenueAccounts(ctx context.Context, tenantID uint64, needPPN bool) (landResolvedAccounts, error) {
 	var ra landResolvedAccounts
 	var err error
@@ -250,12 +258,17 @@ func (s *Service) resolveLandRevenueAccounts(ctx context.Context, tenantID uint6
 //
 // PrepareBundledAkadRequest/PrepareBundledAkad support the Booking-embedded
 // Kelebihan Tanah flow: the land component no longer has its own cash/bank
-// collection leg (v1 tunai/lunas, RecordAkad above) — it rides the SAME
-// piutang/financing account already resolved for the unit's own Akad, so the
-// buyer owes ONE receivable that already includes both house and land
-// (§D3: land revenue+HPP posts as its own journal pair, but at the identical
-// Akad timing and through the identical collection mechanism as the house —
-// no second engine, no second cash leg).
+// collection leg (v1 tunai/lunas, RecordAkad above) — it debits a receivable
+// account resolved by the caller (§D3: land revenue+HPP posts as its own
+// journal pair, at the identical Akad timing as the house, no second cash
+// leg).
+//
+// KOREKSI KLIEN (2026-08-31): ReceivableAccountID/Code TIDAK LAGI di-reuse
+// dari akun piutang/pembiayaan skema RUMAH — sale.Service sekarang SELALU
+// mengoper akun Piutang Customer tetap (1-2000), karena Kelebihan Tanah
+// bukan bagian pembiayaan bank (KPR). Reuse-lama menyebabkan piutang tanah
+// pada kontrak KPR nyasar ke Piutang Bank (1-2200) saat Akad dan tidak
+// pernah direklas — bug ditemukan+diperbaiki 2026-08-31.
 type PrepareBundledAkadRequest struct {
 	ProjectID     uint64
 	ReservationID *uint64
@@ -268,10 +281,10 @@ type PrepareBundledAkadRequest struct {
 	UnitPriceSnapshot domain.Money
 	IsPKP             bool
 	VATRateSnapshot   decimal.Decimal
-	// ReceivableAccountID/Code: akun piutang/financing yang SUDAH di-resolve
-	// oleh sale.Service untuk Akad unit ini (mis. 1-2000, atau akun
-	// pembiayaan KPR pasca-akad) — dipakai ULANG sebagai sisi debit jurnal
-	// pendapatan tanah, bukan direct ke kas/bank.
+	// ReceivableAccountID/Code: akun Piutang Customer TETAP (1-2000) yang
+	// di-resolve oleh sale.Service khusus untuk komponen tanah — SELALU
+	// 1-2000, terlepas dari akun piutang/pembiayaan yang dipakai unit
+	// rumahnya sendiri (koreksi klien 2026-08-31; lihat komentar di atas).
 	ReceivableAccountID   uint64
 	ReceivableAccountCode string
 	RecognitionDate       time.Time
@@ -360,6 +373,12 @@ func (s *Service) PrepareBundledAkad(ctx context.Context, tenantID uint64, req P
 		cogsLines = buildLandCOGSLines(acc, req.ProjectID, hppTotal)
 	}
 
+	// ── PPh Final Pengalihan (Event 5a) — otomatis, pola identik unit/BAST ──
+	pphPlan, err := s.resolveLandPPhPlan(ctx, tenantID, req.ProjectID, dpp, req.RecognitionDate)
+	if err != nil {
+		return RecordAkadParams{}, err
+	}
+
 	return RecordAkadParams{
 		ProjectID:                 req.ProjectID,
 		LandStockID:               pool.ID,
@@ -377,6 +396,7 @@ func (s *Service) PrepareBundledAkad(ctx context.Context, tenantID uint64, req P
 		CreatedBy:                 req.CreatedBy,
 		RevenueLines:              revenueLines,
 		COGSLines:                 cogsLines,
+		PPhPlan:                   pphPlan,
 		HPPRatePerM2:              hppRes.RatePerM2,
 		HPPTotal:                  hppTotal,
 		Basis:                     basis,
@@ -411,6 +431,25 @@ func buildLandRevenueLines(acc landResolvedAccounts, projectID uint64, dpp, ppn,
 		})
 	}
 	return lines
+}
+
+// resolveLandPPhPlan resolves the PPh Final Pengalihan accrual plan for a
+// land Akad using TransferValue = DPP (pre-VAT) — pola identik unit/BAST
+// (sale.RecordAkadParams.SalePrice, "DPP neto sebelum PPN"). Returns (nil,
+// nil) when no PPh resolver is wired (s.pph == nil, optional/nil-safe —
+// pola identik sale.PPhFinalAccruer) or when DPP is zero (no economic
+// transfer, nothing to tax) — callers simply skip PPh handling for this Akad.
+func (s *Service) resolveLandPPhPlan(ctx context.Context, tenantID, projectID uint64, dpp domain.Money, recognitionDate time.Time) (*tax.AccrualPlan, error) {
+	if s.pph == nil || dpp.IsZero() {
+		return nil, nil
+	}
+	pid := projectID
+	return s.pph.ResolveAccrualPlan(ctx, tenantID, tax.AccrueTaxRequest{
+		RateCode:      tax.RateCodePPhFinalPengalihan,
+		TransferValue: dpp,
+		AccrualDate:   recognitionDate,
+		ProjectID:     &pid,
+	})
 }
 
 // buildLandCOGSLines: Dr HPP / Cr Persediaan Tanah — hanya satu kategori

@@ -262,7 +262,7 @@ func (q *dashboardQuerier) GetDashboard(ctx context.Context, tenantID uint64, no
 	// definisi disempitkan item B 2026-08-27: TotalPendapatan = pendapatan INTI,
 	// 4-2000 Pendapatan Luar Usaha dikeluarkan — SATU definisi dgn Laba Rugi);
 	// margin = pendapatan − beban (definisi laba P&L, bukan 4-x − 5-1000 sendiri).
-	mtdRows, err := q.repo.GetConsolidatedPLRowsRange(ctx, tenantID, &monthStart, nil)
+	mtdRows, err := q.repo.GetConsolidatedPLRows(ctx, tenantID, &monthStart, now)
 	if err != nil {
 		return nil, fmt.Errorf("dashboard MTD: %w", err)
 	}

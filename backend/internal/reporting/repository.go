@@ -23,19 +23,12 @@ func NewGORMRepository(db *gorm.DB) *GORMRepository {
 
 // ── PLReader ──────────────────────────────────────────────────────────────────
 
-func (r *GORMRepository) GetProjectPLRows(ctx context.Context, tenantID, projectID uint64, asOf time.Time) ([]PLRawRow, error) {
-	return r.queryPLRows(ctx, tenantID, &projectID, nil, &asOf)
+func (r *GORMRepository) GetProjectPLRows(ctx context.Context, tenantID, projectID uint64, from *time.Time, asOf time.Time) ([]PLRawRow, error) {
+	return r.queryPLRows(ctx, tenantID, &projectID, from, &asOf)
 }
 
-func (r *GORMRepository) GetConsolidatedPLRows(ctx context.Context, tenantID uint64, asOf time.Time) ([]PLRawRow, error) {
-	return r.queryPLRows(ctx, tenantID, nil, nil, &asOf)
-}
-
-// GetConsolidatedPLRowsRange (S4): baris P&L konsolidasi dalam rentang tanggal —
-// dipakai dashboard MTD agar SalesMTD/MarginMTD DERIVED dari ComputePL (kanonik),
-// bukan CASE-WHEN SQL sendiri. from/asOf nil = tanpa batas sisi tersebut.
-func (r *GORMRepository) GetConsolidatedPLRowsRange(ctx context.Context, tenantID uint64, from, asOf *time.Time) ([]PLRawRow, error) {
-	return r.queryPLRows(ctx, tenantID, nil, from, asOf)
+func (r *GORMRepository) GetConsolidatedPLRows(ctx context.Context, tenantID uint64, from *time.Time, asOf time.Time) ([]PLRawRow, error) {
+	return r.queryPLRows(ctx, tenantID, nil, from, &asOf)
 }
 
 // queryPLRows mengambil baris P&L (4-xxxx dan 5-xxxx) untuk satu atau semua proyek.

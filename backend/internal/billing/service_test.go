@@ -660,13 +660,28 @@ func contains(s, substr string) bool {
 
 // ── R1: Invoice Kekurangan Pembayaran ─────────────────────────────────────────
 
-type stubSummaryProvider struct{ out string }
+// stubSummaryProvider: `out` menjadi Outstanding (proyeksi naif lama) DAN
+// CustomerReceivableRemaining (SoT yang benar dipakai kode produksi) sekaligus
+// kecuali test secara eksplisit membedakannya (KPR bertahap — lihat
+// TestGenerateShortfallInvoice_KPRPartialDisbursement_ExcludesBankPortion).
+type stubSummaryProvider struct {
+	out                string
+	customerReceivable string // opsional: override CustomerReceivableRemaining terpisah dari `out`
+}
+
+func (s *stubSummaryProvider) summary() *ContractSummary {
+	cr := s.out
+	if s.customerReceivable != "" {
+		cr = s.customerReceivable
+	}
+	return &ContractSummary{Outstanding: mustMoney(s.out), CustomerReceivableRemaining: mustMoney(cr)}
+}
 
 func (s *stubSummaryProvider) SummaryByContractID(_ context.Context, _, _ uint64) (*ContractSummary, error) {
-	return &ContractSummary{Outstanding: mustMoney(s.out)}, nil
+	return s.summary(), nil
 }
 func (s *stubSummaryProvider) SummaryByUnitID(_ context.Context, _, _ uint64) (*ContractSummary, error) {
-	return &ContractSummary{Outstanding: mustMoney(s.out)}, nil
+	return s.summary(), nil
 }
 
 func TestGenerateShortfallInvoice_AmountFromSummary(t *testing.T) {
@@ -744,5 +759,31 @@ func TestSettleShortfallIfPaid(t *testing.T) {
 	sum.out = "5000000"
 	if _, err := svc.GenerateShortfallInvoice(context.Background(), tenantA, 7, 1, time.Time{}, ""); err != nil {
 		t.Fatalf("kekurangan baru pasca-settle harus boleh: %v", err)
+	}
+}
+
+// UAT 2026-09-09: KPR bertahap tidak boleh menagih customer atas bagian yang
+// masih komitmen bank. Harga 200jt, KPR approved 150jt, DP 20jt, cair 90jt →
+// TotalOutstandingActual (proyeksi naif via `Outstanding`) = 180jt (200jt−20jt
+// DP), tapi 60jt dari sisa itu masih Dana Jaminan Bank (belum cair) — sisa
+// kewajiban CUSTOMER sendiri hanyalah 30jt. Invoice KEKURANGAN wajib memakai
+// CustomerReceivableRemaining (sudah dinetokan via HouseControlSplit di
+// wiring), bukan Outstanding.
+func TestGenerateShortfallInvoice_KPRPartialDisbursement_ExcludesBankPortion(t *testing.T) {
+	svc, contracts, _, _ := buildService()
+	contracts.add(tenantA, sampleContract(7))
+	// Outstanding naif (lama, SALAH bila dipakai): 200jt − 20jt DP = 180jt.
+	// CustomerReceivableRemaining (benar): 180jt − 150jt sisa KPR yg blm
+	// tertagih ke customer... dinyatakan langsung sebagai 30jt sesuai contoh
+	// klien (harga 200jt, KPR approved 150jt, DP 20jt, cair 90jt/belum cair
+	// 60jt → kewajiban customer = 30jt).
+	svc.SetContractSummaryProvider(&stubSummaryProvider{out: "180000000", customerReceivable: "30000000"})
+
+	inv, err := svc.GenerateShortfallInvoice(context.Background(), tenantA, 7, 1, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("GenerateShortfallInvoice: %v", err)
+	}
+	if inv.Amount.String() != "30000000" {
+		t.Fatalf("amount = %s, want 30000000 (customer-only, bukan 180000000/90000000 bagian bank)", inv.Amount)
 	}
 }

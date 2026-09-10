@@ -457,7 +457,13 @@ export function CommissionBoard({ token }: { token: string }) {
                 <Input label="Berlaku sejak" type="date" value={ruleFrom}
                   onChange={(e) => setRuleFrom(e.target.value)} />
               </div>
-              <Button size="sm" onClick={handleCreateRule} loading={busy} disabled={!ruleName.trim()}>
+              <Button size="sm" onClick={handleCreateRule} loading={busy}
+                disabled={
+                  !ruleName.trim() ||
+                  (ruleBasis === "percent_of_sale"
+                    ? !(parseFloat(rulePct.replace(",", ".")) > 0)
+                    : !(parseInt(ruleFlat || "0", 10) > 0))
+                }>
                 Simpan Aturan
               </Button>
             </div>

@@ -62,7 +62,7 @@ type BudgetItemLookup interface {
 	// FindItemForCostValidation memeriksa kepemilikan tenant/project dan mengembalikan
 	// CostCategory yang dipetakan (alias construction→hard sudah diterapkan).
 	// Error: ErrBudgetItemNotFound, ErrBudgetItemProjectMismatch, ErrBudgetItemCategoryMismatch.
-	FindItemForCostValidation(ctx context.Context, tenantID, projectID, itemID uint64) (domain.CostCategory, error)
+	FindItemForCostValidation(ctx context.Context, tenantID, projectID, itemID uint64) (cat domain.CostCategory, err error)
 }
 
 // PaymentAccountValidator membuktikan bahwa sebuah kode akun BOLEH dipakai
@@ -106,6 +106,11 @@ type CreateCostEntryRequest struct {
 	UnitID          *uint64             // wajib untuk tier direct; harus nil untuk shared/overhead
 	PhaseID         *uint64             // optional phase tag (butuh project)
 	Category        domain.CostCategory
+	// HardSubcategory (UAT 2026-09-07): wajib saat Category=Hard dan tier
+	// efektif=Shared (pool project-wide ambigu Subsidi/Komersial tanpa ini);
+	// opsional saat tier=Direct; harus kosong untuk Category selain Hard.
+	// Lihat validate() dan allocation.HardPoolSource.
+	HardSubcategory domain.ConstructionSubcategory
 	CostTier        domain.CostTier     // kosong = di-infer (backward compat, lihat resolveTier)
 	Amount          domain.Money
 	PaymentMethod   PaymentMethod
@@ -265,6 +270,12 @@ func (s *Service) plan(ctx context.Context, tenantID uint64, req CreateCostEntry
 	debitCode, creditCode := resolveDebitCreditCodes(tier, req)
 	p := costPlan{tier: tier, debitCode: debitCode, creditCode: creditCode}
 
+	// Item 8 (UAT 2026-09-07): RAB TIDAK LAGI mengkapitalisasi Construction/Hard
+	// di muka saat approval (RULE KLIEN 2026-09-04 DICABUT — client membatalkan
+	// full-RAB-capitalization). Persediaan Konstruksi/HPP kini murni biaya
+	// AKTUAL: setiap cost entry Hard direct/shared SELALU mendebit Persediaan
+	// langsung, sama seperti kategori kapitalisasi lain (Land/Sarana). Tidak
+	// ada lagi redirect ke Hutang Usaha di sini.
 	if req.ExpenseTypeID == nil {
 		return p, nil
 	}
@@ -369,6 +380,24 @@ func (s *Service) validate(ctx context.Context, tenantID uint64, tier domain.Cos
 		if req.UnitID != nil {
 			return ErrUnitNotAllowedForTier
 		}
+	}
+	// UAT 2026-09-07: HardSubcategory menentukan pool mana yang berhak
+	// menerima biaya Konstruksi ini (Produksi Subsidi/Komersial dibatasi ke
+	// unit dengan TaxCategory yang sama — lihat allocation.HardPoolSource;
+	// Sarana & Prasarana/Perizinan tetap ke semua unit HPP-eligible).
+	//   - Category=Hard + tier=Shared → WAJIB (pool project-wide ambigu tanpa ini)
+	//   - Category=Hard + tier=Direct → opsional (unit sendiri sudah menentukan
+	//     Subsidi/Komersial, tidak ada ambiguitas pool)
+	//   - Category selain Hard → wajib kosong
+	if req.Category == domain.CostCategoryHard {
+		if req.HardSubcategory != "" && !req.HardSubcategory.Valid() {
+			return ErrInvalidHardSubcategory
+		}
+		if tier == domain.CostTierShared && req.HardSubcategory == "" {
+			return ErrHardSubcategoryRequired
+		}
+	} else if req.HardSubcategory != "" {
+		return ErrHardSubcategoryNotAllowed
 	}
 	// Project: wajib untuk direct/shared; overhead boleh tanpa project (Tenant-level)
 	// atau di-tag ke project sebagai cost center reporting.
@@ -553,6 +582,7 @@ func (s *Service) createCostEntry(ctx context.Context, tenantID uint64, req Crea
 			UnitID:          req.UnitID,
 			PhaseID:         req.PhaseID,
 			Category:        req.Category,
+			HardSubcategory: req.HardSubcategory,
 			ExpenseTypeID:   req.ExpenseTypeID,
 			CostTier:        tier,
 			Amount:          req.Amount,

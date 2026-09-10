@@ -38,14 +38,14 @@ const (
 )
 
 type Receipt struct {
-	ID              uint64       `gorm:"primaryKey;autoIncrement"                     json:"id"`
-	TenantID        uint64       `gorm:"not null;index"                               json:"-"`
-	TerminPaymentID uint64       `gorm:"not null"                                     json:"termin_payment_id"`
-	UnitID          uint64       `gorm:"not null;index"                               json:"unit_id"`
-	SaleContractID  *uint64      `gorm:"index"                                        json:"sale_contract_id,omitempty"`
+	ID              uint64  `gorm:"primaryKey;autoIncrement"                     json:"id"`
+	TenantID        uint64  `gorm:"not null;index"                               json:"-"`
+	TerminPaymentID uint64  `gorm:"not null"                                     json:"termin_payment_id"`
+	UnitID          uint64  `gorm:"not null;index"                               json:"unit_id"`
+	SaleContractID  *uint64 `gorm:"index"                                        json:"sale_contract_id,omitempty"`
 	// ChargeGroupID (Billing Batch 2): grup tagihan realisasi/addon yang dibayar
 	// — sumber ringkasan 4-angka pada kwitansi KWR. NULL untuk KWT/KWB.
-	ChargeGroupID *uint64 `gorm:"index"                                        json:"charge_group_id,omitempty"`
+	ChargeGroupID   *uint64      `gorm:"index"                                        json:"charge_group_id,omitempty"`
 	ReceiptType     ReceiptType  `gorm:"not null;size:20;default:'house_payment'"     json:"receipt_type"`
 	ReceiptNumber   string       `gorm:"not null;size:30"                             json:"receipt_number"`
 	Amount          domain.Money `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'" json:"amount"`
@@ -87,6 +87,14 @@ type ReceiptPrintData struct {
 	ReceivedAt      time.Time
 	BankAccountCode string
 	Notes           string
+	// KindLabel: label bisnis penerimaan (DP/Cicilan ke-N/Pelunasan/Kelebihan
+	// Tanah/Pencairan Dana Bank/Lainnya), diturunkan dari termin_payments.kind
+	// (package sale) — TANPA IMPORT sale (billing tidak boleh mengimpor sale,
+	// lihat catatan LoadReceiptPrintData). Kosong untuk kwitansi tanpa termin
+	// terkait (mis. data lama). Dicetak di kolom Keterangan supaya SETIAP
+	// kwitansi tanpa terkecuali jelas untuk apa (booking/realization/KPR sudah
+	// jelas lewat judul dokumen — field ini melengkapi sub-jenis house_payment).
+	KindLabel string
 	// Company (tenant)
 	CompanyName string
 	// Customer (contract)
@@ -118,11 +126,19 @@ type ReceiptPrintData struct {
 	// 4 angka: total tagihan / bayar ini / total dibayar / sisa. Sumbernya
 	// ChargeSummaryProvider (formula kanonik charge.Service.GroupSummary) —
 	// billing TIDAK menghitung sendiri (no duplicate SoT).
-	HasChargeSummary bool
-	ChargeGroupLabel string
-	ChargeBilled     domain.Money // total tagihan grup
-	ChargePaid       domain.Money // total sudah dibayar (net void)
+	HasChargeSummary  bool
+	ChargeGroupLabel  string
+	ChargeBilled      domain.Money // total tagihan grup
+	ChargePaid        domain.Money // total sudah dibayar (net void)
 	ChargeOutstanding domain.Money // sisa terutang
+
+	// HasScheduleOutstanding (UAT 2026-09-03 #1): true bila termin ini ditarget
+	// ke SATU payment_schedule (mis. Kelebihan Tanah) — "Terutang" pada kwitansi
+	// WAJIB memakai ScheduleOutstanding, bukan Outstanding gabungan kontrak.
+	// Diprioritaskan setelah HasChargeSummary, sebelum HasSummary di template.
+	HasScheduleOutstanding bool
+	ScheduleTypeLabel      string // label bisnis jadwal, mis. "Kelebihan Tanah"
+	ScheduleOutstanding    domain.Money
 }
 
 // ── Ringkasan finansial kontrak (hardening Receipt/Invoice) ───────────────────
@@ -138,6 +154,22 @@ type ContractSummary struct {
 	NetContract     domain.Money
 	TotalPaid       domain.Money
 	Outstanding     domain.Money
+
+	// TotalOutstandingActual (Gap 2, UAT 2026-09-08): sisa kontrak AKTUAL
+	// berbasis jadwal (sale.ContractFinancialSummary.TotalOutstandingActual)
+	// — SoT yang sama dengan Customer Statement/Piutang Usaha. BUKAN proyeksi
+	// NetContract−TotalPaid (Outstanding di atas, dipertahankan utk konsumen
+	// lama yang belum pindah).
+	TotalOutstandingActual domain.Money
+	// FinancingRemaining: sisa Dana Jaminan Bank (Item 7A/7C) atas unit ini —
+	// nol bila kontrak tidak dibiayai bank atau belum Akad (Nilai Persetujuan
+	// KPR Bank belum diisi). SoT sama dengan HouseARRows (laporan aging).
+	FinancingRemaining domain.Money
+	// CustomerReceivableRemaining: sisa kewajiban CUSTOMER sendiri (Piutang
+	// Usaha) = TotalOutstandingActual dikurangi bagian yang masih di Dana
+	// Jaminan Bank. Sama dengan TotalOutstandingActual bila FinancingRemaining
+	// nol (belum Akad / tanpa financing bank).
+	CustomerReceivableRemaining domain.Money
 }
 
 // ContractSummaryProvider disediakan wiring layer (adapter ke sale.Service).
@@ -158,4 +190,30 @@ type ChargeGroupSummary struct {
 // formula kanonik outstanding grup; billing hanya menampilkan.
 type ChargeSummaryProvider interface {
 	SummaryByGroupID(ctx context.Context, tenantID, groupID uint64) (*ChargeGroupSummary, error)
+}
+
+// ── Sisa jadwal SPESIFIK (UAT 2026-09-03 item #1) ─────────────────────────────
+//
+// Bug: kwitansi pembayaran Kelebihan Tanah menampilkan "Terutang" dari
+// ContractSummary gabungan (rumah+tanah) — buyer/admin melihat sisa harga
+// RUMAH, bukan sisa Kelebihan Tanah yang sebenarnya dibayar. Root cause: satu
+// termin bisa ditarget ke SATU payment_schedule saja (bukan waterfall seluruh
+// kontrak); saat itu terjadi, "Terutang" yang benar untuk dicetak adalah sisa
+// JADWAL itu sendiri, bukan sisa kontrak.
+//
+// TargetedScheduleOutstanding dibaca LANGSUNG dari payment_allocations +
+// payment_schedules (raw SQL, pola sama dengan ScheduleLoader di atas) —
+// billing tidak boleh import sale (aturan impor CLAUDE.md), dan kedua tabel
+// itu sudah menjadi SoT baku untuk cicilan (FE-2 sub-ledger).
+type TargetedSchedule struct {
+	Type        string       // payment_schedules.type ("land"|"dp"|"installment"|"final")
+	Outstanding domain.Money // amount − paid_amount jadwal ini SETELAH pembayaran ini
+}
+
+// ScheduleOutstandingLoader menjawab "termin ini ditarget ke SATU jadwal yang
+// mana, dan berapa sisanya sekarang". nil (tanpa error) berarti termin ini
+// BUKAN pembayaran bertarget-tunggal (waterfall kontrak biasa, atau tersebar
+// ke lebih dari satu jadwal) — kwitansi jatuh kembali ke Outstanding kontrak.
+type ScheduleOutstandingLoader interface {
+	LoadTargetedScheduleOutstanding(ctx context.Context, tenantID, terminPaymentID uint64) (*TargetedSchedule, error)
 }

@@ -40,12 +40,15 @@ func (t CostTier) Capitalizes() bool {
 
 // AllowsCategory adalah matriks kompatibilitas CostTier × CostCategory:
 //
-//	direct/shared  → hanya kategori kapitalisasi (land|hard|soft|financing)
-//	overhead       → hanya kategori beban (marketing|other)
+//	direct/shared  → hanya kategori kapitalisasi (land|hard) — RULE KLIEN FREEZE
+//	                 2026-09-04: soft tidak lagi termasuk di sini.
+//	overhead       → hanya kategori beban (marketing|other|operational|soft)
 //
 // Kombinasi di luar matriks tidak sah (mis. overhead+hard akan mencemari HPP;
 // direct+marketing akan mengkapitalisasi beban periode). Kedua pelanggaran itu
-// membuat laba proyek & harga pokok salah permanen — tolak di validasi.
+// membuat laba proyek & harga pokok salah permanen — tolak di validasi. Matriks
+// ini otomatis mengikuti IsCapitalizable()/IsExpense() — tidak ada logika
+// per-kategori yang di-hardcode di sini.
 func (t CostTier) AllowsCategory(c CostCategory) bool {
 	switch t {
 	case CostTierDirect, CostTierShared:

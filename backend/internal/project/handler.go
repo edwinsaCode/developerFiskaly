@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -461,8 +462,10 @@ type bulkCreateUnitsDTO struct {
 	UnitType     string  `json:"unit_type"`
 	TypeLabel    *string `json:"type_label,omitempty"`
 	SaleableArea string  `json:"saleable_area"`
-	ListPrice    string  `json:"list_price"`
-	PhaseID      *uint64 `json:"phase_id,omitempty"`
+	// LandArea: luas tanah per unit, diterapkan sama ke seluruh unit dalam blok.
+	LandArea  string  `json:"land_area,omitempty"`
+	ListPrice string  `json:"list_price"`
+	PhaseID   *uint64 `json:"phase_id,omitempty"`
 }
 
 type transitionUnitDTO struct {
@@ -562,6 +565,9 @@ type productTypeDTO struct {
 	Name               string `json:"name"`
 	Category           string `json:"category"` // property | non_property
 	RevenueAccountCode string `json:"revenue_account_code,omitempty"`
+	// TaxCategory (rule klien UAT #3): subsidi|komersial, opsional. Kosong =
+	// produk ini ikut projects.tax_category (jalur legacy) — lihat product_type.go.
+	TaxCategory string `json:"tax_category,omitempty"`
 }
 
 func (h *Handler) createProductType(w http.ResponseWriter, r *http.Request) {
@@ -575,11 +581,21 @@ func (h *Handler) createProductType(w http.ResponseWriter, r *http.Request) {
 		writeProjectError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
+	var taxCategory *domain.TaxCategory
+	if strings.TrimSpace(dto.TaxCategory) != "" {
+		tc := domain.TaxCategory(strings.TrimSpace(dto.TaxCategory))
+		if !tc.Valid() {
+			writeProjectError(w, http.StatusBadRequest, "tax_category tidak valid: gunakan subsidi atau komersial")
+			return
+		}
+		taxCategory = &tc
+	}
 	pt, err := h.svc.CreateProductType(r.Context(), tenantID, &ProductType{
 		Code:               dto.Code,
 		Name:               dto.Name,
 		Category:           ProductCategory(dto.Category),
 		RevenueAccountCode: dto.RevenueAccountCode,
+		TaxCategory:        taxCategory,
 	})
 	if err != nil {
 		switch {
@@ -599,6 +615,9 @@ type updateProductTypeDTO struct {
 	Name               *string `json:"name,omitempty"`
 	RevenueAccountCode *string `json:"revenue_account_code,omitempty"`
 	IsActive           *bool   `json:"is_active,omitempty"`
+	// TaxCategory: pointer-ke-pointer semantics via string biasa — "" mengosongkan
+	// (kembali ke jalur legacy projects.tax_category), nil (field absen) = tidak diubah.
+	TaxCategory *string `json:"tax_category,omitempty"`
 }
 
 func (h *Handler) updateProductType(w http.ResponseWriter, r *http.Request) {
@@ -617,7 +636,7 @@ func (h *Handler) updateProductType(w http.ResponseWriter, r *http.Request) {
 		writeProjectError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	pt, err := h.svc.UpdateProductType(r.Context(), tenantID, id, dto.Name, dto.RevenueAccountCode, dto.IsActive)
+	pt, err := h.svc.UpdateProductType(r.Context(), tenantID, id, dto.Name, dto.RevenueAccountCode, dto.IsActive, dto.TaxCategory)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrProductTypeNotFound):
@@ -657,6 +676,14 @@ func (h *Handler) bulkCreateUnits(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var landArea decimal.Decimal
+	if dto.LandArea != "" {
+		landArea, err = decimal.NewFromString(dto.LandArea)
+		if err != nil {
+			writeProjectError(w, http.StatusBadRequest, "land_area harus angka")
+			return
+		}
+	}
 	lp, err := domain.NewMoney(dto.ListPrice)
 	if err != nil {
 		writeProjectError(w, http.StatusBadRequest, "list_price tidak valid: "+err.Error())
@@ -671,6 +698,7 @@ func (h *Handler) bulkCreateUnits(w http.ResponseWriter, r *http.Request) {
 		UnitType:     dto.UnitType,
 		TypeLabel:    dto.TypeLabel,
 		SaleableArea: area,
+		LandArea:     landArea,
 		ListPrice:    lp,
 	})
 	if err != nil {

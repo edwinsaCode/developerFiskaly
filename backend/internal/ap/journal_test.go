@@ -305,6 +305,93 @@ func TestPPNTidakMenambahRealisasiRAB(t *testing.T) {
 	}
 }
 
+// TestComposeAllowsCapitalizationRedirect membuktikan P0 fix RULE KLIEN
+// 2026-09-04: item/proyek Hard cost yang SUDAH dikapitalisasi penuh ke
+// Persediaan saat RAB approval TIDAK BOLEH mendebit Persediaan lagi saat
+// realisasi/tagihan vendor pasca-approval — cost.Service.plan() mengalihkan
+// DebitCode ke payableAccountCode() untuk baris seperti ini (DebitIsTaxonomy
+// = false BY DESIGN), dan compose() harus menerimanya, bukan menolaknya
+// sebagai "akun bukan taksonomi" (itulah bug yang ditemukan saat verifikasi
+// FE langsung: baris redirect ditolak ErrLineAccountNotTaxonomy).
+func TestComposeAllowsCapitalizationRedirect(t *testing.T) {
+	ctx := context.Background()
+	tax := taxonomyCode(t)
+	acc := newFakeAccounts(tax, payableAccountCode(), retentionPayableCode(), vendorAdvanceCode())
+	redirect := func(amount string, projectID uint64) plannedLine {
+		return line(t, amount, projectID, payableAccountCode(), false)
+	}
+
+	t.Run("baris redirect murni tidak ditolak dan tidak double-capitalize", func(t *testing.T) {
+		c, err := compose(ctx, acc, 1, Amounts{DPP: money(t, "30000000")}, []plannedLine{redirect("30000000", 9805)})
+		if err != nil {
+			t.Fatalf("compose: %v", err)
+		}
+
+		// Invariant 1 CLAUDE.md: jurnal selalu balanced.
+		debit, credit := sums(c)
+		if !debit.Equal(credit) {
+			t.Fatalf("jurnal tidak balanced: debit %s vs kredit %s", debit, credit)
+		}
+
+		// Tidak ada baris yang mendebit akun Persediaan/taksonomi sama sekali —
+		// itulah inti P0: realisasi pasca-approval tidak boleh menyentuh 1-3100.
+		if pers := find(c, tax); pers != nil {
+			t.Fatalf("baris mendebit akun taksonomi %s — double-capitalize Persediaan", tax)
+		}
+
+		// Baris ini BUKAN realisasi RAB baru (sudah terjadi saat RAB approval).
+		if !c.taxonomyDebit.Equal(domain.Zero) {
+			t.Fatalf("taxonomyDebit = %s, mau nol (baris redirect tidak boleh terhitung realisasi RAB baru)", c.taxonomyDebit)
+		}
+
+		// Hutang Usaha muncul di KEDUA sisi: debit (mengakui vendor, mengurangi
+		// liability agregat yang sudah terbentuk) dan kredit (payable line
+		// standar) — bersih nol pada kasus tanpa retensi/uang muka.
+		var debitPayable, creditPayable domain.Money
+		for _, l := range c.lines {
+			if l.account.Code == payableAccountCode() {
+				debitPayable = debitPayable.Add(l.debit)
+				creditPayable = creditPayable.Add(l.credit)
+			}
+		}
+		if !debitPayable.Equal(money(t, "30000000")) {
+			t.Fatalf("debit hutang usaha = %s, mau 30000000", debitPayable)
+		}
+		if !creditPayable.Equal(money(t, "30000000")) {
+			t.Fatalf("kredit hutang usaha = %s, mau 30000000", creditPayable)
+		}
+	})
+
+	t.Run("campuran: satu baris biaya normal + satu baris redirect", func(t *testing.T) {
+		lines := []plannedLine{
+			line(t, "70000000", 9805, tax, true),
+			redirect("30000000", 9805),
+		}
+		c, err := compose(ctx, acc, 1, Amounts{DPP: money(t, "100000000")}, lines)
+		if err != nil {
+			t.Fatalf("compose: %v", err)
+		}
+		debit, credit := sums(c)
+		if !debit.Equal(credit) {
+			t.Fatalf("jurnal tidak balanced: debit %s vs kredit %s", debit, credit)
+		}
+		// Hanya baris normal yang terhitung realisasi RAB baru.
+		if !c.taxonomyDebit.Equal(money(t, "70000000")) {
+			t.Fatalf("taxonomyDebit = %s, mau 70000000", c.taxonomyDebit)
+		}
+	})
+
+	t.Run("akun bukan taksonomi dan bukan payable tetap ditolak", func(t *testing.T) {
+		// Regression guard: redirect TIDAK melonggarkan INV-AP-17 secara umum —
+		// hanya kode akun payable persis yang dikecualikan.
+		wrong := line(t, "100000000", 9805, retentionPayableCode(), false)
+		_, err := compose(ctx, acc, 1, Amounts{DPP: money(t, "100000000")}, []plannedLine{wrong})
+		if !errors.Is(err, ErrLineAccountNotTaxonomy) {
+			t.Fatalf("error = %v, mau %v", err, ErrLineAccountNotTaxonomy)
+		}
+	})
+}
+
 // TestVATAccountBukanAkunTaksonomi mengunci asumsi yang membuat INV-AP-17 bisa
 // ditegakkan sama sekali. Kalau suatu hari taksonomi biaya berubah dan mencakup
 // 1-5100, test ini gagal SEBELUM ada PPN yang terhitung sebagai realisasi RAB.

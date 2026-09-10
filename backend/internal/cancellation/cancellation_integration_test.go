@@ -144,8 +144,11 @@ func cxSeedProjectUnit(t *testing.T, db *gorm.DB, code string, area int64, statu
 	// yang dihasilkan fixture ini identik dengan sebelum hardening.
 	db.Exec(`INSERT IGNORE INTO product_types (tenant_id, code, name, category, revenue_account_code, is_active)
 		VALUES (?,?,?,?,?,TRUE)`, cxTenant, "villa", "villa", "property", "4-1000")
-	if err := db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, list_price, status)
-		VALUES (?,?,?,?,?,?,?)`, cxTenant, projectID, code, "villa", domain.FromInt(area), domain.FromInt(0), status).Error; err != nil {
+	// land_area == area (Item 9): fixture ini tidak menguji Land HPP itu
+	// sendiri di sebagian besar pemanggil, jadi land_area disamakan dengan
+	// saleable_area supaya fail-closed tidak memblokir test yang tak terkait.
+	if err := db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, land_area, list_price, status)
+		VALUES (?,?,?,?,?,?,?,?)`, cxTenant, projectID, code, "villa", domain.FromInt(area), domain.FromInt(area), domain.FromInt(0), status).Error; err != nil {
 		t.Fatal(err)
 	}
 	db.Raw("SELECT LAST_INSERT_ID()").Scan(&unitID)
@@ -303,10 +306,10 @@ func TestIntegration_Cancellation_PostBAST_WithTrueup(t *testing.T) {
 	defer cxCleanup(t, db)
 	ctx := context.Background()
 
-	projectID, unitA := cxSeedProjectUnit(t, db, "PB-A", 100, "reserved") // 25%
+	projectID, unitA := cxSeedProjectUnit(t, db, "PB-A", 100, "reserved") // area 100/400 = 25% (Item 9, proporsional land_area)
 	var unitB uint64
-	db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, list_price, status)
-		VALUES (?,?,?,?,?,?,?)`, cxTenant, projectID, "PB-B", "villa", domain.FromInt(300), domain.FromInt(0), "reserved")
+	db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, land_area, list_price, status)
+		VALUES (?,?,?,?,?,?,?,?)`, cxTenant, projectID, "PB-B", "villa", domain.FromInt(300), domain.FromInt(300), domain.FromInt(0), "reserved")
 	db.Raw("SELECT LAST_INSERT_ID()").Scan(&unitB)
 	accIDs := cxSeedAccounts(t, db)
 	if err := tax.SeedDefaultRates(ctx, db, cxTenant); err != nil {
@@ -352,7 +355,8 @@ func TestIntegration_Cancellation_PostBAST_WithTrueup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Termin A 500jt → BAST A 2M (budgeted 100jt + PPh 2.5%=50jt accrual).
+	// Termin A 500jt → BAST A 2M (budgeted Land proporsional area 25%×400jt=100jt
+	// — Item 9, A area 100/400 — + PPh 2.5%=50jt accrual).
 	if _, err := saleSvc.ReceivePayment(ctx, cxTenant, sale.ReceivePaymentRequest{
 		Source: sale.PaymentSourceUnitTermin, UnitID: &unitA,
 		Amount: domain.FromInt(500_000_000), Date: time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC),
@@ -367,7 +371,8 @@ func TestIntegration_Cancellation_PostBAST_WithTrueup(t *testing.T) {
 		t.Fatalf("BAST A: %v", err)
 	}
 
-	// Completion → finalize → calculate → approve → post (true-up A +20jt).
+	// Completion → finalize → calculate → approve → post (true-up A +20jt:
+	// act 25%×480jt=120 − budgeted 25%×400jt=100 — Item 9, proporsional area).
 	if _, err := closingSvc.MarkCompleted(ctx, cxTenant, projectID, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +389,7 @@ func TestIntegration_Cancellation_PostBAST_WithTrueup(t *testing.T) {
 	if _, err := closingSvc.Post(ctx, cxTenant, run.ID, time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC), nil); err != nil {
 		t.Fatal(err)
 	}
-	// Sanity pasca true-up: 5-1000 = 120jt (A), 1-3000 = 360jt.
+	// Sanity pasca true-up: 5-1000 = 120jt (A: 100 BAST + 20 true-up), 1-3000 = 360jt (B unsold, 75%×480jt).
 	if bal := cxNet(t, db, "5-1000"); bal != "120000000.0000" {
 		t.Fatalf("pre-cancel 5-1000 = %s", bal)
 	}
@@ -408,7 +413,7 @@ func TestIntegration_Cancellation_PostBAST_WithTrueup(t *testing.T) {
 		t.Fatalf("Preview: %v", err)
 	}
 	// received = 500jt (Event3 mengembalikan uang muka); COGS reversed = 120jt
-	// (Event4 100 + true-up 20); revenue 2M; tax 50jt.
+	// (Event4 100 + true-up 20 — Item 9); revenue 2M; tax 50jt.
 	if prev.ReceivedTotal.String() != "500000000" || prev.COGSReversed.String() != "120000000" ||
 		prev.RevenueReversed.String() != "2000000000" || prev.TaxReversed.String() != "50000000" ||
 		prev.RefundAmount.String() != "400000000" {

@@ -18,6 +18,9 @@ type BookingStore interface {
 	// DisposeConvertedFeeAtomic (R4 Opsi A): forfeit/refund fee outside-price
 	// yang menetap di 2-2100 pasca-konversi (converted + held).
 	DisposeConvertedFeeAtomic(ctx context.Context, tenantID, bookingID uint64, in DisposeFeeInput) (*Booking, error)
+	// TransferBookingAtomic (Item 3): pindah booking active ke unit lain, TANPA
+	// jurnal baru (lihat TransferBookingInput).
+	TransferBookingAtomic(ctx context.Context, tenantID, bookingID, newUnitID uint64, in TransferBookingInput) (*Booking, error)
 	FindBookingByID(ctx context.Context, tenantID, id uint64) (*Booking, error)
 	FindActiveBookingByUnit(ctx context.Context, tenantID, unitID uint64) (*Booking, error)
 	ListBookings(ctx context.Context, tenantID uint64, status BookingStatus) ([]*Booking, error)
@@ -64,14 +67,13 @@ func (s *Service) CreateBooking(ctx context.Context, tenantID uint64, req Create
 	if req.CustomerID == 0 {
 		return nil, ErrBookingCustomerRequired
 	}
-	if req.BookingFee.IsZero() || req.BookingFee.IsNeg() || !req.BookingFee.IsWholeRupiah() {
+	// Client final note 2026-09-10: fee = 0 sah (murni reservasi, tanpa uang
+	// booking) — hanya negatif/pecahan yang ditolak.
+	if req.BookingFee.IsNeg() || !req.BookingFee.IsWholeRupiah() {
 		return nil, ErrBookingFeeInvalid
 	}
 	if !req.ExpiryDate.After(req.BookingDate) {
 		return nil, ErrBookingExpiryInvalid
-	}
-	if req.LandQuantityM2 != nil && !req.LandQuantityM2.IsPositive() {
-		return nil, ErrLandQuantityInvalid
 	}
 	// Validasi party (bila lookup ter-wire — pola scheme flow).
 	if s.parties != nil {
@@ -92,54 +94,87 @@ func (s *Service) CreateBooking(ctx context.Context, tenantID uint64, req Create
 	if unit.Status != "available" {
 		return nil, fmt.Errorf("%w: status unit %s (butuh available)", ErrBookingUnitStateInvalid, unit.Status)
 	}
-	// Akun: bank valid (COA-driven) + resolve ID bank & Pendapatan Booking.
-	// RULE KLIEN 2026-07-29: fee = PENDAPATAN saat diterima (Cr 4-2100),
-	// bukan titipan/kewajiban.
-	if err := s.accounts.ValidateCashBankAccount(ctx, tenantID, req.BankAccountCode); err != nil {
-		return nil, err
-	}
-	bankID, err := s.accounts.FindAccountIDByCode(ctx, tenantID, req.BankAccountCode)
-	if err != nil {
-		return nil, err
-	}
-	revenueID, err := s.accounts.FindAccountIDByCode(ctx, tenantID, accountCodePendapatanBooking)
-	if err != nil {
-		return nil, ErrBookingRevenueAccountMissing
+	feeZero := req.BookingFee.IsZero()
+
+	// Akun: bank valid (COA-driven) + resolve ID bank — hanya relevan bila ADA
+	// uang yang benar-benar berpindah (fee > 0). Fee 0 = tidak ada penerimaan
+	// kas sama sekali, jadi bank tujuan tidak pernah dipakai/divalidasi.
+	var bankID uint64
+	if !feeZero {
+		if err := s.accounts.ValidateCashBankAccount(ctx, tenantID, req.BankAccountCode); err != nil {
+			return nil, err
+		}
+		var err error
+		bankID, err = s.accounts.FindAccountIDByCode(ctx, tenantID, req.BankAccountCode)
+		if err != nil {
+			return nil, err
+		}
 	}
 
+	// RULE KLIEN 2026-07-29 (default, mayoritas): fee = PENDAPATAN final saat
+	// diterima (Cr 4-2100) — TIDAK BERUBAH oleh Item 3.
+	//
+	// Item 3 (2026-09, keputusan klien): booking yang ditandai Refundable SAAT
+	// DIBUAT memakai jalur LEGACY held (Cr 2-2100 Titipan Booking) — SATU-
+	// SATUNYA cara fee-nya bisa direfund nanti saat batal. Ini mengaktifkan
+	// kembali mesin disposisi data-driven yang SUDAH ADA (CloseBookingAtomic
+	// FeeHeld→pending_refund, cancellation.CreateBookingRefund/PayRefund) —
+	// tanpa engine baru, hanya switch on/off di titik penerimaan fee.
+	//
+	// Client final note 2026-09-10: fee = 0 SELALU 'recognized', TANPA
+	// memandang flag Refundable — tidak ada uang yang bisa dipegang/direfund,
+	// jadi jalur held/reklas/forfeit tidak pernah tersentuh oleh booking Rp0.
 	pid := unit.ProjectID
 	uid := req.UnitID
+	creditCode := ""
+	disposition := FeeRecognized
+	var journalLines []JournalLineInput
+	if !feeZero {
+		creditCode = accountCodePendapatanBooking
+		creditDesc := "Pendapatan Booking (diakui saat diterima)"
+		if req.Refundable {
+			creditCode = accountCodeTitipanBooking
+			disposition = FeeHeld
+			creditDesc = "Titipan Booking (refundable — belum diakui pendapatan)"
+		}
+		creditID, err := s.accounts.FindAccountIDByCode(ctx, tenantID, creditCode)
+		if err != nil {
+			if req.Refundable {
+				return nil, ErrTitipanAccountMissing
+			}
+			return nil, ErrBookingRevenueAccountMissing
+		}
+		journalLines = []JournalLineInput{
+			{AccountID: bankID, Debit: req.BookingFee, ProjectID: &pid, UnitID: &uid, Description: "Booking fee diterima"},
+			{AccountID: creditID, Credit: req.BookingFee, ProjectID: &pid, UnitID: &uid, Description: creditDesc},
+		}
+	}
+
 	b := &Booking{
-		TenantID:      tenantID,
-		ProjectID:     unit.ProjectID,
-		UnitID:        req.UnitID,
-		PhaseID:       unit.PhaseID,
-		CustomerID:    req.CustomerID,
-		SalesPersonID: req.SalesPersonID,
-		LeadID:        req.LeadID,
-		BookingFee:    req.BookingFee,
-		// Refundable DIABAIKAN utk booking baru (rule klien: tidak ada refund —
-		// pendapatan final). Field dipertahankan hanya utk baris legacy.
-		Refundable:     false,
+		TenantID:       tenantID,
+		ProjectID:      unit.ProjectID,
+		UnitID:         req.UnitID,
+		PhaseID:        unit.PhaseID,
+		CustomerID:     req.CustomerID,
+		SalesPersonID:  req.SalesPersonID,
+		LeadID:         req.LeadID,
+		BookingFee:     req.BookingFee,
+		Refundable:     req.Refundable,
 		BookingDate:    req.BookingDate,
 		ExpiryDate:     req.ExpiryDate,
 		Status:         BookingStatusActive,
-		FeeDisposition: FeeRecognized,
+		FeeDisposition: disposition,
 		Notes:          req.Notes,
 		CreatedBy:      req.CreatedBy,
 		ActiveKey:      activeKeyY(),
-		LandQuantityM2: req.LandQuantityM2,
 	}
 	return s.bookings.CreateBookingAtomic(ctx, CreateBookingAtomicParams{
-		TenantID: tenantID,
-		Booking:  b,
-		JournalLines: []JournalLineInput{
-			{AccountID: bankID, Debit: req.BookingFee, ProjectID: &pid, UnitID: &uid, Description: "Booking fee diterima"},
-			{AccountID: revenueID, Credit: req.BookingFee, ProjectID: &pid, UnitID: &uid, Description: "Pendapatan Booking (diakui saat diterima)"},
-		},
+		TenantID:          tenantID,
+		Booking:           b,
+		JournalLines:      journalLines,
 		BankAccountCode:   req.BankAccountCode,
-		CreditAccountCode: accountCodePendapatanBooking,
-		GenerateReceipt:   true,
+		CreditAccountCode: creditCode,
+		GenerateReceipt:   !feeZero,
 		ReceiptNotes:      "Booking fee",
 	})
 }
@@ -156,6 +191,48 @@ func (s *Service) CancelBooking(ctx context.Context, tenantID, bookingID uint64,
 		return nil, err
 	}
 	return s.bookings.CloseBookingAtomic(ctx, tenantID, bookingID, in)
+}
+
+// TransferBooking (Item 3) memindahkan booking active ke unit lain TANPA
+// jurnal baru — fee sudah diterima/diakui (recognized atau held) di unit
+// ASAL, dan ledger append-only (invariant #5) melarang menulis-ulang jurnal
+// atau kwitansi historisnya. Hanya baris booking + status kedua unit yang
+// berpindah, sehingga TIDAK PERNAH terjadi penerimaan fee/pendapatan kedua
+// kalinya (no double revenue by construction — tidak ada jalur jurnal sama
+// sekali di operasi ini).
+func (s *Service) TransferBooking(ctx context.Context, tenantID, bookingID, newUnitID uint64, reason string, eventDate time.Time, actorID *uint64) (*Booking, error) {
+	if err := s.requireBookingStore(); err != nil {
+		return nil, err
+	}
+	if newUnitID == 0 {
+		return nil, ErrUnitRequired
+	}
+	b, err := s.bookings.FindBookingByID(ctx, tenantID, bookingID)
+	if err != nil {
+		return nil, err
+	}
+	if b.Status != BookingStatusActive {
+		return nil, ErrBookingNotActive
+	}
+	if newUnitID == b.UnitID {
+		return nil, ErrBookingTransferSameUnit
+	}
+	unit, err := s.units.FindUnitSaleInfo(ctx, tenantID, newUnitID)
+	if err != nil {
+		return nil, err
+	}
+	if unit.Status != "available" {
+		return nil, fmt.Errorf("%w: status unit tujuan %s (butuh available)", ErrBookingUnitStateInvalid, unit.Status)
+	}
+	if eventDate.IsZero() {
+		eventDate = timeNow()
+	}
+	return s.bookings.TransferBookingAtomic(ctx, tenantID, bookingID, newUnitID, TransferBookingInput{
+		NewUnitID: newUnitID,
+		Reason:    reason,
+		EventDate: eventDate,
+		ActorID:   actorID,
+	})
 }
 
 // MarkExpiredBookings: sweep idempoten (preseden mark-overdue) — menutup semua

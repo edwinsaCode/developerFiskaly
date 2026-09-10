@@ -37,6 +37,13 @@ type StatementScheduleLine struct {
 	TerminPaymentID *uint64 `json:"termin_payment_id,omitempty"` // untuk cetak kwitansi
 	Overdue         bool    `json:"overdue"`
 	DaysOverdue     int     `json:"days_overdue"`
+	// LandSaleID/LandProductName/LandQuantityM2/LandUnitPrice (P1, 2026-09-04):
+	// hanya terisi untuk Type=land (best-effort — bila LandSaleReader tidak
+	// terpasang, baris tanah tetap tampil benar dari payment_schedules, hanya
+	// tanpa rincian m²/harga satuan ini).
+	LandSaleID     *uint64 `json:"land_sale_id,omitempty"`
+	LandQuantityM2 string  `json:"land_quantity_m2,omitempty"`
+	LandUnitPrice  string  `json:"land_unit_price,omitempty"`
 }
 
 // CustomerStatement adalah rekening koran satu kontrak.
@@ -86,8 +93,16 @@ type CustomerStatement struct {
 // Definisi outstanding & menunggak IDENTIK dengan AR Aging (satu mesin,
 // receivable.BuildAging) — bukan rumus kedua yang kebetulan mirip.
 type StatementExposure struct {
-	HouseOutstanding       string `json:"house_outstanding"`
-	HouseOverdue           string `json:"house_overdue"`
+	HouseOutstanding string `json:"house_outstanding"`
+	HouseOverdue     string `json:"house_overdue"`
+	// LandOutstanding/LandOverdue: piutang Kelebihan Tanah (payment_schedules
+	// type=land, migrasi 000095) — SEBELUMNYA ikut terhitung diam-diam di
+	// HouseOutstanding (loop di bawah dulu tidak memfilter Type sama sekali),
+	// membuat kartu "Harga Rumah" salah label karena sesungguhnya sudah
+	// termasuk tanah. Dipisah eksplisit di sini; TotalOutstanding tetap
+	// menjumlahkan keduanya sehingga angka total tidak berubah.
+	LandOutstanding        string `json:"land_outstanding"`
+	LandOverdue            string `json:"land_overdue"`
 	RealizationOutstanding string `json:"realization_outstanding"`
 	RealizationOverdue     string `json:"realization_overdue"`
 	TotalOutstanding       string `json:"total_outstanding"`
@@ -237,6 +252,15 @@ func (s *Service) GetCustomerStatement(ctx context.Context, tenantID, contractID
 		if !overdue {
 			line.DaysOverdue = 0
 		}
+		if sch.Type == ScheduleTypeLand && sch.LandSaleID != nil {
+			line.LandSaleID = sch.LandSaleID
+			if s.landSaleReader != nil {
+				if ls, lerr := s.landSaleReader.GetLandSale(ctx, tenantID, *sch.LandSaleID); lerr == nil {
+					line.LandQuantityM2 = ls.QuantityM2.String()
+					line.LandUnitPrice = ls.UnitPriceSnapshot.String()
+				}
+			}
+		}
 		stmt.Schedules = append(stmt.Schedules, line)
 
 		if overdue {
@@ -245,28 +269,59 @@ func (s *Service) GetCustomerStatement(ctx context.Context, tenantID, contractID
 		}
 	}
 
-	remaining := contract.GrossAmount.Sub(collected)
-
 	stmt.TotalScheduled = totalScheduled.String()
 	stmt.TotalPaid = collected.String()
-	stmt.RemainingBalance = remaining.String()
 	stmt.TotalOverdue = totalOverdue.String()
 
 	// ── Eksposur tunggal (W-4) ───────────────────────────────────────────────
-	// Sisi harga rumah memakai TotalOverdue & sisa cicilan yang BARU saja
-	// dihitung di loop di atas — tidak dihitung ulang, supaya tidak ada
-	// kesempatan bagi dua angka untuk menyimpang.
-	var houseOutstanding domain.Money
+	// Rumah vs tanah dipisah dari cicilan yang BARU saja dihitung di loop di
+	// atas (Type per baris) — tidak dihitung ulang, supaya tidak ada kesempatan
+	// bagi dua angka untuk menyimpang. Sebelumnya loop ini tidak memfilter
+	// Type sama sekali, sehingga baris tanah (payment_schedules type=land,
+	// migrasi 000095) diam-diam ikut masuk ke "houseOutstanding" — bukan salah
+	// secara total, tapi salah label (kartu "Harga Rumah" menampilkan angka
+	// yang sudah termasuk tanah).
+	var houseOutstanding, houseOverdue, landOutstanding, landOverdue domain.Money
 	for _, line := range stmt.Schedules {
-		if o, err := domain.NewMoney(line.Outstanding); err == nil {
+		o, err := domain.NewMoney(line.Outstanding)
+		if err != nil {
+			continue
+		}
+		if line.Type == string(ScheduleTypeLand) {
+			landOutstanding = landOutstanding.Add(o)
+			if line.Overdue {
+				landOverdue = landOverdue.Add(o)
+			}
+		} else {
 			houseOutstanding = houseOutstanding.Add(o)
+			if line.Overdue {
+				houseOverdue = houseOverdue.Add(o)
+			}
 		}
 	}
+
+	// RemainingBalance & TotalPaid (kartu "Sudah Dibayar"): SATU rumus dengan
+	// Summary.TotalOutstandingActual/TotalPaidActual (financial_summary.go) —
+	// bukan GrossAmount−collected / collected langsung, yang salah begitu
+	// waterfall meluber dari rumah ke tanah (collected/SumTerminsByUnit
+	// mengecualikan pembayaran yang 100% jatuh ke baris tanah — lihat
+	// CountsTowardPrice — sehingga "Sudah Dibayar" & "Sisa Tagihan" bisa
+	// tampak tak sinkron dgn Jadwal Pembayaran yang sudah Lunas). Fallback ke
+	// rumus lama hanya bila Summary gagal dihitung (best-effort, lihat di atas).
+	if stmt.Summary != nil {
+		stmt.RemainingBalance = stmt.Summary.TotalOutstandingActual.String()
+		stmt.TotalPaid = stmt.Summary.TotalPaidActual.String()
+	} else {
+		stmt.RemainingBalance = contract.GrossAmount.Sub(collected).String()
+	}
+
 	exp := &StatementExposure{
 		HouseOutstanding: houseOutstanding.String(),
-		HouseOverdue:     totalOverdue.String(),
-		TotalOutstanding: houseOutstanding.String(),
-		TotalOverdue:     totalOverdue.String(),
+		HouseOverdue:     houseOverdue.String(),
+		LandOutstanding:  landOutstanding.String(),
+		LandOverdue:      landOverdue.String(),
+		TotalOutstanding: houseOutstanding.Add(landOutstanding).String(),
+		TotalOverdue:     houseOverdue.Add(landOverdue).String(),
 	}
 	if s.realization != nil {
 		rows, rerr := s.realization.ReceivableRowsByContract(ctx, tenantID, contractID)
@@ -289,8 +344,8 @@ func (s *Service) GetCustomerStatement(ctx context.Context, tenantID, contractID
 			exp.RealizationAvailable = true
 			exp.RealizationOutstanding = ro.String()
 			exp.RealizationOverdue = rov.String()
-			exp.TotalOutstanding = houseOutstanding.Add(ro).String()
-			exp.TotalOverdue = totalOverdue.Add(rov).String()
+			exp.TotalOutstanding = houseOutstanding.Add(landOutstanding).Add(ro).String()
+			exp.TotalOverdue = houseOverdue.Add(landOverdue).Add(rov).String()
 		}
 	}
 	stmt.Exposure = exp

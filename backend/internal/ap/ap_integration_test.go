@@ -213,9 +213,13 @@ func (f *w11Fixture) tagihanProyek(t *testing.T, no, amount string) ap.CreateInv
 		Lines: []ap.InvoiceLineInput{{
 			Category:     domain.CostCategoryHard,
 			CostTier:     domain.CostTierShared,
-			Amount:       w11Money(t, amount),
-			BudgetItemID: &item,
-			Description:  "Struktur lantai 1",
+			// UAT 2026-09-07: wajib untuk tier=shared — Sarana & Prasarana
+			// dipilih karena test ini menguji mekanika AP/jurnal, bukan
+			// alokasi Subsidi/Komersial.
+			HardSubcategory: domain.ConstructionSaranaPrasarana,
+			Amount:          w11Money(t, amount),
+			BudgetItemID:    &item,
+			Description:     "Struktur lantai 1",
 		}},
 	}
 }

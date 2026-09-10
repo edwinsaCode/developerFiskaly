@@ -49,7 +49,11 @@ func TestGetCustomerStatement_TotalsAndOverdue(t *testing.T) {
 	asOf := time.Date(2026, 6, 29, 0, 0, 0, 0, time.UTC)
 	receivedAt := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
 	schedules := []*sale.PaymentSchedule{
-		{ID: 1, InstallmentNumber: 1, DueDate: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC), Amount: domain.FromInt(250_000_000), Type: sale.ScheduleTypeDP, Status: sale.ScheduleStatusReceived, ReceivedAt: &receivedAt},
+		// PaidAmount diisi bersamaan dgn Status=Received — invariant produksi
+		// (applyScheduleAllocationTx/credit_repository.go selalu menulis
+		// keduanya dalam satu update), dipakai outstandingForContract yang kini
+		// jadi sumber RemainingBalance/TotalPaid statement (bukan sekadar Status).
+		{ID: 1, InstallmentNumber: 1, DueDate: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC), Amount: domain.FromInt(250_000_000), PaidAmount: domain.FromInt(250_000_000), Type: sale.ScheduleTypeDP, Status: sale.ScheduleStatusReceived, ReceivedAt: &receivedAt},
 		{ID: 2, InstallmentNumber: 2, DueDate: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC), Amount: domain.FromInt(250_000_000), Type: sale.ScheduleTypeInstallment, Status: sale.ScheduleStatusScheduled},
 		{ID: 3, InstallmentNumber: 3, DueDate: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), Amount: domain.FromInt(250_000_000), Type: sale.ScheduleTypeInstallment, Status: sale.ScheduleStatusScheduled},
 		{ID: 4, InstallmentNumber: 4, DueDate: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), Amount: domain.FromInt(250_000_000), Type: sale.ScheduleTypeFinal, Status: sale.ScheduleStatusScheduled},

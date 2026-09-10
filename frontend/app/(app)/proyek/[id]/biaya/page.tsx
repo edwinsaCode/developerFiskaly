@@ -10,6 +10,7 @@ import { Card } from "@/components/ui/Card";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { CostEntryForm } from "@/components/biaya/CostEntryForm";
 import { CostEntryTable } from "@/components/biaya/CostEntryTable";
+import { ExportCostHistoryButton } from "@/components/biaya/ExportCostHistoryButton";
 import { WorkspaceNav } from "@/components/proyek/WorkspaceNav";
 
 interface PageProps {
@@ -76,22 +77,25 @@ export default async function BiayaPage({ params }: PageProps) {
   return (
     <div className="space-y-6">
       {/* Breadcrumb + judul */}
-      <div>
-        <p className="text-xs text-text-tertiary">
-          <a href="/proyek" className="hover:underline">Proyek</a>
-          {" / "}
-          <a href={`/proyek/${projectId}`} className="hover:underline">{project.name}</a>
-          {" / "}
-          <span className="text-text-primary">Biaya</span>
-        </p>
-        <h1 className="display-lg text-2xl text-text-primary mt-1">
-          Input Biaya — {project.name}
-        </h1>
-        {!canWrite && (
-          <p className="text-xs text-warning mt-1">
-            Mode hanya-baca. Hubungi owner atau akuntan untuk mencatat biaya.
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-xs text-text-tertiary">
+            <a href="/proyek" className="hover:underline">Proyek</a>
+            {" / "}
+            <a href={`/proyek/${projectId}`} className="hover:underline">{project.name}</a>
+            {" / "}
+            <span className="text-text-primary">Biaya</span>
           </p>
-        )}
+          <h1 className="display-lg text-2xl text-text-primary mt-1">
+            Input Biaya — {project.name}
+          </h1>
+          {!canWrite && (
+            <p className="text-xs text-warning mt-1">
+              Mode hanya-baca. Hubungi owner atau akuntan untuk mencatat biaya.
+            </p>
+          )}
+        </div>
+        <ExportCostHistoryButton token={token} filter={{ project_id: projectId }} />
       </div>
 
       <WorkspaceNav projectId={projectId} active="biaya" />
@@ -117,7 +121,7 @@ export default async function BiayaPage({ params }: PageProps) {
       )}
 
       {/* Daftar biaya */}
-      <CostEntryTable entries={costEntries} expenses={expenses} canWrite={canWrite} />
+      <CostEntryTable entries={costEntries} expenses={expenses} canWrite={canWrite} token={token} />
     </div>
   );
 }

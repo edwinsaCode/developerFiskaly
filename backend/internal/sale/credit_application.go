@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"gorm.io/gorm"
+
 	"esaproperti/internal/domain"
 )
 
@@ -19,12 +21,24 @@ import (
 //   paid_amount(S)         = Σ(schedule + credit_application untuk S)
 
 // CreditApplication adalah event pemakaian saldo kredit (audit + idempotency).
+//
+// PaymentScheduleID nil = konsumsi TANPA cicilan target spesifik — dipakai
+// oleh konsumsi otomatis (bukan ApplyCredit eksplisit): netting Uang Muka
+// Penjualan saat Akad, atau disposisi terminal saat pembatalan unit. Baik
+// jalur eksplisit maupun otomatis menulis ke tabel yang SAMA ini — SATU
+// source of truth untuk seluruh konsumsi saldo kredit buyer (cegah double
+// counting antara ledger dan sub-ledger).
+//
+// SaleContractID nil = unit belum/tidak pernah punya sale_contract formal
+// saat konsumsi terjadi (mis. pembatalan pra-kontrak atas termin/booking
+// yang membawa saldo kredit — lihat consumeRemainingCreditInTx). unit_id
+// tetap cukup untuk audit & rekonsiliasi saldo pada kasus ini.
 type CreditApplication struct {
 	ID                uint64       `gorm:"primaryKey;autoIncrement"                     json:"id"`
 	TenantID          uint64       `gorm:"not null;index"                               json:"-"`
-	SaleContractID    uint64       `gorm:"not null;index"                               json:"sale_contract_id"`
+	SaleContractID    *uint64      `gorm:"index"                                        json:"sale_contract_id,omitempty"`
 	UnitID            uint64       `gorm:"not null"                                     json:"unit_id"`
-	PaymentScheduleID uint64       `gorm:"not null;index"                               json:"payment_schedule_id"`
+	PaymentScheduleID *uint64      `gorm:"index"                                        json:"payment_schedule_id,omitempty"`
 	Amount            domain.Money `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'" json:"amount"`
 	Reason            string       `gorm:"size:500"                                     json:"reason"`               // why
 	AppliedBy         *uint64      `                                                    json:"applied_by,omitempty"` // who
@@ -65,14 +79,16 @@ type BuyerCreditSource struct {
 	ReceiptNumber   string `json:"receipt_number,omitempty"`
 }
 
-// BuyerCreditApplicationView adalah satu pemakaian saldo kredit (ke cicilan).
+// BuyerCreditApplicationView adalah satu pemakaian saldo kredit (ke cicilan,
+// atau otomatis tanpa cicilan spesifik — PaymentScheduleID nil, Label
+// menjelaskan sumber konsumsinya lewat Reason).
 type BuyerCreditApplicationView struct {
-	ID                uint64 `json:"id"`
-	PaymentScheduleID uint64 `json:"payment_schedule_id"`
-	Label             string `json:"label"`
-	Amount            string `json:"amount"`
-	Reason            string `json:"reason,omitempty"`
-	AppliedAt         string `json:"applied_at"`
+	ID                uint64  `json:"id"`
+	PaymentScheduleID *uint64 `json:"payment_schedule_id,omitempty"`
+	Label             string  `json:"label"`
+	Amount            string  `json:"amount"`
+	Reason            string  `json:"reason,omitempty"`
+	AppliedAt         string  `json:"applied_at"`
 }
 
 // BuyerCreditView adalah ringkasan saldo kredit buyer sebuah unit.
@@ -152,4 +168,17 @@ func (s *Service) ApplyCredit(ctx context.Context, tenantID, contractID uint64, 
 		return nil, ErrScheduleNotFound
 	}
 	return s.contracts.ApplyCredit(ctx, tenantID, contractID, req)
+}
+
+// ConsumeRemainingCreditInTx menutup habis SISA saldo kredit buyer yang tidak
+// lagi bisa dianggap tersedia (dananya sudah dikonsumsi/didisposisi lewat
+// jalur lain — netting Uang Muka saat Akad, atau disposisi terminal saat
+// pembatalan unit) dengan mencatatnya sebagai SATU credit_applications baru
+// (PaymentScheduleID nil). No-op bila tidak ada sisa saldo. Dipanggil di
+// DALAM transaksi atomik pemanggil (Akad/pembatalan) — implementasi konkret
+// dari seam cancellation.BuyerCreditConsumer, dipakai juga oleh backfill data
+// historis. Idempoten secara alami: begitu dijalankan, available jadi 0 —
+// pemanggilan ulang pada state yang sama adalah no-op.
+func (s *Service) ConsumeRemainingCreditInTx(ctx context.Context, tx *gorm.DB, tenantID, unitID, saleContractID uint64, reason string, appliedBy *uint64) error {
+	return consumeRemainingCreditInTx(ctx, tx, tenantID, unitID, saleContractID, reason, appliedBy)
 }

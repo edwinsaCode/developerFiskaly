@@ -28,6 +28,7 @@ func (h *Handler) Mount(r chi.Router) {
 		r.Get("/types/history", h.typeHistory) // audit perubahan konfigurasi
 		r.Get("/preview", h.preview)           // nomor berikutnya per jenis (read-only)
 		r.Get("/audit", h.auditCash)           // W-3.4: pelanggaran INV-DOC-1 (?limit=)
+		r.Get("/print-target", h.printTarget)  // ?number= — DocumentNumberLink bypass
 
 		r.Group(func(r chi.Router) {
 			r.Use(auth.RequireWrite())
@@ -108,7 +109,7 @@ func (h *Handler) listDocuments(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "tenant tidak dikenal")
 		return
 	}
-	f := ListFilter{TypeCode: r.URL.Query().Get("type")}
+	f := ListFilter{TypeCode: r.URL.Query().Get("type"), Number: r.URL.Query().Get("number")}
 	if y, err := strconv.ParseUint(r.URL.Query().Get("year"), 10, 16); err == nil {
 		f.FiscalYear = uint16(y)
 	}
@@ -121,6 +122,33 @@ func (h *Handler) listDocuments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"documents": docs})
+}
+
+// printTarget — jawaban satu langkah untuk "nomor dokumen ini, kalau diklik,
+// buka cetakan yang mana" (DocumentNumberLink di frontend). Bukan navigasi ke
+// layar lain: hasilnya selalu {kind, id} yang langsung dipetakan frontend ke
+// fetcher cetak modul terkait (billing/ap/cost) — tidak pernah tebakan.
+func (h *Handler) printTarget(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := auth.TenantIDFrom(r.Context())
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "tenant tidak dikenal")
+		return
+	}
+	number := r.URL.Query().Get("number")
+	if number == "" {
+		writeErr(w, http.StatusBadRequest, "parameter number wajib diisi")
+		return
+	}
+	target, err := h.svc.ResolvePrintTargetByNumber(r.Context(), tenantID, number)
+	if err != nil {
+		if errors.Is(err, ErrDocumentNotFound) {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, target)
 }
 
 // auditCash — W-3.4. Laporan pelanggaran INV-DOC-1 untuk tenant berjalan.

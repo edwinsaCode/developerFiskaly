@@ -50,6 +50,9 @@ export function ProductTypesSection({ token }: { token: string }) {
   const [name, setName] = useState("");
   const [category, setCategory] = useState("property");
   const [account, setAccount] = useState("4-1000");
+  // Rule klien UAT #3: subsidi|komersial — klasifikasi PRODUK, bukan cuma
+  // skema KPR. "" = ikut projects.tax_category (jalur legacy).
+  const [taxCategory, setTaxCategory] = useState("");
   const [busy, setBusy] = useState(false);
   // Hanya akun PENDAPATAN yang aktif — backend menolak selain ini
   // (fail-closed); dropdown membuat aturan itu terlihat sebelum disubmit.
@@ -89,11 +92,12 @@ export function ProductTypesSection({ token }: { token: string }) {
       revenueAccounts.find((a) => a.code === "4-1000")?.code ??
       revenueAccounts[0]?.code ??
       "";
-    setEditing(null); setCode(""); setName(""); setCategory("property"); setAccount(preferred);
+    setEditing(null); setCode(""); setName(""); setCategory("property"); setAccount(preferred); setTaxCategory("");
     setModalOpen(true);
   }
   function openEdit(p: ProductType) {
     setEditing(p); setCode(p.code); setName(p.name); setCategory(p.category); setAccount(p.revenue_account_code);
+    setTaxCategory(p.tax_category ?? "");
     setModalOpen(true);
   }
 
@@ -101,10 +105,10 @@ export function ProductTypesSection({ token }: { token: string }) {
     setBusy(true);
     try {
       if (editing) {
-        await updateProductType(token, editing.id, { name, revenue_account_code: account });
+        await updateProductType(token, editing.id, { name, revenue_account_code: account, tax_category: taxCategory });
         toast(`Produk "${name}" diperbarui.`, "success");
       } else {
-        await createProductType(token, { code, name, category, revenue_account_code: account });
+        await createProductType(token, { code, name, category, revenue_account_code: account, tax_category: taxCategory });
         toast(`Produk "${name}" ditambahkan.`, "success");
       }
       setModalOpen(false);
@@ -151,6 +155,9 @@ export function ProductTypesSection({ token }: { token: string }) {
                 </p>
                 <p className="text-xs text-text-secondary">
                   {CATEGORY_LABEL[p.category] ?? p.category} · Akun pendapatan: <span className="font-mono">{p.revenue_account_code}</span>
+                  {p.tax_category && (
+                    <> · Pajak: <strong>{p.tax_category === "subsidi" ? "Subsidi (PPh Final 1%)" : "Komersial (PPh Final 2,5%)"}</strong></>
+                  )}
                 </p>
               </div>
               {mayWrite && (
@@ -240,6 +247,20 @@ export function ProductTypesSection({ token }: { token: string }) {
               Aset/Kewajiban/Ekuitas/Beban akan ditolak server.
             </p>
           </FormFull>
+          {category === "property" && (
+            <FormFull>
+              <Select label="Klasifikasi Pajak (opsional)" value={taxCategory} onChange={(e) => setTaxCategory(e.target.value)}>
+                <option value="">Ikut pajak proyek (default)</option>
+                <option value="subsidi">Subsidi — PPh Final 1%</option>
+                <option value="komersial">Komersial — PPh Final 2,5%</option>
+              </Select>
+              <p className="mt-1 text-[11px] text-text-tertiary">
+                Rumah Subsidi/Komersial adalah klasifikasi PRODUK, bukan skema pembayaran (KPR/tunai) —
+                satu proyek boleh menjual keduanya. Kosongkan bila produk ini mengikuti kategori pajak
+                proyek seperti sebelumnya.
+              </p>
+            </FormFull>
+          )}
         </FormGrid>
       </Modal>
     </Card>

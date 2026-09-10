@@ -140,6 +140,7 @@ func TestIntegration_Tier_Overhead_ExpenseAccount_HPPPoolClean(t *testing.T) {
 	shared := ctBaseReq(project)
 	shared.Category = domain.CostCategoryHard
 	shared.CostTier = domain.CostTierShared
+	shared.HardSubcategory = domain.ConstructionSaranaPrasarana // UAT 2026-09-07: wajib untuk tier=shared
 	shared.Amount = domain.FromInt(100_000_000)
 	shared.Description = "Jalan cluster"
 	se, err := svc.CreateCostEntry(ctx, ctTenant, shared)

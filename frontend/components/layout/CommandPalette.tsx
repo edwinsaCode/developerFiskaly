@@ -44,6 +44,7 @@ const NAV_ITEMS: Item[] = [
   { group: "Navigasi", label: "Periode & Tutup Buku", href: "/accounting/periods" },
   { group: "Navigasi", label: "Pajak", href: "/accounting/pajak" },
   { group: "Navigasi", label: "Laporan", href: "/laporan" },
+  { group: "Navigasi", label: "Panduan Sistem", href: "/panduan" },
   { group: "Navigasi", label: "Pengaturan", href: "/pengaturan" },
 ];
 

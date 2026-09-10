@@ -13,6 +13,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  AP_OVERHEAD_CATEGORIES,
+  AP_PROJECT_CATEGORIES,
   AP_STATUS_LABEL,
   apStatusHint,
   apStatusVariant,
@@ -90,6 +92,7 @@ function validInvoiceForm(over: Partial<InvoiceFormState> = {}): InvoiceFormStat
       {
         category: "hard",
         cost_tier: "shared",
+        hard_subcategory: "produksi_komersial",
         unit_id: "",
         budget_item_id: "",
         amount: "100000000",
@@ -99,6 +102,36 @@ function validInvoiceForm(over: Partial<InvoiceFormState> = {}): InvoiceFormStat
     ...over,
   };
 }
+
+// ── 0. RULE KLIEN FREEZE (2026-09-04): HPP hanya Tanah + Konstruksi/Hard ────
+//    Cost. Soft Cost, Biaya Lain-lain, dan Operasional (dahulu "Pendanaan")
+//    BUKAN HPP walaupun ada di RAB — kategori tagihan proyek (scope=proyek,
+//    yang berujung ke tier direct/shared, kapitalisasi Persediaan) tidak
+//    boleh pernah menawarkan kategori beban itu.
+
+test("tagihan proyek: hanya kategori kapitalisasi HPP yang ditawarkan (land, hard)", () => {
+  const values = AP_PROJECT_CATEGORIES.map((c) => c.value);
+  assert.deepEqual(values, ["land", "hard"]);
+  for (const nonHpp of ["soft", "operational", "marketing", "other"]) {
+    assert.ok(
+      !values.includes(nonHpp as (typeof values)[number]),
+      `tagihan proyek tidak boleh menawarkan kategori beban "${nonHpp}"`,
+    );
+  }
+});
+
+test("tagihan overhead: Soft Cost dan Operasional wajib ada di sini, bukan di kategori proyek", () => {
+  const values = AP_OVERHEAD_CATEGORIES.map((c) => c.value);
+  assert.ok(values.includes("soft"), "soft harus ada di kategori overhead (beban, bukan HPP)");
+  assert.ok(values.includes("operational"), "operational harus ada di kategori overhead (beban, bukan HPP)");
+  // Kategori kapitalisasi tidak boleh nyasar ke overhead.
+  for (const hpp of ["land", "hard"]) {
+    assert.ok(
+      !values.includes(hpp as (typeof values)[number]),
+      `kategori overhead tidak boleh menawarkan kategori HPP "${hpp}"`,
+    );
+  }
+});
 
 // ── 1. Daftar vendor ────────────────────────────────────────────────────────
 
@@ -300,6 +333,56 @@ test("tagihan: biaya langsung wajib menunjuk unit, biaya bersama justru tidak bo
   );
 });
 
+test("tagihan: Hard Cost tanpa unit wajib memilih subkategori Produksi Subsidi/Komersial/Sarana/Perizinan", () => {
+  const noSub = validInvoiceForm({
+    lines: [{ ...emptyInvoiceLine("proyek"), category: "hard", cost_tier: "shared", amount: "5000000" }],
+  });
+  assert.equal(
+    validateInvoice(noSub, true).lines[0].hard_subcategory,
+    "Pilih subkategori — wajib diisi karena biaya ini tidak ditautkan ke unit",
+  );
+
+  const withSub = validInvoiceForm({
+    lines: [
+      {
+        ...emptyInvoiceLine("proyek"),
+        category: "hard",
+        cost_tier: "shared",
+        hard_subcategory: "produksi_subsidi",
+        amount: "5000000",
+      },
+    ],
+  });
+  assert.equal(hasInvoiceErrors(validateInvoice(withSub, true)), false);
+
+  // Biaya langsung ke satu unit sudah tahu Subsidi/Komersial-nya lewat unit
+  // itu sendiri — subkategori tidak wajib.
+  const direct = validInvoiceForm({
+    lines: [
+      { ...emptyInvoiceLine("proyek"), category: "hard", cost_tier: "direct", unit_id: "12", amount: "5000000" },
+    ],
+  });
+  assert.equal(hasInvoiceErrors(validateInvoice(direct, true)), false);
+});
+
+test("tagihan: subkategori hanya berlaku untuk Hard Cost", () => {
+  const f = validInvoiceForm({
+    lines: [
+      {
+        ...emptyInvoiceLine("proyek"),
+        category: "land",
+        cost_tier: "shared",
+        hard_subcategory: "produksi_subsidi",
+        amount: "5000000",
+      },
+    ],
+  });
+  assert.equal(
+    validateInvoice(f, true).lines[0].hard_subcategory,
+    "Subkategori hanya berlaku untuk kategori Hard Cost",
+  );
+});
+
 test("tagihan: DPP tertulis yang tidak sama dengan Σ baris ditandai sebelum dikirim", () => {
   const f = validInvoiceForm({ dpp_amount: "99000000" }); // Σ baris = 100.000.000
   assert.equal(
@@ -331,6 +414,7 @@ test("body tagihan: nominal dikirim sebagai STRING apa adanya", () => {
         {
           category: "hard",
           cost_tier: "direct",
+          hard_subcategory: "",
           unit_id: "12",
           budget_item_id: "34",
           amount: "9007199254740993",

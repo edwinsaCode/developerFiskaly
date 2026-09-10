@@ -13,6 +13,14 @@ package sale
 //   - Laba Rugi    : tampil sebagai akun tersendiri "Pendapatan Booking";
 //                    tidak pernah dipindah ke Penjualan Rumah
 //
+// ═══ CLIENT FINAL NOTE (2026-09-10) — Booking Fee boleh Rp0 ═══
+// Fee 0 = tidak ada uang booking sama sekali (murni reservasi unit). Berlaku
+// murni berbasis NOMINAL (bukan tipe unit): TANPA jurnal kas, TANPA termin,
+// TANPA kwitansi — disposisi tetap 'recognized' TANPA memandang flag
+// Refundable (tidak ada apa pun utk dipegang/direfund). Harga unit TETAP
+// nilai kontrak normal (fee tidak pernah bagian harga, dengan atau tanpa
+// nominal). Booking fee > 0 memakai jalur di atas TANPA PERUBAHAN.
+//
 // ═══ JALUR LEGACY (baris histori pra-rule; data-driven, bukan by-deploy) ═══
 // Booking lama (disposisi held/transferred/...) tetap diproses rule saat ia
 // dibuat (append-only, histori aman):
@@ -23,8 +31,6 @@ package sale
 
 import (
 	"time"
-
-	"github.com/shopspring/decimal"
 
 	"esaproperti/internal/domain"
 )
@@ -107,20 +113,13 @@ type Booking struct {
 	BookingDate time.Time    `gorm:"not null"                                     json:"booking_date"`
 	ExpiryDate  time.Time    `gorm:"not null"                                     json:"expiry_date"`
 
-	// Produk Tambahan: Kelebihan Tanah (kelebihan-tanah-booking-integration-2026-08)
-	// — komponen OPSIONAL, dipilih salesperson langsung di form Booking dengan
-	// quantity saja; harga & reservasi otomatis via internal/land (migration
-	// 000084). Semua NULL kalau booking ini tidak menyertakan tanah.
-	LandStockID           *uint64          `                               json:"land_stock_id,omitempty"`
-	LandReservationID     *uint64          `                               json:"land_reservation_id,omitempty"`
-	LandQuantityM2        *decimal.Decimal `gorm:"type:DECIMAL(20,4)"  json:"land_quantity_m2,omitempty"`
-	LandUnitPriceSnapshot *domain.Money    `gorm:"type:DECIMAL(20,4)"     json:"land_unit_price_snapshot,omitempty"`
-
 	Status         BookingStatus  `gorm:"size:20;not null;default:'active'" json:"status"`
 	FeeDisposition FeeDisposition `gorm:"size:20;not null;default:'held'"   json:"fee_disposition"`
 
 	// TerminPaymentID: termin penerimaan fee (jurnal Dr Bank / Cr 2-2100 + kwitansi).
-	TerminPaymentID uint64 `gorm:"not null" json:"termin_payment_id"`
+	// NULL bila BookingFee = 0 (client final note 2026-09-10): tidak ada uang
+	// diterima → TANPA termin, TANPA jurnal, TANPA kwitansi (lihat CreateBookingAtomic).
+	TerminPaymentID *uint64 `gorm:"index" json:"termin_payment_id,omitempty"`
 
 	// ReceiptID/ReceiptNumber (INV-DOC-1, read-only): kwitansi KWB penerimaan
 	// fee. Kwitansinya SELALU terbit — atomik bersama booking, lihat
@@ -166,13 +165,6 @@ type CreateBookingRequest struct {
 	ExpiryDate      time.Time // wajib > BookingDate
 	Notes           string
 	CreatedBy       *uint64
-
-	// LandQuantityM2: komponen opsional Produk Tambahan Kelebihan Tanah.
-	// Salesperson HANYA mengisi quantity — harga (LandUnitPriceSnapshot,
-	// resolved server-side dari LandStock proyek ini) dan reservasi
-	// (land.ReserveTx, atomik dengan booking) tidak pernah diinput manual.
-	// nil → booking ini tanpa komponen tanah.
-	LandQuantityM2 *decimal.Decimal
 }
 
 // CloseBookingInput adalah parameter penutupan (cancel/expire) satu booking.
@@ -193,4 +185,18 @@ type ConvertBookingInput struct {
 	TitipanAccountID  uint64
 	UangMukaAccountID uint64
 	EventDate         time.Time // = contract date
+}
+
+// TransferBookingInput adalah parameter transfer booking active ke unit lain
+// (Item 3, 2026-09). TANPA jurnal: fee sudah diterima & dicatat (recognized
+// atau held) di titik unit ASAL — ledger append-only (invariant #5) melarang
+// menulis-ulang jurnal/termin/kwitansi historis. Yang berpindah HANYA baris
+// booking (unit_id/project_id/phase_id) + status kedua unit; karena tidak ada
+// penerimaan kas atau jurnal pendapatan baru, TIDAK MUNGKIN terjadi double
+// revenue.
+type TransferBookingInput struct {
+	NewUnitID uint64
+	Reason    string
+	EventDate time.Time
+	ActorID   *uint64
 }

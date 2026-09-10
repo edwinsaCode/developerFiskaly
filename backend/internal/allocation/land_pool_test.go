@@ -23,17 +23,24 @@ func (m *mockLandPoolSource) GetLandPoolParticipants(ctx context.Context, tenant
 }
 
 // ── Tests: ComputeLandPool (pure function) ──────────────────────────────────
+//
+// Rule klien UAT #1/#7, DIREVISI Item 9 (UAT 2026-09-07): unit properti kini
+// mendapat porsi PROPORSIONAL terhadap land_area (bukan lagi rata); land_stock
+// tetap dapat carve-out TETAP = PurchasePricePerM2 × LandAreaM2 (tidak berubah).
 
 // Σ(Allocated) == landPoolCost, persis — Invariant #3.
 func TestComputeLandPool_ReconcilesToLastRupiah(t *testing.T) {
 	participants := []allocation.LandPoolParticipant{
 		{Kind: allocation.LandPoolParticipantUnit, UnitID: 1, LandAreaM2: decimal.NewFromInt(100)},
 		{Kind: allocation.LandPoolParticipantUnit, UnitID: 2, LandAreaM2: decimal.NewFromInt(150)},
-		{Kind: allocation.LandPoolParticipantLandStock, LandStockID: 7, LandAreaM2: decimal.NewFromInt(333)},
+		{Kind: allocation.LandPoolParticipantLandStock, LandStockID: 7, LandAreaM2: decimal.NewFromInt(333), PurchasePricePerM2: rupiah(1_000_000)},
 	}
 	pool := rupiah(1_000_000_001) // ganjil, memaksa sisa pembulatan
 
-	results := allocation.ComputeLandPool(pool, participants)
+	results, err := allocation.ComputeLandPool(pool, participants)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))
 	}
@@ -47,36 +54,118 @@ func TestComputeLandPool_ReconcilesToLastRupiah(t *testing.T) {
 	}
 }
 
-// Peserta dengan land_area nol tetap boleh ikut (mendapat porsi nol) — bukan
-// kondisi galat, berbeda dari buildWeights di engine.go.
-func TestComputeLandPool_ZeroAreaParticipant_GetsZeroShare(t *testing.T) {
+// Unit peserta dapat porsi PROPORSIONAL terhadap land_area (Item 9, UAT
+// 2026-09-07) — menggantikan rule klien UAT #1 lama (porsi rata, diuji test
+// ini sebelum direvisi). area 100:300 (1:3) dari pool 10,000,000 → 2,500,000
+// vs 7,500,000, persis (habis dibagi, tanpa sisa pembulatan).
+func TestComputeLandPool_UnitsWeightedByArea(t *testing.T) {
 	participants := []allocation.LandPoolParticipant{
-		{Kind: allocation.LandPoolParticipantUnit, UnitID: 1, LandAreaM2: decimal.Zero},
-		{Kind: allocation.LandPoolParticipantLandStock, LandStockID: 1, LandAreaM2: decimal.NewFromInt(500)},
+		{Kind: allocation.LandPoolParticipantUnit, UnitID: 1, LandAreaM2: decimal.NewFromInt(100)},
+		{Kind: allocation.LandPoolParticipantUnit, UnitID: 2, LandAreaM2: decimal.NewFromInt(300)},
 	}
-	results := allocation.ComputeLandPool(rupiah(10_000_000), participants)
-	if !results[0].Allocated.IsZero() {
-		t.Errorf("unit with zero land_area should get zero share, got %s", results[0].Allocated)
+	results, err := allocation.ComputeLandPool(rupiah(10_000_000), participants)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if results[1].Allocated.IsZero() {
-		t.Error("land_stock should absorb the full pool when it's the only weighted participant")
+	if !results[0].Allocated.Equal(rupiah(2_500_000)) {
+		t.Errorf("unit1 (area 100/400)=%s, want 2,500,000", results[0].Allocated)
+	}
+	if !results[1].Allocated.Equal(rupiah(7_500_000)) {
+		t.Errorf("unit2 (area 300/400)=%s, want 7,500,000", results[1].Allocated)
 	}
 }
 
-// Semua bobot nol (proyek belum backfill land_area sama sekali) → semua nol,
-// TANPA error (berbeda dari engine.Compute/buildWeights yang punya
-// ErrAllWeightsZero terpisah) — Money.Allocate menangani degenerate case ini
-// secara native.
-func TestComputeLandPool_AllWeightsZero_NoErrorAllZero(t *testing.T) {
+// land_area <= 0 pada peserta unit → fail-closed (ErrLandAreaMissing), bukan
+// diam-diam menghasilkan HPP Tanah nol untuk unit itu (keputusan produk,
+// bukan tebakan — lihat AskUserQuestion 2026-09-07: "Fail-closed per proyek").
+func TestComputeLandPool_UnitLandAreaMissing_ReturnsError(t *testing.T) {
 	participants := []allocation.LandPoolParticipant{
-		{Kind: allocation.LandPoolParticipantUnit, UnitID: 1, LandAreaM2: decimal.Zero},
-		{Kind: allocation.LandPoolParticipantLandStock, LandStockID: 1, LandAreaM2: decimal.Zero},
+		{Kind: allocation.LandPoolParticipantUnit, UnitID: 1, LandAreaM2: decimal.NewFromInt(100)},
+		{Kind: allocation.LandPoolParticipantUnit, UnitID: 2, LandAreaM2: decimal.Zero},
 	}
-	results := allocation.ComputeLandPool(rupiah(5_000_000), participants)
-	for i, r := range results {
-		if !r.Allocated.IsZero() {
-			t.Errorf("participant[%d] should be zero in degenerate case, got %s", i, r.Allocated)
+	_, err := allocation.ComputeLandPool(rupiah(10_000_000), participants)
+	if !errors.Is(err, allocation.ErrLandAreaMissing) {
+		t.Errorf("expected ErrLandAreaMissing, got %v", err)
+	}
+}
+
+// land_stock TANPA purchase_price (belum diisi admin) → carve-out nol, seluruh
+// pool dibagi rata ke unit — tidak diam-diam menyerap sisa pool.
+func TestComputeLandPool_LandStockZeroPurchasePrice_GetsZeroCarveOut(t *testing.T) {
+	participants := []allocation.LandPoolParticipant{
+		{Kind: allocation.LandPoolParticipantUnit, UnitID: 1, LandAreaM2: decimal.NewFromInt(100)},
+		{Kind: allocation.LandPoolParticipantLandStock, LandStockID: 1, LandAreaM2: decimal.NewFromInt(500)},
+	}
+	results, err := allocation.ComputeLandPool(rupiah(10_000_000), participants)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !results[1].Allocated.IsZero() {
+		t.Errorf("land_stock without purchase_price should get zero carve-out, got %s", results[1].Allocated)
+	}
+	if !results[0].Allocated.Equal(rupiah(10_000_000)) {
+		t.Errorf("sole unit should absorb the full pool, got %s", results[0].Allocated)
+	}
+}
+
+// land_stock carve-out = PurchasePricePerM2 × LandAreaM2 (JUMLAH TETAP, bukan
+// proporsi) — TIDAK berubah oleh Item 9. Sisa pool sekarang dibagi PROPORSIONAL
+// terhadap land_area unit (bukan lagi rata): unit1 area 100, unit2 area 300
+// (total 400) dari sisa 2,000,000,000 → 500,000,000 vs 1,500,000,000.
+func TestComputeLandPool_LandStockFixedCarveOut(t *testing.T) {
+	participants := []allocation.LandPoolParticipant{
+		{Kind: allocation.LandPoolParticipantUnit, UnitID: 1, LandAreaM2: decimal.NewFromInt(100)},
+		{Kind: allocation.LandPoolParticipantUnit, UnitID: 2, LandAreaM2: decimal.NewFromInt(300)},
+		{Kind: allocation.LandPoolParticipantLandStock, LandStockID: 9, LandAreaM2: decimal.NewFromInt(500), PurchasePricePerM2: rupiah(1_000_000)},
+	}
+	// carve-out = 1,000,000 x 500 = 500,000,000
+	results, err := allocation.ComputeLandPool(rupiah(2_500_000_000), participants)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var landStockShare domain.Money
+	unitShareByID := map[uint64]domain.Money{}
+	for _, r := range results {
+		if r.Kind == allocation.LandPoolParticipantLandStock {
+			landStockShare = r.Allocated
+		} else {
+			unitShareByID[r.UnitID] = r.Allocated
 		}
+	}
+	if !landStockShare.Equal(rupiah(500_000_000)) {
+		t.Errorf("land_stock carve-out=%s, want 500,000,000", landStockShare)
+	}
+	// Sisa 2,000,000,000 dibagi proporsional area 100:300 → 500,000,000 vs 1,500,000,000.
+	if !unitShareByID[1].Equal(rupiah(500_000_000)) {
+		t.Errorf("unit1 (area 100/400)=%s, want 500,000,000", unitShareByID[1])
+	}
+	if !unitShareByID[2].Equal(rupiah(1_500_000_000)) {
+		t.Errorf("unit2 (area 300/400)=%s, want 1,500,000,000", unitShareByID[2])
+	}
+}
+
+// Carve-out land_stock melebihi total pool → error, bukan porsi unit negatif.
+func TestComputeLandPool_LandStockCostExceedsPool_ReturnsError(t *testing.T) {
+	participants := []allocation.LandPoolParticipant{
+		{Kind: allocation.LandPoolParticipantUnit, UnitID: 1, LandAreaM2: decimal.NewFromInt(100)},
+		{Kind: allocation.LandPoolParticipantLandStock, LandStockID: 1, LandAreaM2: decimal.NewFromInt(500), PurchasePricePerM2: rupiah(1_000_000)},
+	}
+	// carve-out = 500,000,000 > pool 100,000,000
+	_, err := allocation.ComputeLandPool(rupiah(100_000_000), participants)
+	if !errors.Is(err, allocation.ErrLandStockCostExceedsPool) {
+		t.Errorf("expected ErrLandStockCostExceedsPool, got %v", err)
+	}
+}
+
+// Tidak ada unit penerima sisa pool (hanya land_stock, carve-out < pool) →
+// error, bukan sisa yang hilang diam-diam.
+func TestComputeLandPool_NoUnitRecipientForRemainder_ReturnsError(t *testing.T) {
+	participants := []allocation.LandPoolParticipant{
+		{Kind: allocation.LandPoolParticipantLandStock, LandStockID: 1, LandAreaM2: decimal.NewFromInt(100), PurchasePricePerM2: rupiah(1_000)},
+	}
+	_, err := allocation.ComputeLandPool(rupiah(1_000_000), participants)
+	if !errors.Is(err, allocation.ErrNoLandPoolRecipient) {
+		t.Errorf("expected ErrNoLandPoolRecipient, got %v", err)
 	}
 }
 
@@ -127,8 +216,8 @@ func TestService_ComputeAllocation_NoLandStock_LandUnchanged(t *testing.T) {
 	}
 }
 
-// Proyek DENGAN land_stock: Land unit di-override oleh alokasi land_area-weighted,
-// dan Σ(unit Land baru) + land_stock share == pool.Land persis.
+// Proyek DENGAN land_stock: Land unit di-override oleh carve-out tetap +
+// sisa-rata, dan Σ(unit Land baru) + land_stock share == pool.Land persis.
 func TestService_ComputeAllocation_WithLandStock_LandOverridden(t *testing.T) {
 	projectWide := domain.UnitCostBreakdown{
 		Land: rupiah(3_000_000_000),
@@ -144,7 +233,7 @@ func TestService_ComputeAllocation_WithLandStock_LandOverridden(t *testing.T) {
 		{Kind: allocation.LandPoolParticipantUnit, UnitID: 1, LandAreaM2: decimal.NewFromInt(100)},
 		{Kind: allocation.LandPoolParticipantUnit, UnitID: 2, LandAreaM2: decimal.NewFromInt(150)},
 		{Kind: allocation.LandPoolParticipantUnit, UnitID: 3, LandAreaM2: decimal.NewFromInt(200)},
-		{Kind: allocation.LandPoolParticipantLandStock, LandStockID: 9, LandAreaM2: decimal.NewFromInt(500)},
+		{Kind: allocation.LandPoolParticipantLandStock, LandStockID: 9, LandAreaM2: decimal.NewFromInt(500), PurchasePricePerM2: rupiah(1_000_000)},
 	}}
 	svc := allocation.NewService(store, costProvider, unitSource, allocation.WithLandPoolSource(landPool))
 
@@ -163,14 +252,28 @@ func TestService_ComputeAllocation_WithLandStock_LandOverridden(t *testing.T) {
 		t.Errorf("hard: Σallocated=%s, want %s", sumHard, projectWide.Hard)
 	}
 
-	// Land unit-only sum harus STRICTLY LESS than pool.Land (land_stock menyerap sisanya) —
-	// kecuali kasus degenerate mustahil di sini karena land_stock punya bobot > 0.
+	// Land unit-only sum harus STRICTLY LESS than pool.Land (land_stock menyerap carve-out tetapnya).
 	if !sumLand.LessThan(projectWide.Land) {
-		t.Errorf("Σunit Land=%s should be < pool.Land=%s (land_stock must absorb a share)", sumLand, projectWide.Land)
+		t.Errorf("Σunit Land=%s should be < pool.Land=%s (land_stock must absorb its carve-out)", sumLand, projectWide.Land)
+	}
+
+	// Unit-unit harus dapat porsi PROPORSIONAL terhadap land_area (Item 9): area
+	// 100 < 150 < 200 → Allocated.Land harus naik strictly mengikuti urutan itu
+	// (UnitID 1/2/3 dalam makeUnits() dan landPool.participants urutannya sama).
+	byUnitID := map[uint64]domain.Money{}
+	for _, r := range results {
+		byUnitID[r.UnitID] = r.Allocated.Land
+	}
+	if !byUnitID[1].LessThan(byUnitID[2]) || !byUnitID[2].LessThan(byUnitID[3]) {
+		t.Errorf("Land harus naik seiring land_area (100<150<200): unit1=%s unit2=%s unit3=%s",
+			byUnitID[1], byUnitID[2], byUnitID[3])
 	}
 
 	// Cross-check dengan ComputeLandPool langsung: unit shares harus identik.
-	direct := allocation.ComputeLandPool(projectWide.Land, landPool.participants)
+	direct, err := allocation.ComputeLandPool(projectWide.Land, landPool.participants)
+	if err != nil {
+		t.Fatalf("direct ComputeLandPool: %v", err)
+	}
 	directByUnit := map[uint64]domain.Money{}
 	for _, d := range direct {
 		if d.Kind == allocation.LandPoolParticipantUnit {
@@ -202,7 +305,7 @@ func TestService_ComputeBudgeted_WithLandStock_LandOverridden(t *testing.T) {
 		{Kind: allocation.LandPoolParticipantUnit, UnitID: 1, LandAreaM2: decimal.NewFromInt(100)},
 		{Kind: allocation.LandPoolParticipantUnit, UnitID: 2, LandAreaM2: decimal.NewFromInt(150)},
 		{Kind: allocation.LandPoolParticipantUnit, UnitID: 3, LandAreaM2: decimal.NewFromInt(250)},
-		{Kind: allocation.LandPoolParticipantLandStock, LandStockID: 3, LandAreaM2: decimal.NewFromInt(1000)},
+		{Kind: allocation.LandPoolParticipantLandStock, LandStockID: 3, LandAreaM2: decimal.NewFromInt(1000), PurchasePricePerM2: rupiah(500_000)},
 	}}
 	svc := allocation.NewService(store, &mockDirectCostProvider{}, unitSource, allocation.WithLandPoolSource(landPool))
 
@@ -219,6 +322,16 @@ func TestService_ComputeBudgeted_WithLandStock_LandOverridden(t *testing.T) {
 	}
 	if !sumLand.LessThan(pool.Land) {
 		t.Errorf("Σunit Land=%s should be < pool.Land=%s", sumLand, pool.Land)
+	}
+	// Unit-unit harus dapat porsi PROPORSIONAL terhadap land_area (Item 9): area
+	// 100 < 150 < 250 → Allocated.Land harus naik strictly mengikuti urutan itu.
+	byUnitID := map[uint64]domain.Money{}
+	for _, r := range results {
+		byUnitID[r.UnitID] = r.Allocated.Land
+	}
+	if !byUnitID[1].LessThan(byUnitID[2]) || !byUnitID[2].LessThan(byUnitID[3]) {
+		t.Errorf("Land harus naik seiring land_area (100<150<250): unit1=%s unit2=%s unit3=%s",
+			byUnitID[1], byUnitID[2], byUnitID[3])
 	}
 }
 

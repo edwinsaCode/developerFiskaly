@@ -70,8 +70,8 @@ export function SaleRecordCard({ record }: Props) {
           <div className="space-y-1 text-sm">
             <Row label="Tanah"      value={record.hpp_land}      muted />
             <Row label="Hard Cost"  value={record.hpp_hard}      muted />
-            <Row label="Soft Cost"  value={record.hpp_soft}      muted />
-            <Row label="Pembiayaan" value={record.hpp_financing} muted />
+            <Row label="Soft Cost (legacy)"           value={record.hpp_soft}      muted />
+            <Row label="Pendanaan/Operasional (legacy)" value={record.hpp_financing} muted />
             <div className="border-t border-border pt-1 mt-1">
               <Row label="Total HPP" value={hppTotal} bold />
             </div>

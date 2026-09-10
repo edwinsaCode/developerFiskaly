@@ -85,8 +85,8 @@ type CreateUnitRequest struct {
 	SaleableArea decimal.Decimal
 	// LandArea (LT-2): opsional saat create — nol berarti diisi admin belakangan
 	// lewat UpdateUnitLandArea (form edit unit), bukan wajib di titik pembuatan.
-	LandArea     decimal.Decimal
-	ListPrice    domain.Money
+	LandArea  decimal.Decimal
+	ListPrice domain.Money
 }
 
 // BulkCreateUnitsRequest (UAT Batch 2 §4): pembuatan unit per BLOK dalam satu
@@ -100,7 +100,10 @@ type BulkCreateUnitsRequest struct {
 	UnitType     string
 	TypeLabel    *string
 	SaleableArea decimal.Decimal
-	ListPrice    domain.Money
+	// LandArea: luas tanah per unit dalam blok — diterapkan sama ke setiap unit
+	// yang dibuat pada batch ini (unit dalam satu blok lazimnya satu ukuran).
+	LandArea  decimal.Decimal
+	ListPrice domain.Money
 }
 
 // UpdateUnitOpts carries optional fields set during status transitions
@@ -319,6 +322,7 @@ func (s *Service) BulkCreateUnits(ctx context.Context, tenantID uint64, req Bulk
 			UnitType:     req.UnitType,
 			TypeLabel:    req.TypeLabel,
 			SaleableArea: req.SaleableArea,
+			LandArea:     req.LandArea,
 			ListPrice:    req.ListPrice,
 			Status:       UnitStatusAvailable,
 		})

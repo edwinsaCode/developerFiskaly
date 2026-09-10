@@ -131,9 +131,12 @@ type invoiceLineBody struct {
 	PhaseID      *uint64 `json:"phase_id"`
 	Category     string  `json:"category"`
 	CostTier     string  `json:"cost_tier"`
-	Amount       string  `json:"amount"`
-	BudgetItemID *uint64 `json:"budget_item_id"`
-	Description  string  `json:"description"`
+	// HardSubcategory (UAT 2026-09-07): produksi_subsidi|produksi_komersial|
+	// sarana_prasarana|perizinan — hanya bermakna saat category="hard".
+	HardSubcategory string  `json:"hard_subcategory,omitempty"`
+	Amount          string  `json:"amount"`
+	BudgetItemID    *uint64 `json:"budget_item_id"`
+	Description     string  `json:"description"`
 }
 
 type invoiceBody struct {
@@ -714,13 +717,14 @@ func decodeInvoice(r *http.Request, actor *uint64) (CreateInvoiceRequest, error)
 			return CreateInvoiceRequest{}, err
 		}
 		req.Lines = append(req.Lines, InvoiceLineInput{
-			UnitID:       ln.UnitID,
-			PhaseID:      ln.PhaseID,
-			Category:     domain.CostCategory(ln.Category),
-			CostTier:     domain.CostTier(ln.CostTier),
-			Amount:       amt,
-			BudgetItemID: ln.BudgetItemID,
-			Description:  ln.Description,
+			UnitID:          ln.UnitID,
+			PhaseID:         ln.PhaseID,
+			Category:        domain.CostCategory(ln.Category),
+			CostTier:        domain.CostTier(ln.CostTier),
+			HardSubcategory: domain.ConstructionSubcategory(ln.HardSubcategory),
+			Amount:          amt,
+			BudgetItemID:    ln.BudgetItemID,
+			Description:     ln.Description,
 		})
 	}
 	return req, nil

@@ -14,6 +14,7 @@ import { Rupiah } from "@/components/format/Rupiah";
 import { Tanggal } from "@/components/format/Tanggal";
 import { Badge } from "@/components/ui/Badge";
 import { PrintReceiptButton } from "@/components/billing/PrintReceiptButton";
+import { LinkifiedText } from "@/components/documents/LinkifiedText";
 import { listTermins } from "@/lib/api/sale";
 import { fetchReceiptByTermin } from "@/lib/api/billing";
 import type { TerminPayment } from "@/lib/types/api";
@@ -24,6 +25,7 @@ const KIND_LABEL: Record<string, string> = {
   final_payment: "Pelunasan",
   other: "Lainnya",
   bank_disbursement: "Pencairan Bank",
+  land_excess: "Kelebihan Tanah",
 };
 
 interface Row extends TerminPayment {
@@ -96,7 +98,7 @@ export function RiwayatPenerimaanTable({ token, unitId, refreshKey }: {
                   </Badge>
                 </td>
                 <td className="px-1 py-2 text-text-secondary max-w-[220px] truncate" title={r.description}>
-                  {r.description || "—"}
+                  {r.description ? <LinkifiedText token={token} text={r.description} /> : "—"}
                 </td>
                 <td className="px-1 py-2 text-right tabular-nums font-medium">
                   <Rupiah value={r.amount} colorSign={false} />

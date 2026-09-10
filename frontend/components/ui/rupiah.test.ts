@@ -67,3 +67,15 @@ test("aturan validateRupiah lainnya tidak bergeser", () => {
   assert.equal(validateRupiah("1.5"), "Jumlah harus rupiah bulat (tanpa sen)");
   assert.equal(validateRupiah("-5"), "Jumlah harus lebih dari Rp 0");
 });
+
+// Client final note 2026-09-10: allowZero (Booking Fee) — "0" sah, negatif
+// tetap ditolak, string kosong tetap wajib diisi. Pemanggil lain (tanpa flag)
+// TIDAK terpengaruh — dibuktikan test di atas.
+test("allowZero: booking fee Rp0 sah, negatif tetap ditolak", () => {
+  assert.equal(validateRupiah("0", true), null);
+  assert.equal(validateRupiah("", true), "Jumlah harus diisi");
+  assert.equal(validateRupiah("-1", true), "Jumlah tidak boleh negatif");
+  assert.equal(validateRupiah("5000000", true), null);
+  assert.equal(validateRupiah("0"), "Jumlah harus diisi");
+  assert.equal(validateRupiah("0", false), "Jumlah harus diisi");
+});

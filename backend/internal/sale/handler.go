@@ -99,7 +99,10 @@ func NewHandler(db *gorm.DB) *Handler {
 	postingSvc := ledger.NewPostingService(ledgerRepo, ledgerRepo).WithPeriodChecker(ledgerRepo).WithJournalTx(ledgerRepo)
 
 	allocRepo := allocation.NewGORMRepository(db)
-	allocSvc := allocation.NewService(allocRepo, allocRepo, allocRepo, allocation.WithLandPoolSource(allocRepo))
+	allocSvc := allocation.NewService(allocRepo, allocRepo, allocRepo,
+		allocation.WithLandPoolSource(allocRepo),
+		allocation.WithHardPoolSource(allocRepo, allocRepo),
+	)
 
 	taxRepo := tax.NewGORMRepository(db, postingSvc)
 
@@ -124,16 +127,23 @@ func NewHandler(db *gorm.DB) *Handler {
 	resolver.SetConfigVersionSource(allocSvcVersioned)
 
 	// kelebihan-tanah-booking-integration-2026-08: land.Service dikonstruksi
-	// independen (bukan reuse land.Handler) — wiring alokasi+RAB identik
-	// land.NewHandler agar BudgetedLandHPPResolver konsisten. sale hanya butuh
-	// PrepareBundledAkad (seam LandAkadPreparer); tidak import land.Handler
-	// (menghindari coupling ke HTTP routes-nya).
-	landAllocSvc := allocation.NewService(allocRepo, allocRepo, allocRepo,
-		allocation.WithVersionStore(allocRepo), allocation.WithLandPoolSource(allocRepo))
+	// independen (bukan reuse land.Handler) — sale hanya butuh PrepareBundledAkad
+	// (seam LandAkadPreparer); tidak import land.Handler (menghindari coupling ke
+	// HTTP routes-nya). HPP resolver = PurchasePriceLandHPPResolver (koreksi
+	// klien 2026-08-31, identik wiring land.NewHandler) — lihat
+	// land/hpp_resolver.go.
 	landRepo := land.NewGORMRepository(db)
-	landResolver := land.NewBudgetedLandHPPResolver(budgetSvc, landAllocSvc, landRepo)
-	landResolver.SetConfigVersionSource(landAllocSvc)
-	landSvc := land.NewService(landRepo, land.WithHPPResolver(landResolver))
+	landResolver := land.NewPurchasePriceLandHPPResolver(landRepo)
+	// PPh Final Pengalihan Kelebihan Tanah — otomatis saat Akad, tax engine
+	// yang SAMA dipakai unit/BAST (taxRepo di atas), bukan engine kedua. Land
+	// hanya butuh ResolveAccrualPlan (baca tarif/rule, tidak menulis) sebelum
+	// transaksi Akad dibuka, jadi tax.Service non-tx (bukan tx-scoped seperti
+	// AccruePPhFinalInTx) sudah cukup — posting jurnalnya sendiri terjadi
+	// DALAM transaksi Akad milik land (RecordAkadTx), bukan di sini.
+	landTaxSvc := tax.NewService(taxRepo, taxRepo, taxRepo, taxRepo,
+		tax.WithRuleResolution(taxRepo, taxRepo),
+		tax.WithUnitProductPolicy(taxRepo))
+	landSvc := land.NewService(landRepo, land.WithHPPResolver(landResolver), land.WithPPhResolver(landTaxSvc))
 
 	svc := NewService(repo, repo, repo, repo, repo, repo,
 		WithContractStore(repo), WithPaymentCommitter(repo),
@@ -147,6 +157,9 @@ func NewHandler(db *gorm.DB) *Handler {
 		WithHPPResolver(resolver),
 		WithHandoverWriter(repo), // Temuan #7: serah terima fisik, terpisah dari Akad
 		WithLandAkadPreparer(landSvc))
+	// P1 (2026-09-04): reuse instance landSvc yang sama untuk membaca rincian
+	// land_sale (m²/harga satuan) pada Customer Statement — bukan seam/service kedua.
+	svc.SetLandSaleReader(landSvc)
 	return &Handler{
 		svc:      svc,
 		repo:     repo,
@@ -180,6 +193,8 @@ func (h *Handler) Mount(r chi.Router) {
 		r.Route("/{bookingID}", func(r chi.Router) {
 			r.Get("/", h.getBooking)
 			r.With(auth.RequireSalesWrite()).Post("/cancel", h.cancelBooking)
+			// Item 3: transfer booking active ke unit lain (tanpa jurnal baru).
+			r.With(auth.RequireSalesWrite()).Post("/transfer", h.transferBooking)
 			// R4 Opsi A: disposisi fee outside-price pasca-konversi.
 			r.With(auth.RequireWrite()).Post("/fee-disposition", h.disposeBookingFee)
 		})
@@ -260,14 +275,44 @@ func (h *Handler) previewCollectionPayment(w http.ResponseWriter, r *http.Reques
 	if bankCode == "" {
 		bankCode = "1-1300"
 	}
-
-	preview, err := h.svc.PreviewCollectionPayment(r.Context(), tenantID, contractID, amount, bankCode)
-	if err != nil {
-		if errors.Is(err, ErrContractNotFound) {
-			writeSaleError(w, http.StatusNotFound, "kontrak tidak ditemukan")
+	bankFee := domain.Zero
+	if raw := r.URL.Query().Get("bank_fee"); raw != "" {
+		bankFee, err = domain.NewMoney(raw)
+		if err != nil {
+			writeSaleError(w, http.StatusBadRequest, "bank_fee tidak valid: "+err.Error())
 			return
 		}
-		writeSaleError(w, http.StatusInternalServerError, err.Error())
+	}
+	var scheduleID uint64
+	if raw := r.URL.Query().Get("schedule_id"); raw != "" {
+		scheduleID, err = strconv.ParseUint(raw, 10, 64)
+		if err != nil || scheduleID == 0 {
+			writeSaleError(w, http.StatusBadRequest, "schedule_id tidak valid")
+			return
+		}
+	}
+	// source: sejajar dengan recordCollectionPayment — kehadiran
+	// financing_source_id menandakan pencairan KPR (7C), supaya pratinjau
+	// memakai resolusi akun kredit yang SAMA dengan yang akan diposting.
+	source := PaymentSourceCollection
+	if raw := r.URL.Query().Get("financing_source_id"); raw != "" {
+		if _, ferr := strconv.ParseUint(raw, 10, 64); ferr == nil {
+			source = PaymentSourceKPRDisbursement
+		}
+	}
+
+	preview, err := h.svc.PreviewCollectionPayment(r.Context(), tenantID, contractID, amount, bankCode, bankFee, scheduleID, source)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrContractNotFound):
+			writeSaleError(w, http.StatusNotFound, "kontrak tidak ditemukan")
+		case errors.Is(err, ErrScheduleNotFound):
+			writeSaleError(w, http.StatusNotFound, "cicilan tidak ditemukan")
+		case errors.Is(err, ErrScheduleContractMismatch):
+			writeSaleError(w, http.StatusBadRequest, err.Error())
+		default:
+			writeSaleError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 	writeSaleJSON(w, http.StatusOK, preview)
@@ -353,13 +398,18 @@ func (h *Handler) houseBillingPlan(w http.ResponseWriter, r *http.Request) {
 // ── POST /collections/payment ─────────────────────────────────────────────────
 
 type collectionPaymentBody struct {
-	ContractID      uint64 `json:"contract_id"`
-	Amount          string `json:"amount"` // string — hindari float
-	Date            string `json:"date"`   // RFC3339
-	BankAccountCode string `json:"bank_account_code"`
-	Reference       string `json:"reference"`
-	Notes           string `json:"notes"`
-	IdempotencyKey  string `json:"idempotency_key"`
+	ContractID uint64 `json:"contract_id"`
+	// ScheduleID (opsional): target SATU cicilan spesifik (mis. baris Kelebihan
+	// Tanah) alih-alih waterfall seluruh kontrak — lihat ReceivePaymentRequest.
+	// ScheduleID. Reuse penuh: endpoint & engine yang sama dipakai unit/produk
+	// tambahan mana pun, tidak ada payment engine kedua.
+	ScheduleID      *uint64 `json:"schedule_id,omitempty"`
+	Amount          string  `json:"amount"` // string — hindari float
+	Date            string  `json:"date"`   // RFC3339
+	BankAccountCode string  `json:"bank_account_code"`
+	Reference       string  `json:"reference"`
+	Notes           string  `json:"notes"`
+	IdempotencyKey  string  `json:"idempotency_key"`
 	// FinancingSourceID (Increment 3): isi bila penerimaan adalah PENCAIRAN BANK
 	// KPR — payment_source otomatis menjadi kpr_disbursement.
 	FinancingSourceID *uint64 `json:"financing_source_id,omitempty"`
@@ -367,6 +417,10 @@ type collectionPaymentBody struct {
 	// Diabaikan (diturunkan otomatis) bila FinancingSourceID diisi.
 	Kind          string `json:"kind,omitempty"`
 	InstallmentNo *int   `json:"installment_no,omitempty"`
+	// BankFee (UAT 2026-09-03, Rule #5): provisi/administrasi bank yang
+	// dipotong dari nominal pencairan (mis. KPR) — ditanggung developer, bukan
+	// titipan customer. Kosong/absent = "0" (tanpa perubahan perilaku).
+	BankFee string `json:"bank_fee,omitempty"`
 }
 
 func (h *Handler) recordCollectionPayment(w http.ResponseWriter, r *http.Request) {
@@ -392,6 +446,14 @@ func (h *Handler) recordCollectionPayment(w http.ResponseWriter, r *http.Request
 		writeSaleError(w, http.StatusBadRequest, "date format tidak valid (gunakan RFC3339)")
 		return
 	}
+	bankFee := domain.Zero
+	if body.BankFee != "" {
+		bankFee, err = domain.NewMoney(body.BankFee)
+		if err != nil {
+			writeSaleError(w, http.StatusBadRequest, "bank_fee tidak valid: "+err.Error())
+			return
+		}
+	}
 
 	var createdBy *uint64
 	if userID != 0 {
@@ -407,6 +469,7 @@ func (h *Handler) recordCollectionPayment(w http.ResponseWriter, r *http.Request
 	result, err := h.svc.ReceivePayment(r.Context(), tenantID, ReceivePaymentRequest{
 		Source:            source,
 		ContractID:        &contractID,
+		ScheduleID:        body.ScheduleID,
 		Amount:            amount,
 		Date:              date,
 		BankAccountCode:   body.BankAccountCode,
@@ -417,6 +480,7 @@ func (h *Handler) recordCollectionPayment(w http.ResponseWriter, r *http.Request
 		FinancingSourceID: body.FinancingSourceID,
 		Kind:              TerminKind(body.Kind),
 		InstallmentNo:     body.InstallmentNo,
+		BankFee:           bankFee,
 	})
 	if err != nil {
 		switch {
@@ -424,7 +488,8 @@ func (h *Handler) recordCollectionPayment(w http.ResponseWriter, r *http.Request
 			writeSaleError(w, http.StatusNotFound, "kontrak tidak ditemukan")
 		case errors.Is(err, ErrCollectionAmountInvalid), errors.Is(err, ErrTerminAmountFractional),
 			errors.Is(err, ErrTerminAmountZeroOrNeg), errors.Is(err, ErrInvalidBankAccount),
-			errors.Is(err, ErrPaymentAccountNotFound), errors.Is(err, ErrPaymentAccountInactive):
+			errors.Is(err, ErrPaymentAccountNotFound), errors.Is(err, ErrPaymentAccountInactive),
+			errors.Is(err, ErrBankFeeInvalid):
 			writeSaleError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, ErrPaymentExceedsOutstanding), errors.Is(err, ErrPaymentExceedsReceivable),
 			errors.Is(err, ErrDisbursementRequiresAkad), errors.Is(err, ErrDisbursementNeedsContract):
@@ -586,6 +651,11 @@ type recordAkadRequest struct {
 	VATRate         string `json:"vat_rate,omitempty"` // e.g. "0.11"
 	BuyerRef        string `json:"buyer_ref"`
 	RecognitionDate string `json:"recognition_date"` // RFC3339 — tanggal Akad
+	// BankApprovedAmount (Item 7A, UAT 2026-09-07): Nilai Persetujuan KPR
+	// Bank — WAJIB untuk kontrak KPR-financed, diisi SAAT AKAD (bukan saat
+	// pembuatan kontrak). Dasar Dana Jaminan Bank. Kosong/nil untuk kontrak
+	// non-KPR.
+	BankApprovedAmount string `json:"bank_approved_amount,omitempty"`
 }
 
 func (h *Handler) recordAkad(w http.ResponseWriter, r *http.Request) {
@@ -626,19 +696,30 @@ func (h *Handler) recordAkad(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var bankApproved *domain.Money
+	if body.BankApprovedAmount != "" {
+		m, berr := domain.NewMoney(body.BankApprovedAmount)
+		if berr != nil {
+			writeSaleError(w, http.StatusBadRequest, "bank_approved_amount tidak valid: "+berr.Error())
+			return
+		}
+		bankApproved = &m
+	}
+
 	userID, _ := auth.UserIDFrom(r.Context())
 	var akadActor *uint64
 	if userID != 0 {
 		akadActor = &userID
 	}
 	req := RecordBASTRequest{
-		UnitID:    unitID,
-		CreatedBy: akadActor,
-		SalePrice: salePrice,
-		IsVAT:     body.IsVAT,
-		VATRate:   vatRate,
-		BuyerRef:  body.BuyerRef,
-		BASTDate:  recognitionDate,
+		UnitID:             unitID,
+		CreatedBy:          akadActor,
+		SalePrice:          salePrice,
+		IsVAT:              body.IsVAT,
+		VATRate:            vatRate,
+		BuyerRef:           body.BuyerRef,
+		BASTDate:           recognitionDate,
+		BankApprovedAmount: bankApproved,
 	}
 	record, err := h.svc.RecordAkad(r.Context(), tenantID, req)
 	if err != nil {
@@ -647,7 +728,9 @@ func (h *Handler) recordAkad(w http.ResponseWriter, r *http.Request) {
 			errors.Is(err, ErrSalePriceZeroOrNeg),
 			errors.Is(err, ErrVATRateRequired),
 			errors.Is(err, ErrBASTDateRequired),
-			errors.Is(err, ErrUnitRequired):
+			errors.Is(err, ErrUnitRequired),
+			errors.Is(err, ErrBankApprovedAmountFractional),
+			errors.Is(err, ErrBankApprovedAmountZeroOrNeg):
 			writeSaleError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, ErrUnitAlreadySold), errors.Is(err, project.ErrUnitTransitionConflict):
 			writeSaleError(w, http.StatusConflict, err.Error())
@@ -655,6 +738,7 @@ func (h *Handler) recordAkad(w http.ResponseWriter, r *http.Request) {
 			writeSaleError(w, http.StatusNotFound, err.Error())
 		case errors.Is(err, ErrAdvanceExceedsSalePrice), errors.Is(err, ErrUnitNotBASTReady),
 			errors.Is(err, ErrAllocationBasisMissing), errors.Is(err, ErrTrueupNotPostedForBAST),
+			errors.Is(err, ErrBankApprovedAmountRequired),
 			errors.Is(err, scheme.ErrBASTGateNotMet):
 			// Gate kebijakan Akad yang tersisa (harga rumah / payment scheme)
 			// adalah penolakan bisnis — bukan error server. Gate biaya realisasi
@@ -776,11 +860,10 @@ type createContractBody struct {
 	// Increment 7: konversi booking → kontrak (atomik).
 	BookingID *uint64 `json:"booking_id,omitempty"`
 
-	// LandQuantityM2 (kelebihan-tanah-booking-integration-2026-08): komponen
-	// opsional Produk Tambahan Kelebihan Tanah untuk kontrak yang dibuat
-	// LANGSUNG tanpa Booking (diabaikan bila BookingID diisi — komponen tanah
-	// diambil dari Booking di jalur konversi). String kosong/absent = tanpa
-	// komponen tanah.
+	// LandQuantityM2 (kelebihan-tanah-konversi-kontrak-2026-08): komponen
+	// opsional Produk Tambahan Kelebihan Tanah — berlaku baik untuk kontrak
+	// yang dibuat LANGSUNG maupun konversi booking (BookingID diisi). String
+	// kosong/absent = tanpa komponen tanah.
 	LandQuantityM2 string `json:"land_quantity_m2,omitempty"`
 }
 
@@ -814,20 +897,20 @@ func (h *Handler) createContract(w http.ResponseWriter, r *http.Request) {
 		createdBy = &userID
 	}
 	req := CreateContractRequest{
-		UnitID:            body.UnitID,
-		BuyerName:         body.BuyerName,
-		BuyerID:           body.BuyerID,
-		PaymentType:       PaymentType(body.PaymentType),
-		BankKPR:           body.BankKPR,
-		ContractDate:      contractDate,
-		TotalPrice:        totalPrice,
-		PaymentSchemeID:   body.PaymentSchemeID,
-		FinancingSourceID: body.FinancingSourceID,
-		CustomerID:        body.CustomerID,
-		SalesPersonID:     body.SalesPersonID,
+		UnitID:                 body.UnitID,
+		BuyerName:              body.BuyerName,
+		BuyerID:                body.BuyerID,
+		PaymentType:            PaymentType(body.PaymentType),
+		BankKPR:                body.BankKPR,
+		ContractDate:           contractDate,
+		TotalPrice:             totalPrice,
+		PaymentSchemeID:        body.PaymentSchemeID,
+		FinancingSourceID:      body.FinancingSourceID,
+		CustomerID:             body.CustomerID,
+		SalesPersonID:          body.SalesPersonID,
 		AdminMarketingPersonID: body.AdminMarketingPersonID,
-		CreatedBy:         createdBy,
-		BookingID:         body.BookingID,
+		CreatedBy:              createdBy,
+		BookingID:              body.BookingID,
 	}
 	if body.LoanAmount != nil {
 		m, err := domain.NewMoney(*body.LoanAmount)

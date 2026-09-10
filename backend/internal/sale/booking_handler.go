@@ -8,10 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/shopspring/decimal"
-
 	"esaproperti/internal/domain"
-	"esaproperti/internal/land"
 	"esaproperti/internal/platform/auth"
 )
 
@@ -25,12 +22,6 @@ type createBookingDTO struct {
 	BookingDate     string  `json:"booking_date"` // YYYY-MM-DD; kosong = hari ini
 	ExpiryDate      string  `json:"expiry_date"`  // YYYY-MM-DD (wajib)
 	Notes           string  `json:"notes,omitempty"`
-
-	// LandQuantityM2 (kelebihan-tanah-booking-integration-2026-08): komponen
-	// opsional Produk Tambahan Kelebihan Tanah — salesperson HANYA mengisi
-	// quantity (m²); harga dan reservasi diselesaikan server-side. String
-	// kosong/absent = booking tanpa komponen tanah.
-	LandQuantityM2 string `json:"land_quantity_m2,omitempty"`
 }
 
 func (h *Handler) createBooking(w http.ResponseWriter, r *http.Request) {
@@ -84,14 +75,6 @@ func (h *Handler) createBooking(w http.ResponseWriter, r *http.Request) {
 		BookingDate:     bookingDate,
 		ExpiryDate:      expiry,
 		Notes:           dto.Notes,
-	}
-	if dto.LandQuantityM2 != "" {
-		qty, qerr := decimal.NewFromString(dto.LandQuantityM2)
-		if qerr != nil {
-			writeSaleError(w, http.StatusBadRequest, "land_quantity_m2 tidak valid: "+qerr.Error())
-			return
-		}
-		req.LandQuantityM2 = &qty
 	}
 	if uid, ok := auth.UserIDFrom(r.Context()); ok {
 		req.CreatedBy = &uid
@@ -271,6 +254,55 @@ func (h *Handler) disposeBookingFee(w http.ResponseWriter, r *http.Request) {
 	writeSaleJSON(w, http.StatusOK, b)
 }
 
+// transferBookingDTO (Item 3): input transfer booking active ke unit lain.
+type transferBookingDTO struct {
+	NewUnitID uint64 `json:"new_unit_id"`
+	Reason    string `json:"reason,omitempty"`
+	EventDate string `json:"event_date,omitempty"` // YYYY-MM-DD; kosong = hari ini
+}
+
+// transferBooking — POST /bookings/{bookingID}/transfer.
+func (h *Handler) transferBooking(w http.ResponseWriter, r *http.Request) {
+	tenantID, err := saleTenantID(r)
+	if err != nil {
+		writeSaleError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	id, err := parseSaleUintParam(r, "bookingID")
+	if err != nil {
+		writeSaleError(w, http.StatusBadRequest, "bookingID tidak valid")
+		return
+	}
+	var dto transferBookingDTO
+	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+		writeSaleError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if dto.NewUnitID == 0 {
+		writeSaleError(w, http.StatusBadRequest, "new_unit_id wajib diisi")
+		return
+	}
+	eventDate := time.Now()
+	if dto.EventDate != "" {
+		t, perr := time.Parse("2006-01-02", dto.EventDate)
+		if perr != nil {
+			writeSaleError(w, http.StatusBadRequest, "event_date harus YYYY-MM-DD")
+			return
+		}
+		eventDate = t
+	}
+	var actor *uint64
+	if uid, ok := auth.UserIDFrom(r.Context()); ok {
+		actor = &uid
+	}
+	b, err := h.svc.TransferBooking(r.Context(), tenantID, id, dto.NewUnitID, dto.Reason, eventDate, actor)
+	if err != nil {
+		writeBookingError(w, err)
+		return
+	}
+	writeSaleJSON(w, http.StatusOK, b)
+}
+
 // writeBookingError memetakan error booking ke status HTTP.
 func writeBookingError(w http.ResponseWriter, err error) {
 	switch {
@@ -279,24 +311,16 @@ func writeBookingError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrActiveBookingExists), errors.Is(err, ErrBookingNotActive),
 		errors.Is(err, ErrFeeNotDisposable):
 		writeSaleError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, ErrInvalidFeeDispositionAction):
+	case errors.Is(err, ErrInvalidFeeDispositionAction), errors.Is(err, ErrBookingTransferSameUnit):
 		writeSaleError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrBookingFeeInvalid), errors.Is(err, ErrBookingExpiryInvalid),
 		errors.Is(err, ErrBookingCustomerRequired), errors.Is(err, ErrUnitRequired),
 		errors.Is(err, ErrInvalidBankAccount), errors.Is(err, ErrPaymentAccountNotFound),
-		errors.Is(err, ErrPaymentAccountInactive), errors.Is(err, ErrLandQuantityInvalid):
+		errors.Is(err, ErrPaymentAccountInactive):
 		writeSaleError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrBookingUnitStateInvalid), errors.Is(err, ErrBookingUnitMismatch),
 		errors.Is(err, ErrBookingCustomerMismatch), errors.Is(err, ErrTitipanAccountMissing):
 		writeSaleError(w, http.StatusUnprocessableEntity, err.Error())
-	// kelebihan-tanah-booking-integration-2026-08: reservasi Produk Tambahan
-	// Kelebihan Tanah gagal — proyek belum punya pool, atau kuantitas melebihi
-	// yang tersedia (race dengan booking lain, ditangkap oleh row lock
-	// land.ReserveTx). Keduanya kegagalan permintaan, bukan bug server.
-	case errors.Is(err, land.ErrLandStockNotFound):
-		writeSaleError(w, http.StatusNotFound, err.Error())
-	case errors.Is(err, land.ErrCapacityExceeded):
-		writeSaleError(w, http.StatusConflict, err.Error())
 	default:
 		writeSaleError(w, http.StatusInternalServerError, err.Error())
 	}

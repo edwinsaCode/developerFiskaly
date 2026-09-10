@@ -85,7 +85,7 @@ func TestPlanAPLine_Parity_WithExistingCostPath(t *testing.T) {
 	}{
 		{"hard cost proyek (shared)", func(r *cost.CreateCostEntryRequest) {}},
 		{"soft cost proyek", func(r *cost.CreateCostEntryRequest) { r.Category = domain.CostCategorySoft }},
-		{"biaya pembiayaan", func(r *cost.CreateCostEntryRequest) { r.Category = domain.CostCategoryFinancing }},
+		{"biaya operasional", func(r *cost.CreateCostEntryRequest) { r.Category = domain.CostCategoryOperational }},
 		{"direct ke unit", func(r *cost.CreateCostEntryRequest) {
 			r.CostTier = domain.CostTierDirect
 			r.UnitID = &unit

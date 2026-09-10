@@ -9,7 +9,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   land:         "Tanah",
   construction: "Konstruksi",
   soft:         "Biaya Lunak",
-  financing:    "Pendanaan",
+  operational:  "Operasional",
   marketing:    "Pemasaran",
   other:        "Lain-lain",
 };
@@ -62,7 +62,11 @@ export function RABvsRealisasiSection({ report, error }: Props) {
         </TableHead>
         <TableBody>
           {report.rows.map(row => {
-            const overBudget = parseFloat(row.persen_realisasi) > 100;
+            const isNA = row.persen_realisasi === "N/A";
+            // Backend mengirim fraksi mentah (0.6 = 60%), kontrak yang sama
+            // dipakai komponen <Persen> (mengalikan 100 sendiri) — bukan lagi
+            // string ber-suffix "%".
+            const overBudget = !isNA && parseFloat(row.persen_realisasi) > 1;
             return (
               <TableRow key={row.category} subtle={overBudget}>
                 <Td>
@@ -83,7 +87,7 @@ export function RABvsRealisasiSection({ report, error }: Props) {
                 </Td>
                 <Td right>
                   <span className={overBudget ? "text-danger font-semibold" : ""}>
-                    <Persen value={row.persen_realisasi} />
+                    {isNA ? "–" : <Persen value={row.persen_realisasi} />}
                   </span>
                 </Td>
               </TableRow>

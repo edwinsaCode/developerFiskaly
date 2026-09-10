@@ -58,7 +58,10 @@ func writeSchemeFlowError(w http.ResponseWriter, err error) {
 		errors.Is(err, scheme.ErrInvalidParams),
 		errors.Is(err, scheme.ErrSchemeInactive),
 		errors.Is(err, scheme.ErrFinancingSourceRequired),
-		errors.Is(err, scheme.ErrFinancingSourceNotAllowed):
+		errors.Is(err, scheme.ErrFinancingSourceNotAllowed),
+		errors.Is(err, ErrBankApprovedAmountRequired),
+		errors.Is(err, ErrBankApprovedAmountFractional),
+		errors.Is(err, ErrBankApprovedAmountZeroOrNeg):
 		writeSaleError(w, http.StatusBadRequest, err.Error())
 	default:
 		writeSaleError(w, http.StatusInternalServerError, err.Error())
@@ -115,6 +118,10 @@ type schemeEventBody struct {
 	EventDate         string  `json:"event_date,omitempty"` // RFC3339; kosong = sekarang (tanggal kejadian bisnis)
 	FinancingSourceID *uint64 `json:"financing_source_id,omitempty"`
 	Notes             string  `json:"notes,omitempty"`
+	// BankApprovedAmount (Item 7A, UAT 2026-09-07): Nilai Persetujuan KPR
+	// Bank — WAJIB untuk event `akad` pada kontrak KPR-financed yang BAST-nya
+	// sudah terjadi lebih dulu (Akad pasca-BAST). Kosong untuk event lain.
+	BankApprovedAmount string `json:"bank_approved_amount,omitempty"`
 }
 
 // parseOptionalEventDate mem-parse tanggal kejadian bisnis (RFC3339, opsional).
@@ -150,13 +157,23 @@ func (h *Handler) applySchemeEvent(w http.ResponseWriter, r *http.Request) {
 		writeSaleError(w, http.StatusBadRequest, "event_date tidak valid (gunakan RFC3339)")
 		return
 	}
+	var bankApproved *domain.Money
+	if body.BankApprovedAmount != "" {
+		m, berr := domain.NewMoney(body.BankApprovedAmount)
+		if berr != nil {
+			writeSaleError(w, http.StatusBadRequest, "bank_approved_amount tidak valid: "+berr.Error())
+			return
+		}
+		bankApproved = &m
+	}
 	ev, err := h.svc.ApplySchemeEvent(r.Context(), tenantID, ApplySchemeEventRequest{
-		ContractID:        contractID,
-		Event:             scheme.Event(body.Event),
-		EventDate:         eventDate,
-		FinancingSourceID: body.FinancingSourceID,
-		Notes:             body.Notes,
-		CreatedBy:         saleCreatedBy(r),
+		ContractID:         contractID,
+		Event:              scheme.Event(body.Event),
+		EventDate:          eventDate,
+		FinancingSourceID:  body.FinancingSourceID,
+		Notes:              body.Notes,
+		CreatedBy:          saleCreatedBy(r),
+		BankApprovedAmount: bankApproved,
 	})
 	if err != nil {
 		writeSchemeFlowError(w, err)

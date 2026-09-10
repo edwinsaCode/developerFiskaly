@@ -72,6 +72,18 @@ func (s *Service) GetARAging(ctx context.Context, tenantID uint64, asOf time.Tim
 		rows = append(rows, legacyRows...)
 	}
 
+	// Kelebihan Tanah — sumber SourceAddon KEDUA, terpisah dari charge_items
+	// (bug ditemukan 2026-08-31: land_sales sebelumnya tidak pernah dibaca AR
+	// sama sekali). Sama seperti di atas: hanya difilter src=addon berarti
+	// query yang dipanggil src=realization kehilangan baris tanah.
+	if wantsSource(src, receivable.SourceAddon) && s.land != nil {
+		landRows, err := s.land.ReceivableRows(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, landRows...)
+	}
+
 	// Urut jatuh tempo menaik: baris rumah dan realisasi BERBAUR. Mengelompokkan
 	// kembali per sumber akan mengembalikan dua daftar yang justru dihapus W-4.
 	sortByDueDate(rows)

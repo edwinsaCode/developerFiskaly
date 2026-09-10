@@ -32,14 +32,20 @@ import (
 // yang akan menampilkannya sebagai satu kejadian.
 type InvoiceLineInput struct {
 	// ProjectID diisi service dari tagihan — bukan dari pemanggil.
-	ProjectID    uint64
-	UnitID       *uint64
-	PhaseID      *uint64
-	Category     domain.CostCategory
-	CostTier     domain.CostTier
-	Amount       domain.Money
-	BudgetItemID *uint64
-	Description  string
+	ProjectID uint64
+	UnitID    *uint64
+	PhaseID   *uint64
+	Category  domain.CostCategory
+	CostTier  domain.CostTier
+	// HardSubcategory (UAT 2026-09-07): produksi_subsidi|produksi_komersial|
+	// sarana_prasarana|perizinan — hanya bermakna saat Category=Hard, dan
+	// WAJIB diisi saat baris ini tidak ditautkan ke UnitID (tier=shared),
+	// karena cost.Service.validate() menegakkan aturan yang sama persis untuk
+	// baris AP seperti untuk Cost Entry langsung (satu mesin, dua pintu).
+	HardSubcategory domain.ConstructionSubcategory
+	Amount          domain.Money
+	BudgetItemID    *uint64
+	Description     string
 }
 
 // CreateInvoiceRequest adalah input pencatatan tagihan vendor.
@@ -178,13 +184,14 @@ func (s *Service) RecordInvoice(ctx context.Context, tenantID uint64, req Create
 		// Baris biaya mendarat di cost_entries (D-4) — bukan di tabel milik AP.
 		for _, pl := range planned {
 			e := &cost.CostEntry{
-				TenantID:       tenantID,
-				ProjectID:      nullableID(pl.in.ProjectID),
-				UnitID:         pl.in.UnitID,
-				PhaseID:        pl.in.PhaseID,
-				Category:       pl.in.Category,
-				CostTier:       pl.plan.Tier,
-				Amount:         pl.in.Amount,
+				TenantID:        tenantID,
+				ProjectID:       nullableID(pl.in.ProjectID),
+				UnitID:          pl.in.UnitID,
+				PhaseID:         pl.in.PhaseID,
+				Category:        pl.in.Category,
+				CostTier:        pl.plan.Tier,
+				HardSubcategory: pl.in.HardSubcategory,
+				Amount:          pl.in.Amount,
 				PaymentMethod:  cost.PaymentMethodPayable,
 				Date:           req.InvoiceDate,
 				Vendor:         vendor.Name,
@@ -404,16 +411,17 @@ func (s *Service) prepare(
 	for i, ln := range req.Lines {
 		ln.ProjectID = req.ProjectID // cakupan proyek milik tagihan, bukan baris
 		plan, err := s.planner.PlanAPLine(ctx, tenantID, cost.CreateCostEntryRequest{
-			ProjectID:    ln.ProjectID,
-			UnitID:       ln.UnitID,
-			PhaseID:      ln.PhaseID,
-			Category:     ln.Category,
-			CostTier:     ln.CostTier,
-			Amount:       ln.Amount,
-			Date:         req.InvoiceDate,
-			Vendor:       vendor.Name,
-			Description:  ln.Description,
-			BudgetItemID: ln.BudgetItemID,
+			ProjectID:       ln.ProjectID,
+			UnitID:          ln.UnitID,
+			PhaseID:         ln.PhaseID,
+			Category:        ln.Category,
+			CostTier:        ln.CostTier,
+			HardSubcategory: ln.HardSubcategory,
+			Amount:          ln.Amount,
+			Date:            req.InvoiceDate,
+			Vendor:          vendor.Name,
+			Description:     ln.Description,
+			BudgetItemID:    ln.BudgetItemID,
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("baris %d: %w", i+1, err)

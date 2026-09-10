@@ -24,6 +24,10 @@ interface Props {
    *  Lempar error di sini membatalkan submit sebelum recordAkad tereksekusi. */
   onBeforeSubmit?: () => Promise<void>;
   onSubmitted?: () => void;
+  /** Gap 1 (UAT 2026-09-07): bila true, form ini dipakai utk Akad Kredit KPR —
+   *  tampilkan & wajibkan "Nilai Persetujuan KPR Bank" (source of truth Dana
+   *  Jaminan Bank KPR). Non-KPR (cash, via UnitSalePanel) tidak mengisi ini. */
+  isKPR?: boolean;
 }
 
 // Terjemahkan error backend teknis → langkah yang bisa dikerjakan user.
@@ -44,7 +48,7 @@ function friendlyAkadError(err: unknown): string {
   return msg || "Gagal mencatat Akad";
 }
 
-export function AkadForm({ open, onClose, unitId, listPrice, token, onBeforeSubmit, onSubmitted }: Props) {
+export function AkadForm({ open, onClose, unitId, listPrice, token, onBeforeSubmit, onSubmitted, isKPR }: Props) {
   const router = useRouter();
   const { toast } = useToast();
   const [loading, setLoading] = useState(false);
@@ -54,12 +58,16 @@ export function AkadForm({ open, onClose, unitId, listPrice, token, onBeforeSubm
   const [vatRate, setVatRate]             = useState("0.11");
   const [buyerRef, setBuyerRef]           = useState("");
   const [recognitionDate, setRecognitionDate] = useState(todayLocalStr());
+  const [bankApprovedAmount, setBankApprovedAmount] = useState("");
 
   const priceErr   = validateRupiah(salePrice);
   const buyerErr   = !buyerRef.trim() ? "Nama/referensi pembeli wajib diisi" : null;
   const vatRateErr = isVAT && (parseFloat(vatRate) <= 0 || isNaN(parseFloat(vatRate)))
     ? "Rate PPN tidak valid" : null;
-  const isValid    = !priceErr && !buyerErr && !vatRateErr && recognitionDate;
+  const bankApprovedErr = isKPR
+    ? (validateRupiah(bankApprovedAmount) || (Number(bankApprovedAmount) <= 0 ? "Nilai Persetujuan KPR Bank wajib diisi" : null))
+    : null;
+  const isValid    = !priceErr && !buyerErr && !vatRateErr && !bankApprovedErr && recognitionDate;
 
   async function handleSubmit() {
     if (!isValid) return;
@@ -72,6 +80,7 @@ export function AkadForm({ open, onClose, unitId, listPrice, token, onBeforeSubm
         vat_rate: isVAT ? vatRate : undefined,
         buyer_ref: buyerRef.trim(),
         recognition_date: new Date(recognitionDate).toISOString(),
+        bank_approved_amount: isKPR ? bankApprovedAmount : undefined,
       });
       toast(`Akad berhasil. Pendapatan & HPP sudah diakui (Jurnal #${record.revenue_journal_id}).`, "success");
       onSubmitted?.();
@@ -122,6 +131,19 @@ export function AkadForm({ open, onClose, unitId, listPrice, token, onBeforeSubm
           onChange={(e) => setRecognitionDate(e.target.value)}
           required
         />
+
+        {isKPR && (
+          <FormFull>
+            <RupiahInput
+              label="Nilai Persetujuan KPR Bank"
+              value={bankApprovedAmount}
+              onChange={setBankApprovedAmount}
+              required
+              error={bankApprovedAmount && bankApprovedErr ? bankApprovedErr : undefined}
+              hint="Nominal yang benar-benar disetujui bank — jadi source of truth Dana Jaminan Bank KPR."
+            />
+          </FormFull>
+        )}
         <FormFull>
           <Input
             label="Referensi Pembeli"

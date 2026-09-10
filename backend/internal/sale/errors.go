@@ -26,12 +26,21 @@ var (
 	ErrPaymentExceedsReceivable  = errors.New("pembayaran melebihi sisa piutang pelanggan setelah BAST")
 	ErrPaymentExceedsOutstanding = errors.New("nominal pembayaran melebihi sisa tagihan kontrak")
 	ErrCollectionAmountInvalid   = errors.New("nominal pembayaran harus rupiah bulat dan lebih besar dari nol")
-	ErrVATRateRequired           = errors.New("vat_rate wajib diisi dan > 0 ketika is_vat = true")
-	ErrUnitRequired              = errors.New("unit_id wajib diisi")
-	ErrProjectRequired           = errors.New("project_id wajib diisi")
-	ErrBASTDateRequired          = errors.New("bast_date wajib diisi")
-	ErrSaleRecordNotFound        = errors.New("sale record tidak ditemukan")
-	ErrTerminNotFound            = errors.New("termin tidak ditemukan")
+	// ErrBankFeeInvalid (UAT 2026-09-03, Rule #5): provisi/biaya admin bank yang
+	// dipotong saat pencairan KPR — harus rupiah bulat, tidak boleh negatif, dan
+	// tidak boleh melebihi nominal yang diselesaikan ke piutang (bank_fee tidak
+	// pernah membuat penerimaan kas menjadi negatif).
+	ErrBankFeeInvalid     = errors.New("bank_fee harus rupiah bulat, tidak negatif, dan tidak melebihi amount")
+	ErrVATRateRequired    = errors.New("vat_rate wajib diisi dan > 0 ketika is_vat = true")
+	ErrUnitRequired       = errors.New("unit_id wajib diisi")
+	ErrProjectRequired    = errors.New("project_id wajib diisi")
+	ErrBASTDateRequired   = errors.New("bast_date wajib diisi")
+	ErrSaleRecordNotFound = errors.New("sale record tidak ditemukan")
+	ErrTerminNotFound     = errors.New("termin tidak ditemukan")
+	// ErrScheduleContractMismatch: schedule_id yang diminta bukan milik contract_id
+	// yang dikirim — mencegah pembayaran ditarget ke cicilan kontrak lain (mis. via
+	// payload yang salah suntik dari client).
+	ErrScheduleContractMismatch = errors.New("schedule_id bukan milik contract_id yang diberikan")
 
 	// Phase 7 — PaymentSchedule
 	ErrContractNotFound           = errors.New("sale contract tidak ditemukan")
@@ -70,7 +79,7 @@ var (
 	ErrBookingNotFound           = errors.New("booking tidak ditemukan")
 	ErrBookingNotActive          = errors.New("booking sudah terminal (converted/expired/cancelled): tidak bisa diproses")
 	ErrActiveBookingExists       = errors.New("unit sudah punya booking aktif: batalkan/konversikan dulu")
-	ErrBookingFeeInvalid         = errors.New("booking_fee harus rupiah bulat dan lebih besar dari nol")
+	ErrBookingFeeInvalid         = errors.New("booking_fee harus rupiah bulat dan tidak boleh negatif")
 	ErrBookingExpiryInvalid      = errors.New("expiry_date harus setelah booking_date")
 	ErrBookingCustomerRequired   = errors.New("customer_id wajib untuk booking (kebijakan Increment 1)")
 	ErrBookingUnitStateInvalid   = errors.New("status unit tidak sesuai untuk operasi booking ini")
@@ -82,6 +91,9 @@ var (
 	// LEGACY R4 — disposisi fee held pasca-konversi (hanya baris histori)
 	ErrFeeNotDisposable            = errors.New("fee booking tidak bisa didisposisi: hanya baris legacy converted dengan fee yang masih held (booking baru = pendapatan final)")
 	ErrInvalidFeeDispositionAction = errors.New("aksi disposisi fee tidak dikenal: gunakan forfeit atau refund")
+
+	// Item 3 (2026-09) — Transfer booking ke unit lain (TANPA jurnal baru).
+	ErrBookingTransferSameUnit = errors.New("unit tujuan sama dengan unit booking saat ini")
 
 	// P0-2/P0-3 — Budgeted Cost Allocation (HPP snapshot saat BAST)
 	// ErrAllocationBasisMissing: proyek punya RAB aktif tapi basis alokasi
@@ -110,4 +122,17 @@ var (
 	ErrLandAkadPreparerNotConfigured  = errors.New("LandAkadPreparer belum dikonfigurasi di service: kontrak punya komponen Kelebihan Tanah tapi tidak bisa diproses")
 	ErrLandComponentRequiresLandStock = errors.New("komponen Kelebihan Tanah butuh land_stock_id, land_reservation_id, dan quantity yang lengkap")
 	ErrLandQuantityInvalid            = errors.New("land_quantity_m2 harus lebih besar dari nol")
+
+	// Item 7C (UAT 2026-09-07): pencairan KPR dibatasi ke sisa Dana Jaminan
+	// Bank (Nilai Persetujuan KPR Bank dikurangi pencairan sebelumnya) —
+	// bukan sisa piutang unit gabungan. Kelebihan tidak pernah diam-diam
+	// dialihkan ke Piutang Usaha.
+	ErrDisbursementExceedsFinancing = errors.New("pencairan melebihi sisa Dana Jaminan Bank kontrak")
+
+	// Item 7A (UAT 2026-09-07): Nilai Persetujuan KPR Bank kini diisi SAAT
+	// AKAD (bukan saat pembuatan kontrak) untuk kontrak ber-scheme KPR —
+	// dasar pemisahan Dana Jaminan Bank vs Piutang Usaha di Event 3.
+	ErrBankApprovedAmountRequired   = errors.New("nilai persetujuan KPR Bank wajib diisi untuk kontrak KPR sebelum Akad")
+	ErrBankApprovedAmountFractional = errors.New("nilai persetujuan KPR Bank harus rupiah bulat: pecahan sen tidak diizinkan")
+	ErrBankApprovedAmountZeroOrNeg  = errors.New("nilai persetujuan KPR Bank harus lebih besar dari nol")
 )

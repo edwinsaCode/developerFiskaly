@@ -24,6 +24,11 @@ const (
 	ScheduleTypeDP          ScheduleType = "dp"
 	ScheduleTypeInstallment ScheduleType = "installment"
 	ScheduleTypeFinal       ScheduleType = "final"
+	// ScheduleTypeLand: baris piutang Kelebihan Tanah (bundled Akad, migrasi
+	// 000095). LandSaleID WAJIB diisi untuk baris jenis ini. Anchor tunggal
+	// yang membuat land_sales terlihat oleh waterfall ReceivePayment/
+	// planAllocation — bukan payment engine kedua.
+	ScheduleTypeLand ScheduleType = "land"
 )
 
 type ScheduleStatus string
@@ -117,10 +122,13 @@ func (SaleContract) TableName() string { return "sale_contracts" }
 // Penerimaan pembayaran selalu lewat jalur Event 2 (RecordTermin).
 // TIDAK memposting jurnal sendiri.
 type PaymentSchedule struct {
-	ID                uint64       `gorm:"primaryKey;autoIncrement"                      json:"id"`
-	TenantID          uint64       `gorm:"not null;index"                                json:"-"`
-	SaleContractID    uint64       `gorm:"not null;index"                                json:"sale_contract_id"`
-	UnitID            uint64       `gorm:"not null;index"                                json:"unit_id"`
+	ID             uint64 `gorm:"primaryKey;autoIncrement"                      json:"id"`
+	TenantID       uint64 `gorm:"not null;index"                                json:"-"`
+	SaleContractID uint64 `gorm:"not null;index"                                json:"sale_contract_id"`
+	UnitID         uint64 `gorm:"not null;index"                                json:"unit_id"`
+	// LandSaleID: logical FK ke land_sales.id (migrasi 000095) — hanya diisi
+	// untuk Type == ScheduleTypeLand. NULL untuk semua cicilan unit biasa.
+	LandSaleID        *uint64      `gorm:"index"                                         json:"land_sale_id,omitempty"`
 	InstallmentNumber int          `gorm:"not null"                                      json:"installment_number"`
 	DueDate           time.Time    `gorm:"not null"                                      json:"due_date"`
 	Amount            domain.Money `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'" json:"amount"`
@@ -201,7 +209,7 @@ type CreateContractRequest struct {
 	// AdminMarketingPersonID: opsional, independen dari SalesPersonID (P1 — Sales
 	// ≠ Admin Marketing). Boleh diisi/diubah setelah kontrak dibuat via UpdateAdminMarketing.
 	AdminMarketingPersonID *uint64
-	CreatedBy         *uint64 // audit event contract_signed
+	CreatedBy              *uint64 // audit event contract_signed
 	// BookingID (Increment 7): konversi booking → kontrak dalam SATU transaksi
 	// (kontrak + reklas titipan→uang muka + buyer credit + unit booked→reserved).
 	// Bila diisi, komponen tanah (bila ada) diambil dari Booking.Land* — abaikan

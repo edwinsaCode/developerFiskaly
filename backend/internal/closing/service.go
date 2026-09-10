@@ -130,16 +130,14 @@ type varianceResult struct {
 }
 
 // setAmount menulis nilai satu class ke breakdown (taxonomy-driven).
+// AllCostCategories hanya land|hard (RULE KLIEN FREEZE 2026-09-04) — c di sini
+// tidak pernah CostCategorySoft (field itu legacy-only untuk baca data historis).
 func setAmount(b *domain.UnitCostBreakdown, c domain.CostCategory, m domain.Money) {
 	switch c {
 	case domain.CostCategoryLand:
 		b.Land = m
 	case domain.CostCategoryHard:
 		b.Hard = m
-	case domain.CostCategorySoft:
-		b.Soft = m
-	case domain.CostCategoryFinancing:
-		b.Financing = m
 	}
 }
 

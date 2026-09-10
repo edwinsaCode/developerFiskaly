@@ -11,6 +11,7 @@ import (
 
 	"esaproperti/internal/domain"
 	"esaproperti/internal/land"
+	"esaproperti/internal/receivable"
 )
 
 type mockStore struct {
@@ -22,11 +23,12 @@ type mockStore struct {
 	nextReservationID uint64
 
 	// LT-5
-	accounts    map[string]uint64
-	accountErrs map[string]error
-	landSales   map[uint64]*land.LandSale
-	allocations []*land.LandAllocation
-	nextSaleID  uint64
+	accounts       map[string]uint64
+	accountErrs    map[string]error
+	landSales      map[uint64]*land.LandSale
+	allocations    []*land.LandAllocation
+	nextSaleID     uint64
+	receivableRows []land.LandSaleReceivable
 }
 
 func newMockStore() *mockStore {
@@ -168,13 +170,14 @@ func (m *mockStore) FindPoolByProject(_ context.Context, tenantID, projectID uin
 	return &cp, nil
 }
 
-func (m *mockStore) UpdatePoolQuantityAndPrice(_ context.Context, tenantID, id uint64, totalQuantityM2 decimal.Decimal, unitPrice domain.Money) error {
+func (m *mockStore) UpdatePoolQuantityAndPrice(_ context.Context, tenantID, id uint64, totalQuantityM2 decimal.Decimal, unitPrice, purchasePrice domain.Money) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for key, pool := range m.byKey {
 		if key[0] == tenantID && pool.ID == id {
 			pool.TotalQuantityM2 = totalQuantityM2
 			pool.UnitPrice = unitPrice
+			pool.PurchasePrice = purchasePrice
 			return nil
 		}
 	}
@@ -306,6 +309,10 @@ func (m *mockStore) ListLandSalesByProject(_ context.Context, tenantID, projectI
 		}
 	}
 	return out, nil
+}
+
+func (m *mockStore) ListReceivableLandSales(_ context.Context, _ uint64) ([]land.LandSaleReceivable, error) {
+	return m.receivableRows, nil
 }
 
 func (m *mockStore) FindAccountIDByCode(_ context.Context, _ uint64, code string) (uint64, error) {
@@ -1073,5 +1080,64 @@ func TestCancelLandSale_TenantIsolation(t *testing.T) {
 	_, err = svc.CancelLandSale(context.Background(), 999, sale.ID, land.CancelLandSaleRequest{Reason: "x"})
 	if err != land.ErrLandSaleNotFound {
 		t.Fatalf("cross-tenant cancel want ErrLandSaleNotFound, got %v", err)
+	}
+}
+
+// TestReceivableRows_ReflectsLinkedScheduleProgress verifies land_sale
+// menjadi AR anchor yang sah: PaidAmount/Received sekarang dihitung dari
+// payment_schedules yang ter-link via land_sale_id (migrasi 000095), bukan
+// hardcode Zero/false lagi.
+func TestReceivableRows_ReflectsLinkedScheduleProgress(t *testing.T) {
+	svc, store := newTestService()
+	gross := mustMoney(t, "25000000")
+	partial := mustMoney(t, "10000000")
+	receivedStatus := "received"
+	scheduledStatus := "scheduled"
+	store.receivableRows = []land.LandSaleReceivable{
+		{
+			ID:              1,
+			QuantityM2:      "50",
+			GrossAmount:     gross,
+			RecognitionDate: time.Now(),
+			CustomerName:    "Budi",
+			PaidAmount:      &partial,
+			ScheduleStatus:  &scheduledStatus,
+		},
+		{
+			ID:              2,
+			QuantityM2:      "30",
+			GrossAmount:     mustMoney(t, "15000000"),
+			RecognitionDate: time.Now(),
+			CustomerName:    "Siti",
+			PaidAmount:      nil, // belum ada schedule ter-link (data lama)
+			ScheduleStatus:  nil,
+		},
+		{
+			ID:              3,
+			QuantityM2:      "20",
+			GrossAmount:     mustMoney(t, "8000000"),
+			RecognitionDate: time.Now(),
+			CustomerName:    "Ani",
+			PaidAmount:      func() *domain.Money { m := mustMoney(t, "8000000"); return &m }(),
+			ScheduleStatus:  &receivedStatus,
+		},
+	}
+
+	rows, err := svc.ReceivableRows(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("ReceivableRows: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("want 3 rows, got %d", len(rows))
+	}
+
+	if got := rows[0]; got.Source != receivable.SourceAddon || !got.PaidAmount.Equal(partial) || got.Received {
+		t.Fatalf("row 0 (partial, unreceived): got paid=%v received=%v", got.PaidAmount, got.Received)
+	}
+	if got := rows[1]; !got.PaidAmount.Equal(domain.Zero) || got.Received {
+		t.Fatalf("row 1 (no linked schedule): want PaidAmount=0, Received=false; got paid=%v received=%v", got.PaidAmount, got.Received)
+	}
+	if got := rows[2]; !got.PaidAmount.Equal(mustMoney(t, "8000000")) || !got.Received {
+		t.Fatalf("row 2 (fully paid+received): got paid=%v received=%v", got.PaidAmount, got.Received)
 	}
 }

@@ -26,16 +26,18 @@ Nomor 3 dan 4 ditegakkan oleh layer bisnis sebelum jurnal dibuat.
 ## Event 1 — Kapitalisasi biaya pengembangan
 
 **Nama:** Kapitalisasi Biaya Pengembangan
-**Pemicu:** Pembayaran atau pengakuan tagihan atas biaya tanah, konstruksi (hard cost), perizinan/desain/legal (soft cost), atau bunga/biaya pinjaman yang memenuhi syarat kapitalisasi.
+**Pemicu:** Pembayaran atau pengakuan tagihan atas biaya tanah, konstruksi (hard cost: produksi, sarana & prasarana, perizinan), desain/legal (soft cost), atau bunga/biaya pinjaman yang memenuhi syarat kapitalisasi.
 
 **Prinsip:** Biaya pengembangan **tidak masuk Laba Rugi** saat dibelanjakan. Biaya menumpuk di neraca pada akun Persediaan Real Estat sampai unit terjual. Pilih sub-akun Persediaan sesuai kategori biaya:
 
 | Kategori biaya           | Sub-akun Persediaan yang didebit |
 |--------------------------|----------------------------------|
 | Biaya tanah              | 1-3000 Persediaan Real Estat — Tanah |
-| Konstruksi / hard cost   | 1-3100 Persediaan Real Estat — Hard Cost |
-| Perizinan / desain / legal (soft cost) | 1-3200 Persediaan Real Estat — Soft Cost |
+| Konstruksi / hard cost (produksi, sarana & prasarana, **perizinan**) | 1-3100 Persediaan Real Estat — Hard Cost |
+| Desain / legal (soft cost) | 1-3200 Persediaan Real Estat — Soft Cost |
 | Bunga / biaya pinjaman yang dikapitalisasi | 1-3300 Persediaan Real Estat — Biaya Pembiayaan |
+
+> **RULE KLIEN (UAT 2026-09-03):** HPP Konstruksi = Produksi + Sarana & Prasarana + **Perizinan**. Perizinan (IMB, SLF, dll — biaya langsung terkait pembangunan fisik) dikapitalisasi ke 1-3100 (hard cost), BUKAN ke 1-3200 (soft cost). Soft cost (1-3200) kini hanya menampung desain/legal yang tidak terkait langsung perizinan pembangunan.
 
 **Jurnal (bayar via bank):**
 

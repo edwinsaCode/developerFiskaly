@@ -82,7 +82,7 @@ func TestAccrueTax_RuleResolution_SubsidiVsKomersial(t *testing.T) {
 		wantRuleID uint64
 		wantScope  string
 	}{
-		{"subsidi_1_persen", 100, 5_000_000, 11, "subsidi"},     // 500jt × 1%
+		{"subsidi_1_persen", 100, 5_000_000, 11, "subsidi"},        // 500jt × 1%
 		{"komersial_2_5_persen", 200, 12_500_000, 12, "komersial"}, // 500jt × 2,5%
 	}
 	for _, tc := range cases {
@@ -226,6 +226,118 @@ func TestAccrueTax_RecordsRuleRevision(t *testing.T) {
 	}
 	if obl.TaxRuleRevision == nil || *obl.TaxRuleRevision != 3 {
 		t.Errorf("tax_rule_revision = %v, want 3 (audit eksplisit revisi konfigurasi)", obl.TaxRuleRevision)
+	}
+}
+
+// ── Rule klien UAT #3: subsidi/komersial jadi klasifikasi PRODUK, bukan cuma
+// atribut proyek. Produk unit (rumah_subsidi/rumah_komersial) MENANG atas
+// projects.tax_category bila keduanya terpasang; kode legacy tanpa
+// TaxCategory (mis. "rumah") tetap tunduk pada kategori proyek.
+
+type mockUnitProductPolicy struct {
+	byUnit map[uint64]domain.ProductPolicy
+	err    error
+}
+
+func (m *mockUnitProductPolicy) ResolveUnitProductPolicy(_ context.Context, _ uint64, unitID uint64) (domain.ProductPolicy, error) {
+	if m.err != nil {
+		return domain.ProductPolicy{}, m.err
+	}
+	p, ok := m.byUnit[unitID]
+	if !ok {
+		return domain.ProductPolicy{}, errors.New("unit tidak dikenal")
+	}
+	return p, nil
+}
+
+func taxCatPtr(c domain.TaxCategory) *domain.TaxCategory { return &c }
+
+func TestAccrueTax_UnitProductPolicy_OverridesProjectCategory(t *testing.T) {
+	accounts := map[string]uint64{"5-2100": 910, "2-4100": 920}
+	resolver := &mockRuleResolver{byCategory: map[domain.TaxCategory]*tax.TaxRate{
+		domain.TaxCategorySubsidi:   ruleFor(11, 0.01, tax.AppliesToSubsidi, "5-2100", "2-4100"),
+		domain.TaxCategoryKomersial: ruleFor(12, 0.025, tax.AppliesToKomersial, "5-2100", "2-4100"),
+	}}
+	// Proyek 300 tercatat KOMERSIAL, tetapi unit 77 di proyek itu adalah
+	// produk "rumah_subsidi" — proyek boleh menjual campuran keduanya.
+	categories := &mockCategoryReader{categories: map[uint64]domain.TaxCategory{300: domain.TaxCategoryKomersial}}
+	products := &mockUnitProductPolicy{byUnit: map[uint64]domain.ProductPolicy{
+		77: {Code: "rumah_subsidi", Category: domain.ProductCategoryProperty, TaxCategory: taxCatPtr(domain.TaxCategorySubsidi)},
+	}}
+	svc := buildService(nil, accounts, nil, nil,
+		tax.WithRuleResolution(resolver, categories), tax.WithUnitProductPolicy(products))
+
+	unitID := uint64(77)
+	obl, err := svc.AccrueTax(context.Background(), 1, tax.AccrueTaxRequest{
+		TransferValue: domain.FromInt(500_000_000),
+		AccrualDate:   time.Now(),
+		ProjectID:     ptrU64(300),
+		UnitID:        &unitID,
+	})
+	if err != nil {
+		t.Fatalf("AccrueTax: %v", err)
+	}
+	if obl.TaxAmount.String() != "5000000" { // 500jt x 1% (subsidi), bukan 2,5% (proyek)
+		t.Errorf("tax = %s, want 5000000 (kategori PRODUK harus menang atas kategori proyek)", obl.TaxAmount)
+	}
+	if resolver.lastCat != domain.TaxCategorySubsidi {
+		t.Errorf("kategori resolusi = %s, want subsidi", resolver.lastCat)
+	}
+}
+
+func TestAccrueTax_UnitProductPolicy_LegacyProductFallsBackToProject(t *testing.T) {
+	accounts := map[string]uint64{"5-2000": 900, "2-4000": 901}
+	resolver := &mockRuleResolver{byCategory: map[domain.TaxCategory]*tax.TaxRate{
+		domain.TaxCategoryKomersial: ruleFor(12, 0.025, tax.AppliesToKomersial, "", ""),
+	}}
+	categories := &mockCategoryReader{categories: map[uint64]domain.TaxCategory{300: domain.TaxCategoryKomersial}}
+	// Kode legacy "rumah" — TaxCategory nil, tidak ikut menentukan apa pun.
+	products := &mockUnitProductPolicy{byUnit: map[uint64]domain.ProductPolicy{
+		77: {Code: "rumah", Category: domain.ProductCategoryProperty},
+	}}
+	svc := buildService(nil, accounts, nil, nil,
+		tax.WithRuleResolution(resolver, categories), tax.WithUnitProductPolicy(products))
+
+	unitID := uint64(77)
+	obl, err := svc.AccrueTax(context.Background(), 1, tax.AccrueTaxRequest{
+		TransferValue: domain.FromInt(100_000_000),
+		AccrualDate:   time.Now(),
+		ProjectID:     ptrU64(300),
+		UnitID:        &unitID,
+	})
+	if err != nil {
+		t.Fatalf("AccrueTax: %v", err)
+	}
+	if resolver.lastCat != domain.TaxCategoryKomersial {
+		t.Errorf("kategori legacy = %s, want komersial dari proyek (tidak berubah)", resolver.lastCat)
+	}
+	if obl.TaxAmount.String() != "2500000" {
+		t.Errorf("tax = %s, want 2500000", obl.TaxAmount)
+	}
+}
+
+func TestAccrueTax_UnitProductPolicy_ResolveError_FallsBackToProject(t *testing.T) {
+	accounts := map[string]uint64{"5-2000": 900, "2-4000": 901}
+	resolver := &mockRuleResolver{byCategory: map[domain.TaxCategory]*tax.TaxRate{
+		domain.TaxCategoryKomersial: ruleFor(12, 0.025, tax.AppliesToKomersial, "", ""),
+	}}
+	categories := &mockCategoryReader{categories: map[uint64]domain.TaxCategory{300: domain.TaxCategoryKomersial}}
+	products := &mockUnitProductPolicy{err: errors.New("db down")}
+	svc := buildService(nil, accounts, nil, nil,
+		tax.WithRuleResolution(resolver, categories), tax.WithUnitProductPolicy(products))
+
+	unitID := uint64(77)
+	_, err := svc.AccrueTax(context.Background(), 1, tax.AccrueTaxRequest{
+		TransferValue: domain.FromInt(100_000_000),
+		AccrualDate:   time.Now(),
+		ProjectID:     ptrU64(300),
+		UnitID:        &unitID,
+	})
+	if err != nil {
+		t.Fatalf("AccrueTax seharusnya tetap sukses via kategori proyek walau resolusi produk error: %v", err)
+	}
+	if resolver.lastCat != domain.TaxCategoryKomersial {
+		t.Errorf("kategori = %s, want komersial (fallback proyek saat resolusi produk gagal)", resolver.lastCat)
 	}
 }
 

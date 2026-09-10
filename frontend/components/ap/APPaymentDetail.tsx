@@ -12,7 +12,7 @@
 // untuk satu keadaan adalah cara tombol berbahaya muncul di saat yang salah.
 
 import Link from "next/link";
-import { useState, useTransition } from "react";
+import { useState, useTransition, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 
 import { Badge } from "@/components/ui/Badge";
@@ -27,6 +27,7 @@ import { Tanggal } from "@/components/format/Tanggal";
 import type { APPaymentView, Vendor } from "@/lib/types/api";
 import { reversePaymentAction } from "@/app/(app)/accounting/pembayaran-vendor/actions";
 import { PrintPaymentReceiptButton } from "@/components/ap/PrintPaymentReceiptButton";
+import { LinkifiedText } from "@/components/documents/LinkifiedText";
 
 interface Props {
   token: string;
@@ -138,7 +139,10 @@ export function APPaymentDetail({ token, payment, vendor, canWrite, today }: Pro
           </CardHeader>
           <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field label="Nomor BKK" value={p.document_number} mono />
-            <Field label="Uraian" value={p.description || "—"} />
+            <Field
+              label="Uraian"
+              value={p.description ? <LinkifiedText token={token} text={p.description} /> : "—"}
+            />
             <div>
               <dt className="text-[11px] uppercase tracking-wide text-text-tertiary">
                 Jurnal pengeluaran
@@ -281,7 +285,7 @@ export function APPaymentDetail({ token, payment, vendor, canWrite, today }: Pro
   );
 }
 
-function Field({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+function Field({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }) {
   return (
     <div>
       <dt className="text-[11px] uppercase tracking-wide text-text-tertiary">{label}</dt>

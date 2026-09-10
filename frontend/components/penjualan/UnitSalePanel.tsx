@@ -17,7 +17,8 @@ import { RiwayatPenerimaanTable } from "./RiwayatPenerimaanTable";
 import { PrintReceiptButton } from "@/components/billing/PrintReceiptButton";
 import { RecordPaymentButton } from "@/components/billing/RecordPaymentButton";
 import {
-  getBuyerBalance, fetchSchedulesByContract, listTermins, fetchContractByUnit, setAdminMarketing,
+  fetchContractFinancialSummary, fetchSchedulesByContract, listTermins, fetchContractByUnit, setAdminMarketing,
+  type ContractFinancialSummary,
 } from "@/lib/api/sale";
 import { fetchSalesPersons, type SalesPerson } from "@/lib/api/party";
 import { ApiError } from "@/lib/api/client";
@@ -71,6 +72,10 @@ export function UnitSalePanel({ unit, saleRecord, contractId, token, bookingPara
   const [reserving,         setReserving]          = useState(false);
 
   const [balance,    setBalance]    = useState<string | null>(null);
+  // Kelebihan Tanah: ringkasan finansial gabungan (rumah+tanah), dibekukan
+  // sejak kontrak dikonversi — dipakai agar Sisa Tagihan langsung mencakup
+  // komponen tanah, bukan menunggu Akad. balance = summary.total_outstanding.
+  const [summary,    setSummary]    = useState<ContractFinancialSummary | null>(null);
   const [schedules,  setSchedules]  = useState<PaymentSchedule[]>([]);
   const [terminCount, setTerminCount] = useState(0);
   const [historyKey, setHistoryKey] = useState(0);
@@ -87,9 +92,9 @@ export function UnitSalePanel({ unit, saleRecord, contractId, token, bookingPara
       // Saldo tagihan & daftar termin adalah data uang: 403 untuk marketing.
       // Jangan menembakkan request yang sudah pasti ditolak.
       if (!isMarketing) {
-        getBuyerBalance(token, contractId)
-          .then((b) => setBalance(b.remaining_balance))
-          .catch(() => setBalance(null));
+        fetchContractFinancialSummary(token, contractId)
+          .then((s) => { setSummary(s); setBalance(s.total_outstanding); })
+          .catch(() => { setSummary(null); setBalance(null); });
       }
       fetchSchedulesByContract(token, contractId)
         .then(setSchedules)
@@ -187,23 +192,10 @@ export function UnitSalePanel({ unit, saleRecord, contractId, token, bookingPara
                     Fee <strong><Rupiah value={activeBooking.booking_fee} colorSign={false} /></strong>
                     {" · "}berlaku s/d <Tanggal value={activeBooking.expiry_date} />
                   </p>
-                  {/* Produk Tambahan: Kelebihan Tanah (kelebihan-tanah-booking-integration-2026-08)
-                      — murni informasi, tidak bisa diedit di sini. Ikut terbawa
-                      otomatis saat konversi ke kontrak (backend). */}
-                  {activeBooking.land_quantity_m2 && (
-                    <p className="text-xs text-text-secondary mt-1">
-                      + Kelebihan Tanah{" "}
-                      <strong>{Number(activeBooking.land_quantity_m2).toLocaleString("id-ID")} m²</strong>
-                      {activeBooking.land_unit_price_snapshot && (
-                        <> · <Rupiah value={activeBooking.land_unit_price_snapshot} colorSign={false} />/m²</>
-                      )}
-                      {" "}(direservasi, ikut terbawa saat konversi)
-                    </p>
-                  )}
                   {/* Kwitansi KWB terbit otomatis bersama booking — ditampilkan
                       di sini supaya admin tahu lembarannya ada dan bisa langsung
                       dicetak untuk pembeli. */}
-                  {activeBooking.termin_payment_id > 0 && !isMarketing && (
+                  {!!activeBooking.termin_payment_id && !isMarketing && (
                     <p className="text-xs text-text-secondary mt-1 flex items-center gap-2 flex-wrap">
                       <span>
                         Kwitansi{" "}
@@ -239,28 +231,93 @@ export function UnitSalePanel({ unit, saleRecord, contractId, token, bookingPara
           {isSold && saleRecord && (
             <>
               <SaleRecordCard record={saleRecord} />
+              {/* UAT 2026-09-04: kontrak bundled Kelebihan Tanah punya piutang
+                  tanah yang benar di Piutang Customer (aging), tapi tanpa
+                  kartu ini halaman unit tak pernah bilang piutang itu ADA —
+                  buyer/admin tak tahu harus melacak atau membayarnya ke mana.
+                  landSchedule datang dari state `schedules` yang sudah dimuat
+                  (tak ada request baru); ceiling pembayaran (outstanding di
+                  RecordPaymentButton bawah) sudah mencakupnya lewat
+                  total_outstanding_actual — kartu ini murni supaya piutangnya
+                  TERLIHAT, bukan jalur bayar terpisah. */}
+              {!isMarketing && (() => {
+                const landSchedule = schedules.find(
+                  (s) => s.type === "land" && (s.status as string) !== "superseded"
+                );
+                if (!landSchedule) return null;
+                const sisa = (Number(landSchedule.amount) - Number(landSchedule.paid_amount)).toString();
+                const lunas = landSchedule.status === "received";
+                return (
+                  <Card padding="sm">
+                    <div className="flex items-center justify-between gap-3 mb-2 flex-wrap">
+                      <p className="eyebrow">Piutang Kelebihan Tanah</p>
+                      <Badge variant={lunas ? "success" : "warning"}>
+                        {lunas ? "Lunas" : "Belum Lunas"}
+                      </Badge>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                      <div>
+                        <p className="text-xs text-text-secondary">Tagihan</p>
+                        <p className="font-medium"><Rupiah value={landSchedule.amount} /></p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-text-secondary">Terbayar</p>
+                        <p className="font-medium"><Rupiah value={landSchedule.paid_amount} /></p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-text-secondary">Sisa</p>
+                        <p className="font-medium"><Rupiah value={sisa} /></p>
+                      </div>
+                    </div>
+                  </Card>
+                );
+              })()}
               {/* W-13: satu pintu masuk penerimaan tetap tersedia pasca-Akad —
                   kekurangan pelunasan, pencairan bertahap, atau penerimaan lain
                   semua lewat sini, bukan aksi tersembunyi di stepper. */}
-              {!isMarketing && contractId && (
-                <Card padding="sm">
-                  <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
-                    <p className="eyebrow">Riwayat Penerimaan</p>
-                    <RecordPaymentButton
-                      token={token}
-                      contractId={contractId}
-                      outstanding={balance ?? "0"}
-                      buyerName={unit.buyer_name || undefined}
-                      label="+ Catat Penerimaan"
-                      size="sm"
-                      financingSourceId={canDisburse ? contract?.financing_source_id : undefined}
-                      bankName={contract?.bank_kpr}
-                      onSuccess={refresh}
-                    />
-                  </div>
-                  <RiwayatPenerimaanTable token={token} unitId={unit.id} refreshKey={historyKey} />
-                </Card>
-              )}
+              {!isMarketing && contractId && (() => {
+                // UAT 2026-09-03 #1: RecordPaymentButton butuh id+sisa jadwal
+                // Kelebihan Tanah SENDIRI (bukan outstanding gabungan di
+                // bawah) supaya memilih "Kelebihan Tanah" di Jenis Penerimaan
+                // menarget jadwal ini secara eksplisit — persis sumber yang
+                // sama dipakai kartu "Piutang Kelebihan Tanah" di atas.
+                const landSchedule = schedules.find(
+                  (s) => s.type === "land" && (s.status as string) !== "superseded"
+                );
+                const landOutstanding = landSchedule
+                  ? (Number(landSchedule.amount) - Number(landSchedule.paid_amount)).toString()
+                  : undefined;
+                return (
+                  <Card padding="sm">
+                    <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+                      <p className="eyebrow">Riwayat Penerimaan</p>
+                      <RecordPaymentButton
+                        token={token}
+                        contractId={contractId}
+                        // Pasca-Akad: piutang Kelebihan Tanah (bila ada) sudah
+                        // ditagih terpisah lewat mesin piutang formal (W-5) —
+                        // jangan pakai total_outstanding pra-Akad (proyeksi
+                        // snapshot kontrak, bisa phantom bila land_sale
+                        // dibatalkan pasca-Akad). total_outstanding_actual
+                        // membaca piutang tanah SESUNGGUHNYA dari
+                        // payment_schedules (anchor AR formal yang sama
+                        // dipakai waterfall ReceivePayment) sehingga tetap
+                        // benar walau land_sale-nya sudah dibatalkan.
+                        outstanding={summary?.total_outstanding_actual ?? summary?.outstanding ?? balance ?? "0"}
+                        buyerName={unit.buyer_name || undefined}
+                        label="+ Catat Penerimaan"
+                        size="sm"
+                        financingSourceId={canDisburse ? contract?.financing_source_id : undefined}
+                        bankName={contract?.bank_kpr}
+                        landScheduleId={landSchedule?.id}
+                        landOutstanding={landOutstanding}
+                        onSuccess={refresh}
+                      />
+                    </div>
+                    <RiwayatPenerimaanTable token={token} unitId={unit.id} refreshKey={historyKey} />
+                  </Card>
+                );
+              })()}
               {/* R1: pencairan bank KPR sering terjadi PASCA-AKAD (piutang bank
                   1-2200 menunggu dana cair) — milestone & tombol pencairan harus
                   tetap tersedia sampai kontrak lunas. */}
@@ -346,6 +403,7 @@ export function UnitSalePanel({ unit, saleRecord, contractId, token, bookingPara
                     contract={contract}
                     contractId={contractId}
                     balance={balance}
+                    summary={summary}
                     token={token}
                     onAddSchedule={() => setShowScheduleForm(true)}
                     onContractUpdated={setContract}
@@ -610,6 +668,7 @@ export function UnitSalePanel({ unit, saleRecord, contractId, token, bookingPara
             unitId={unit.id}
             listPrice={unit.list_price}
             token={token}
+            onSubmitted={() => refresh()}
           />
           <HandoverForm
             open={showHandoverForm}
@@ -664,11 +723,12 @@ function StepCard({
 }
 
 function ContractSummary({
-  contract, contractId, balance, token, onAddSchedule, onContractUpdated,
+  contract, contractId, balance, summary, token, onAddSchedule, onContractUpdated,
 }: {
   contract: SaleContract | null;
   contractId: number;
   balance: string | null;
+  summary: ContractFinancialSummary | null;
   token: string;
   onAddSchedule: () => void;
   onContractUpdated: (c: SaleContract) => void;
@@ -710,9 +770,19 @@ function ContractSummary({
         </div>
         {balance !== null && (
           <div>
-            <p className="text-xs text-text-secondary">Sisa Tagihan</p>
+            <p className="text-xs text-text-secondary">
+              {summary?.has_land ? "Sisa Tagihan (Rumah + Kelebihan Tanah)" : "Sisa Tagihan"}
+            </p>
             <p className="font-medium text-warning">
               <Rupiah value={balance} colorSign={false} />
+            </p>
+          </div>
+        )}
+        {summary?.has_land && (
+          <div>
+            <p className="text-xs text-text-secondary">termasuk Kelebihan Tanah</p>
+            <p className="font-medium">
+              <Rupiah value={summary.land_amount} colorSign={false} />
             </p>
           </div>
         )}

@@ -113,17 +113,31 @@ func compose(
 	// ── Sisi DEBIT: baris biaya ─────────────────────────────────────────────
 	//
 	// INV-AP-8 ditegakkan DI SINI, bukan hanya di test: Σ baris biaya harus
-	// sama dengan DPP, dan seluruh baris itu harus mendarat di akun taksonomi.
-	// Kalau satu baris saja mendarat di akun non-taksonomi, buku besar akan
-	// mencatat biaya yang tidak pernah muncul sebagai realisasi RAB — selisih
-	// yang tidak menghasilkan error di mana pun.
+	// sama dengan DPP, dan seluruh baris itu harus mendarat di akun taksonomi
+	// — KECUALI satu bentuk yang sengaja dikecualikan: RULE KLIEN 2026-09-04,
+	// item/proyek Hard cost yang SUDAH dikapitalisasi penuh ke Persediaan saat
+	// RAB approval. Untuk baris itu, cost.Service.plan() mengalihkan DebitCode
+	// dari akun taksonomi ke payableAccountCode() sendiri (lihat komentar di
+	// cost.Service.plan()) — supaya realisasi/invoice vendor pasca-approval
+	// TIDAK mendebit Persediaan lagi (double-capitalize), melainkan mengakui
+	// vendor lewat Dr Hutang Usaha / Cr Hutang Usaha (dipecah oleh package ini
+	// sesuai retensi/uang muka di bawah).
+	//
+	// Sinyalnya aman dipakai sebagai pembeda "sengaja" vs "salah akun": tidak
+	// ada jalur lain yang bisa membuat DebitCode == payableAccountCode(), sebab
+	// costTaxonomyAccountCodes() (himpunan akun taksonomi) dan akun peran
+	// RolePayable dijamin lepas satu sama lain — lihat cost.IsCostTaxonomyAccount.
+	// Baris seperti ini SENGAJA tidak ikut taxonomyDebit: ia bukan realisasi RAB
+	// baru (itu sudah terjadi saat RAB approval), jadi tidak boleh dihitung dua
+	// kali di laporan yang membaca taxonomyDebit.
 	var lines []composedLine
 	sumLines := domain.Zero
 	taxonomyDebit := domain.Zero
 	creditCode := ""
 
 	for i, pl := range planned {
-		if !pl.plan.DebitIsTaxonomy {
+		isCapitalizationRedirect := pl.plan.DebitCode == payableAccountCode()
+		if !pl.plan.DebitIsTaxonomy && !isCapitalizationRedirect {
 			return nil, fmt.Errorf("%w: baris %d mendebit %s", ErrLineAccountNotTaxonomy, i+1, pl.plan.DebitCode)
 		}
 		if creditCode == "" {
@@ -154,7 +168,9 @@ func compose(
 			description: pl.plan.Description,
 		})
 		sumLines = sumLines.Add(pl.in.Amount)
-		taxonomyDebit = taxonomyDebit.Add(pl.in.Amount)
+		if !isCapitalizationRedirect {
+			taxonomyDebit = taxonomyDebit.Add(pl.in.Amount)
+		}
 	}
 
 	if !sumLines.Equal(amt.DPP) {
@@ -244,10 +260,12 @@ func compose(
 			ErrComposeUnbalanced, totalDebit.String(), totalCredit.String(),
 			amt.DPP.String(), amt.PPN.String(), amt.Retention.String(), amt.Advance.String())
 	}
-	if !taxonomyDebit.Equal(amt.DPP) {
-		return nil, fmt.Errorf("%w: Σ debit taksonomi %s, DPP %s", ErrLineSumMismatch, taxonomyDebit.String(), amt.DPP.String())
-	}
-
+	// Tidak ada pemeriksaan tambahan "taxonomyDebit == DPP" di sini: itu sudah
+	// ternyatakan sepenuhnya oleh sumLines.Equal(amt.DPP) di atas — SELAMA tidak
+	// ada baris redirect kapitalisasi, taxonomyDebit == sumLines persis (setiap
+	// baris yang lolos loop wajib taksonomi). Begitu ada baris redirect,
+	// taxonomyDebit < sumLines BY DESIGN (baris itu memang bukan realisasi RAB
+	// baru) — bukan sinyal kesalahan.
 	return &composition{lines: lines, amounts: amt, payable: payable, taxonomyDebit: taxonomyDebit}, nil
 }
 

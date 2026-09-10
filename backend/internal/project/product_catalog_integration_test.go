@@ -95,7 +95,7 @@ func TestIntegration_RevenueAccountMapping_FailsClosed(t *testing.T) {
 
 	// Update mapping tunduk pada aturan yang sama (bukan hanya saat dibuat).
 	bad := "1-1000"
-	if _, err := svc.UpdateProductType(ctx, ubTenant, pt.ID, nil, &bad, nil); !errors.Is(err, project.ErrRevenueAccountInvalid) {
+	if _, err := svc.UpdateProductType(ctx, ubTenant, pt.ID, nil, &bad, nil, nil); !errors.Is(err, project.ErrRevenueAccountInvalid) {
 		t.Fatalf("UpdateProductType ke akun aset: want ErrRevenueAccountInvalid, got %v", err)
 	}
 	var stored string
@@ -137,7 +137,7 @@ func TestIntegration_InactiveProduct_ResolverFailsClosed(t *testing.T) {
 	}
 
 	inactive := false
-	if _, err := svc.UpdateProductType(ctx, ubTenant, pt.ID, nil, nil, &inactive); err != nil {
+	if _, err := svc.UpdateProductType(ctx, ubTenant, pt.ID, nil, nil, &inactive, nil); err != nil {
 		t.Fatalf("nonaktifkan produk: %v", err)
 	}
 	if _, err := repo.ResolveProductPolicy(ctx, ubTenant, "ruko"); !errors.Is(err, project.ErrProductTypeInactive) {

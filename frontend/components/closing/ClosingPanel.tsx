@@ -35,7 +35,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   land: "Tanah",
   hard: "Konstruksi",
   soft: "Soft Cost",
-  financing: "Pembiayaan",
+  operational: "Operasional",
 };
 
 export function ClosingPanel({ token, projectId }: { token: string; projectId: number }) {

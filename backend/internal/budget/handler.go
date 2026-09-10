@@ -23,7 +23,11 @@ type Handler struct {
 }
 
 // NewHandler wires repository dan service untuk production.
-// RAB tidak membutuhkan PostingService — tidak ada posting ke ledger.
+//
+// Item 8 (UAT 2026-09-07): RAB (ApprovePlan) TIDAK memposting jurnal apa pun
+// — RULE KLIEN 2026-09-04 (kapitalisasi Construction penuh saat approval)
+// DICABUT klien. RAB murni budget/planning; Persediaan/HPP berasal dari cost
+// entry aktual (lihat internal/cost).
 func NewHandler(db *gorm.DB) *Handler {
 	store := NewGORMRepository(db)
 	realisasi := NewGORMRealisasiProvider(db)
@@ -411,7 +415,8 @@ func isBudgetDomainError(err error) bool {
 		errors.Is(err, ErrAmountZeroOrNeg) ||
 		errors.Is(err, ErrProjectRequired) ||
 		errors.Is(err, ErrLabelRequired) ||
-		errors.Is(err, ErrNoActivePlan)
+		errors.Is(err, ErrNoActivePlan) ||
+		errors.Is(err, ErrInvalidConstructionSubcategory)
 }
 
 func writeBudgetDomainOrInternal(w http.ResponseWriter, err error) {

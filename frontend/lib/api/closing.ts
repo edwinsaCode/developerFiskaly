@@ -19,7 +19,7 @@ export interface TrueupLine {
   run_id: number;
   unit_id: number;
   unit_name_snapshot: string;
-  category: string; // land|hard|soft|financing
+  category: string; // land|hard|soft|operational
   is_sold: boolean;
   budgeted_amount: string;
   actual_amount: string;

@@ -36,6 +36,9 @@ type ReceiptService struct {
 	// chargeSummary (Billing Batch 2): ringkasan grup tagihan utk kwitansi KWR
 	// — formula kanonik dari charge.Service via adapter wiring.
 	chargeSummary ChargeSummaryProvider
+	// scheduleOutstanding (UAT 2026-09-03 #1): sisa jadwal SPESIFIK bila termin
+	// ditarget ke satu payment_schedule (mis. Kelebihan Tanah) — opsional.
+	scheduleOutstanding ScheduleOutstandingLoader
 }
 
 // SetContractSummaryProvider memasang sumber ringkasan finansial kontrak —
@@ -44,6 +47,13 @@ func (s *ReceiptService) SetContractSummaryProvider(p ContractSummaryProvider) {
 
 // SetChargeSummaryProvider memasang sumber ringkasan grup tagihan (KWR).
 func (s *ReceiptService) SetChargeSummaryProvider(p ChargeSummaryProvider) { s.chargeSummary = p }
+
+// SetScheduleOutstandingLoader memasang sumber sisa jadwal spesifik (UAT
+// 2026-09-03 #1) — bila tidak dipasang, kwitansi selalu jatuh ke Outstanding
+// kontrak gabungan (perilaku lama, tidak berubah).
+func (s *ReceiptService) SetScheduleOutstandingLoader(p ScheduleOutstandingLoader) {
+	s.scheduleOutstanding = p
+}
 
 func NewReceiptService(termins TerminLoader, receipts ReceiptStore, prints ReceiptPrintLoader) *ReceiptService {
 	return &ReceiptService{termins: termins, receipts: receipts, prints: prints}
@@ -124,6 +134,19 @@ func (s *ReceiptService) GetReceiptPrintData(ctx context.Context, tenantID, rece
 			}
 		}
 	}
+	// UAT 2026-09-03 #1: bila termin ini ditarget ke SATU jadwal (mis.
+	// Kelebihan Tanah dibayar terpisah dari Rumah), "Terutang" yang benar
+	// adalah sisa jadwal itu — bukan Outstanding gabungan kontrak di bawah.
+	// Dicek SEBELUM ringkasan kontrak agar template bisa memilih prioritas.
+	if s.scheduleOutstanding != nil {
+		if rec, rerr := s.receipts.FindReceiptByID(ctx, tenantID, receiptID); rerr == nil && rec != nil {
+			if ts, terr := s.scheduleOutstanding.LoadTargetedScheduleOutstanding(ctx, tenantID, rec.TerminPaymentID); terr == nil && ts != nil && ts.Type == "land" {
+				data.HasScheduleOutstanding = true
+				data.ScheduleTypeLabel = "Kelebihan Tanah"
+				data.ScheduleOutstanding = ts.Outstanding
+			}
+		}
+	}
 	// Hardening: ringkasan finansial kontrak. Kontrak dicari dari receipt
 	// (sale_contract_id bila ada; fallback kontrak aktif unit). Best-effort.
 	if s.summary != nil {
@@ -141,10 +164,38 @@ func (s *ReceiptService) GetReceiptPrintData(ctx context.Context, tenantID, rece
 				data.Discount = cs.Discount
 				data.NetContract = cs.NetContract
 				data.TotalPaid = cs.TotalPaid
-				data.Outstanding = cs.Outstanding
 				data.PriceIsSnapshot = cs.PriceIsSnapshot
+				// Gap 2 (UAT 2026-09-08): "Terutang" TIDAK LAGI selalu Outstanding
+				// (proyeksi harga unit − total bayar). Konteks penerimaan yang
+				// menentukan, sumbernya sama dgn Piutang Usaha/Dana Jaminan Bank
+				// (sale.ContractFinancialSummary + HouseARRows split) — no rumus
+				// kedua:
+				//   - Booking (A): kontrak belum tentu ada / harga unit BUKAN
+				//     kewajiban yang lahir dari booking — Terutang selalu Rp0.
+				//   - Pencairan KPR (D/Test4): yang mengecil adalah Dana Jaminan
+				//     Bank, BUKAN Piutang Usaha customer — pakai FinancingRemaining.
+				//   - Pembayaran rumah lain (DP/cicilan/pelunasan, B/C): sisa
+				//     kewajiban CUSTOMER sendiri = CustomerReceivableRemaining.
+				//     Pra-Akad (belum ada split bank) ini otomatis sama dengan
+				//     TotalOutstandingActual penuh (Rule B) karena
+				//     FinancingRemaining nol sampai Akad mengisi Nilai
+				//     Persetujuan KPR Bank; pasca-Akad ia sudah net dari bagian
+				//     yang menjadi Dana Jaminan Bank (Rule C).
+				switch data.ReceiptType {
+				case ReceiptTypeBooking:
+					data.Outstanding = domain.Zero
+				case ReceiptTypeKPRDisbursement:
+					data.Outstanding = cs.FinancingRemaining
+				default:
+					data.Outstanding = cs.CustomerReceivableRemaining
+				}
 			}
 		}
+	}
+	// Rule A tanpa syarat: kwitansi Booking Terutang Rp0 walau ringkasan
+	// kontrak tidak tersedia (mis. belum ada sale_contract_id sama sekali).
+	if data.ReceiptType == ReceiptTypeBooking {
+		data.Outstanding = domain.Zero
 	}
 	return data, nil
 }

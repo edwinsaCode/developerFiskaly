@@ -36,6 +36,7 @@ func NewHandler(db *gorm.DB) *Handler {
 		WithExecutionStore(repo),
 		WithUserEmailFinder(repo),
 		WithLandPoolSource(repo),
+		WithHardPoolSource(repo, repo),
 	)
 	return &Handler{svc: svc}
 }

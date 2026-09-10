@@ -103,8 +103,8 @@ func TestIntegration_Commission_FullCycleWithClawback(t *testing.T) {
 		// yang dihasilkan fixture ini identik dengan sebelum hardening.
 		db.Exec(`INSERT IGNORE INTO product_types (tenant_id, code, name, category, revenue_account_code, is_active)
 			VALUES (?,?,?,?,?,TRUE)`, cmTenant, "villa", "villa", "property", "4-1000")
-		db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, list_price, status)
-			VALUES (?,?,?,?,?,?,?)`, cmTenant, projectID, code, "villa", domain.FromInt(100), domain.FromInt(0), "reserved")
+		db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, land_area, list_price, status)
+			VALUES (?,?,?,?,?,?,?,?)`, cmTenant, projectID, code, "villa", domain.FromInt(100), domain.FromInt(100), domain.FromInt(0), "reserved")
 		var id uint64
 		db.Raw("SELECT LAST_INSERT_ID()").Scan(&id)
 		return id
@@ -302,5 +302,177 @@ func TestIntegration_Commission_FullCycleWithClawback(t *testing.T) {
 	// Sync idempoten.
 	if c2, cl2, _ := cmSvc.SyncCancellations(ctx, cmTenant, nil); c2 != 0 || cl2 != 0 {
 		t.Errorf("sync kedua: %d/%d, want 0/0", c2, cl2)
+	}
+}
+
+// Task 6 — Komisi Sales & Marketing (Rupiah nominal): rule flat_per_unit
+// harus menghasilkan nominal tetap TERLEPAS dari harga jual (bukan
+// dihitung sebagai persentase), berdampingan dengan rule percent_of_sale
+// existing tanpa regresi (backward-compatible).
+func TestIntegration_Commission_FlatPerUnitCoexistsWithPercent(t *testing.T) {
+	db := cmConnect(t)
+	cmCleanup(t, db)
+	defer cmCleanup(t, db)
+	ctx := context.Background()
+
+	if err := db.Exec(`INSERT INTO projects (tenant_id, name, status) VALUES (?,?,?)`,
+		cmTenant, "CM Flat Project", "selling").Error; err != nil {
+		t.Fatal(err)
+	}
+	var projectID uint64
+	db.Raw("SELECT LAST_INSERT_ID()").Scan(&projectID)
+	seedUnit := func(code string) uint64 {
+		db.Exec(`INSERT IGNORE INTO product_types (tenant_id, code, name, category, revenue_account_code, is_active)
+			VALUES (?,?,?,?,?,TRUE)`, cmTenant, "villa", "villa", "property", "4-1000")
+		db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, land_area, list_price, status)
+			VALUES (?,?,?,?,?,?,?,?)`, cmTenant, projectID, code, "villa", domain.FromInt(100), domain.FromInt(100), domain.FromInt(0), "reserved")
+		var id uint64
+		db.Raw("SELECT LAST_INSERT_ID()").Scan(&id)
+		return id
+	}
+	unitPct, unitFlat := seedUnit("CF-PCT"), seedUnit("CF-FLAT")
+
+	accs := []ledger.Account{
+		{TenantID: cmTenant, Code: "1-1300", Name: "Bank", Type: domain.AccountAsset, NormalBalance: domain.NormalBalanceDebit, IsActive: true, Category: ledger.CategoryBank},
+		{TenantID: cmTenant, Code: "1-2000", Name: "Piutang Usaha", Type: domain.AccountAsset, NormalBalance: domain.NormalBalanceDebit, IsActive: true},
+		{TenantID: cmTenant, Code: "2-2000", Name: "Uang Muka", Type: domain.AccountLiability, NormalBalance: domain.NormalBalanceCredit, IsActive: true},
+		{TenantID: cmTenant, Code: "2-6200", Name: "Utang Komisi", Type: domain.AccountLiability, NormalBalance: domain.NormalBalanceCredit, IsActive: true},
+		{TenantID: cmTenant, Code: "4-1000", Name: "Pendapatan Penjualan", Type: domain.AccountRevenue, NormalBalance: domain.NormalBalanceCredit, IsActive: true},
+		{TenantID: cmTenant, Code: "5-3100", Name: "Beban Komisi", Type: domain.AccountExpense, NormalBalance: domain.NormalBalanceDebit, IsActive: true},
+		{TenantID: cmTenant, Code: "5-1000", Name: "HPP", Type: domain.AccountExpense, NormalBalance: domain.NormalBalanceDebit, IsActive: true},
+		{TenantID: cmTenant, Code: "1-3000", Name: "Persediaan Tanah", Type: domain.AccountAsset, NormalBalance: domain.NormalBalanceDebit, IsActive: true},
+		{TenantID: cmTenant, Code: "1-3100", Name: "Persediaan Hard", Type: domain.AccountAsset, NormalBalance: domain.NormalBalanceDebit, IsActive: true},
+		{TenantID: cmTenant, Code: "1-3200", Name: "Persediaan Soft", Type: domain.AccountAsset, NormalBalance: domain.NormalBalanceDebit, IsActive: true},
+		{TenantID: cmTenant, Code: "1-3300", Name: "Persediaan Financing", Type: domain.AccountAsset, NormalBalance: domain.NormalBalanceDebit, IsActive: true},
+	}
+	for i := range accs {
+		if err := db.Create(&accs[i]).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var spPct, spFlat, custID uint64
+	db.Exec(`INSERT INTO sales_persons (tenant_id, code, name, is_active) VALUES (?,?,?,1)`, cmTenant, "SP-PCT", "Sales Persen")
+	db.Raw("SELECT LAST_INSERT_ID()").Scan(&spPct)
+	db.Exec(`INSERT INTO sales_persons (tenant_id, code, name, is_active) VALUES (?,?,?,1)`, cmTenant, "SP-FLAT", "Sales Flat")
+	db.Raw("SELECT LAST_INSERT_ID()").Scan(&spFlat)
+	db.Exec(`INSERT INTO customers (tenant_id, code, name) VALUES (?,?,?)`, cmTenant, "C-1", "Budi")
+	db.Raw("SELECT LAST_INSERT_ID()").Scan(&custID)
+
+	ledgerRepo := ledger.NewGORMRepository(db)
+	posting := ledger.NewPostingService(ledgerRepo, ledgerRepo).WithPeriodChecker(ledgerRepo)
+	allocRepo := allocation.NewGORMRepository(db)
+	allocSvc := allocation.NewService(allocRepo, allocRepo, allocRepo)
+	saleRepo := sale.NewGORMRepository(db, posting, allocSvc)
+	saleSvc := sale.NewService(saleRepo, saleRepo, saleRepo, saleRepo, saleRepo, saleRepo,
+		sale.WithContractStore(saleRepo))
+	cmSvc := commission.NewService(db)
+	if err := allocSvc.SetBasis(ctx, cmTenant, projectID, allocation.BasisSaleableArea); err != nil {
+		t.Fatal(err)
+	}
+
+	// Kedua unit dijual di HARGA SAMA (2M) — membuktikan hasil flat TIDAK
+	// mengikuti harga (kalau salah dihitung sebagai persentase, hasilnya akan
+	// beda dari nominal rule dan/atau ikut naik-turun bersama harga).
+	const salePrice = 2_000_000_000
+	mkContract := func(unitID, spID uint64) {
+		c, err := saleSvc.CreateContract(ctx, cmTenant, sale.CreateContractRequest{
+			UnitID: unitID, BuyerName: "Budi", PaymentType: sale.PaymentTypeTunai,
+			ContractDate: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+			TotalPrice:   domain.FromInt(salePrice),
+			CustomerID:   &custID, SalesPersonID: &spID,
+		})
+		if err != nil {
+			t.Fatalf("contract unit %d: %v", unitID, err)
+		}
+		if err := db.Exec(`UPDATE sale_contracts SET sales_person_id=?, customer_id=? WHERE id=?`,
+			spID, custID, c.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	mkContract(unitPct, spPct)
+	mkContract(unitFlat, spFlat)
+	for _, u := range []uint64{unitPct, unitFlat} {
+		if _, err := saleSvc.RecordAkad(ctx, cmTenant, sale.RecordBASTRequest{
+			UnitID: u, SalePrice: domain.FromInt(salePrice),
+			BASTDate: time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC),
+		}); err != nil {
+			t.Fatalf("BAST %d: %v", u, err)
+		}
+	}
+
+	// Rule percent existing (scoped ke spPct) — harus tetap 2.5% dari harga.
+	if _, err := cmSvc.CreateRule(ctx, cmTenant, &commission.Rule{
+		Name: "Komisi standar 2.5%", Basis: commission.BasisPercentOfSale,
+		Rate: decimal.RequireFromString("0.025"), TriggerEvent: commission.TriggerAtBAST,
+		SalesPersonID: &spPct,
+		EffectiveFrom: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("CreateRule percent: %v", err)
+	}
+	// Rule baru — Nominal Rupiah tetap (Task 6), scoped ke spFlat.
+	if _, err := cmSvc.CreateRule(ctx, cmTenant, &commission.Rule{
+		Name: "Komisi flat Rp2.5jt", Basis: commission.BasisFlatPerUnit,
+		FlatAmount: domain.FromInt(2_500_000), TriggerEvent: commission.TriggerAtBAST,
+		SalesPersonID: &spFlat,
+		EffectiveFrom: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("CreateRule flat: %v", err)
+	}
+	// Guard: flat_amount 0/negatif ditolak (uang tak boleh sembarangan).
+	if _, err := cmSvc.CreateRule(ctx, cmTenant, &commission.Rule{
+		Name: "Flat invalid", Basis: commission.BasisFlatPerUnit,
+		FlatAmount: domain.Zero, TriggerEvent: commission.TriggerAtBAST,
+		EffectiveFrom: time.Now(),
+	}); err == nil {
+		t.Fatal("flat_amount nol harus ditolak")
+	}
+
+	n, err := cmSvc.Calculate(ctx, cmTenant, nil)
+	if err != nil || n != 2 {
+		t.Fatalf("Calculate: n=%d err=%v (want 2)", n, err)
+	}
+	if n, _ := cmSvc.Calculate(ctx, cmTenant, nil); n != 0 {
+		t.Fatalf("Calculate kedua = %d, want 0 (idempoten)", n)
+	}
+
+	list, _ := cmSvc.List(ctx, cmTenant, commission.StatusCalculated, 0)
+	if len(list) != 2 {
+		t.Fatalf("entries: %+v", list)
+	}
+	var cPct, cFlat *commission.Commission
+	for _, c := range list {
+		if c.UnitID == unitPct {
+			cPct = c
+		} else {
+			cFlat = c
+		}
+	}
+	if cPct == nil || cPct.Amount.String() != "50000000" {
+		t.Fatalf("percent entry salah: %+v (want 50000000, 2.5%% dari %d)", cPct, salePrice)
+	}
+	if cFlat == nil || cFlat.Amount.String() != "2500000" {
+		t.Fatalf("flat entry salah: %+v (want nominal tetap 2500000, BUKAN persentase harga)", cFlat)
+	}
+
+	// Lifecycle flat sampai payable+pay — buktikan jurnal pakai nominal Rupiah
+	// yang di-set admin, bukan hasil kali rate (rate_snapshot flat = 0).
+	if cFlat.RateSnapshot.Sign() != 0 {
+		t.Errorf("rate_snapshot rule flat = %s, want 0 (basis bukan persentase)", cFlat.RateSnapshot)
+	}
+	if _, err := cmSvc.Approve(ctx, cmTenant, cFlat.ID, nil); err != nil {
+		t.Fatalf("Approve flat: %v", err)
+	}
+	if _, err := cmSvc.MakePayable(ctx, cmTenant, cFlat.ID, time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("MakePayable flat: %v", err)
+	}
+	if bal := cmNet(t, db, "5-3100"); bal != "2500000.0000" {
+		t.Errorf("5-3100 pasca-akrual flat = %s, want 2500000.0000", bal)
+	}
+	paid, err := cmSvc.Pay(ctx, cmTenant, cFlat.ID, "1-1300", time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil || paid.Amount.String() != "2500000" {
+		t.Fatalf("Pay flat: %v %+v", err, paid)
+	}
+	if bal := cmNet(t, db, "1-1300"); bal != "-2500000.0000" {
+		t.Errorf("bank keluar = %s, want -2500000.0000 (nominal tetap, bukan persentase)", bal)
 	}
 }

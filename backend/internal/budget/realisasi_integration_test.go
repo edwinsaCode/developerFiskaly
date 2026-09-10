@@ -74,6 +74,25 @@ func bSeedJournal(t *testing.T, db *gorm.DB, posted bool) uint64 {
 	return id
 }
 
+// bSeedJournalWithSource sama seperti bSeedJournal tapi dengan source eksplisit
+// (dipakai untuk menyemai jurnal kapitalisasi RAB ber-source "rab_capitalization").
+func bSeedJournalWithSource(t *testing.T, db *gorm.DB, posted bool, source string) uint64 {
+	t.Helper()
+	var postedAt interface{}
+	if posted {
+		postedAt = time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	}
+	res := db.Exec(`INSERT INTO journal_entries (tenant_id, date, description, posted_at, source, is_reversing, created_at, updated_at)
+		VALUES (?,?,?,?,?,0,NOW(3),NOW(3))`,
+		bTenant, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), "test", postedAt, source)
+	if res.Error != nil {
+		t.Fatalf("seed journal: %v", res.Error)
+	}
+	var id uint64
+	db.Raw("SELECT LAST_INSERT_ID()").Scan(&id)
+	return id
+}
+
 func bSeedCost(t *testing.T, db *gorm.DB, projectID, journalID uint64, cat string, amount int64) {
 	t.Helper()
 	// cost_tier NOT NULL sejak 000035: kategori beban → overhead, lainnya → shared
@@ -141,6 +160,90 @@ func TestIntegration_Realisasi_PostedOnly(t *testing.T) {
 	}
 	if v := got[domain.CostCategoryLand]; v.String() != "20000000" {
 		t.Errorf("land realisasi: got %s, want 20000000", v.String())
+	}
+}
+
+// Item 2 (2026-09-05): bukti fix "RAB vs Realisasi" untuk kategori Hard —
+// kapitalisasi 100% saat approval (jurnal Dr 1-3100/Cr 2-1000, TANPA baris
+// cost_entries) tidak boleh membuat realisasi langsung 100%, dan biaya aktual
+// setelahnya (yang di-redirect MENJAUH dari 1-3100 oleh cost.Service.plan(),
+// lihat komentar GetRealisasiByProject) harus tetap terhitung sebagai
+// realisasi TANPA menyentuh/menaikkan saldo 1-3100 lagi (no double-capitalize).
+// TestIntegration_Realisasi_Hard_ExcludesLegacyCapitalizationJournal
+// (Item 8, UAT 2026-09-07): RULE KLIEN 2026-09-04 (kapitalisasi Construction
+// penuh saat RAB approval) DICABUT klien — package ini tidak lagi menulis
+// jurnal ber-source "rab_capitalization". Tapi tenant yang sempat memakai
+// rule lama bisa punya jurnal historis semacam itu di data mereka; realisasi
+// TETAP harus mengecualikannya (ExcludeSource defensif) supaya tidak
+// terhitung ganda bersama biaya aktual yang genuinely masuk lewat cost entry.
+//
+// Di bawah rule baru, cost entry Hard SELALU mendebit Persediaan (1-3100)
+// langsung (tidak ada redirect ke Hutang Usaha) — jadi realisasi Hard =
+// murni saldo 1-3100 dari jurnal ber-tag proyek, DIKURANGI jurnal
+// "rab_capitalization" historis manapun.
+func TestIntegration_Realisasi_Hard_ExcludesLegacyCapitalizationJournal(t *testing.T) {
+	db := bConnect(t)
+	bCleanup(t, db)
+	defer bCleanup(t, db)
+
+	const project = uint64(557)
+	bSeedProject(t, db, project)
+	if err := ledger.SeedCOA(context.Background(), db, bTenant); err != nil {
+		t.Fatalf("seed COA: %v", err)
+	}
+	acctID := func(code string) uint64 {
+		var id uint64
+		db.Raw(`SELECT id FROM accounts WHERE tenant_id = ? AND code = ?`, bTenant, code).Scan(&id)
+		if id == 0 {
+			t.Fatalf("akun %s tidak ada (SeedCOA belum jalan?)", code)
+		}
+		return id
+	}
+
+	// 1) Jurnal kapitalisasi RAB historis (data lama, sebelum rule dicabut):
+	//    Dr 1-3100 100jt / Cr 2-1000 100jt, TANPA baris cost_entries. Source
+	//    "rab_capitalization" mencerminkan budget.capitalizationJournalSource
+	//    (unexported, tidak bisa diimpor dari budget_test).
+	capJ := bSeedJournalWithSource(t, db, true, "rab_capitalization")
+	for _, ln := range []struct {
+		code          string
+		debit, credit int64
+	}{{"1-3100", 100_000_000, 0}, {"2-1000", 0, 100_000_000}} {
+		if err := db.Exec(`INSERT INTO journal_lines (tenant_id, journal_entry_id, account_id, debit, credit, project_id, created_at, updated_at)
+			VALUES (?,?,?,?,?,?,NOW(3),NOW(3))`,
+			bTenant, capJ, acctID(ln.code), domain.FromInt(ln.debit), domain.FromInt(ln.credit), project).Error; err != nil {
+			t.Fatalf("seed kapitalisasi line %s: %v", ln.code, err)
+		}
+	}
+
+	// 2) Transaksi aktual 30jt (rule baru): cost.Service.plan() SELALU mendebit
+	//    Persediaan (1-3100) langsung — tidak ada lagi redirect ke Hutang Usaha.
+	actJ := bSeedJournal(t, db, true)
+	for _, ln := range []struct {
+		code          string
+		debit, credit int64
+	}{{"1-3100", 30_000_000, 0}, {"1-1300", 0, 30_000_000}} {
+		if err := db.Exec(`INSERT INTO journal_lines (tenant_id, journal_entry_id, account_id, debit, credit, project_id, created_at, updated_at)
+			VALUES (?,?,?,?,?,?,NOW(3),NOW(3))`,
+			bTenant, actJ, acctID(ln.code), domain.FromInt(ln.debit), domain.FromInt(ln.credit), project).Error; err != nil {
+			t.Fatalf("seed aktual line %s: %v", ln.code, err)
+		}
+	}
+	if err := db.Exec(`INSERT INTO cost_entries (tenant_id, project_id, category, cost_tier, amount, payment_method, bank_account_code, date, vendor, description, journal_entry_id, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(3),NOW(3))`,
+		bTenant, project, "hard", "shared", domain.FromInt(30_000_000), "bank", "1-1300", "2026-07-01", "V", "", actJ).Error; err != nil {
+		t.Fatalf("seed cost aktual: %v", err)
+	}
+
+	prov := budget.NewGORMRealisasiProvider(db)
+	got, err := prov.GetRealisasiByProject(context.Background(), bTenant, project, nil)
+	if err != nil {
+		t.Fatalf("GetRealisasiByProject: %v", err)
+	}
+	// Realisasi = hanya 30jt aktual, BUKAN 100jt (kapitalisasi historis) atau
+	// 130jt (jumlah keduanya).
+	if v := got[domain.CostCategoryHard]; v.String() != "30000000" {
+		t.Errorf("hard realisasi: got %s, want 30000000 (jurnal kapitalisasi historis tidak boleh ikut terhitung sbg realisasi)", v.String())
 	}
 }
 

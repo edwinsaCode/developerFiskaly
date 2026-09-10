@@ -187,6 +187,45 @@ func (r *GORMRepository) GetProjectTaxCategory(ctx context.Context, tenantID, pr
 	return domain.TaxCategory(cat), nil
 }
 
+// ResolveUnitProductPolicy membaca kebijakan produk sebuah unit (join
+// units.unit_type → product_types.code) tanpa mengimpor package project —
+// pola sama seperti GetProjectTaxCategory di atas. Rule klien UAT #3: dipakai
+// AccrueTax untuk lapis penentu tarif per PRODUK (rumah_subsidi/komersial).
+func (r *GORMRepository) ResolveUnitProductPolicy(ctx context.Context, tenantID, unitID uint64) (domain.ProductPolicy, error) {
+	var row struct {
+		Code               string  `gorm:"column:code"`
+		Name               string  `gorm:"column:name"`
+		Category           string  `gorm:"column:category"`
+		RevenueAccountCode string  `gorm:"column:revenue_account_code"`
+		TaxCategory        *string `gorm:"column:tax_category"`
+		IsActive           bool    `gorm:"column:is_active"`
+	}
+	err := r.db.WithContext(ctx).
+		Table("units u").
+		Select("pt.code, pt.name, pt.category, pt.revenue_account_code, pt.tax_category, pt.is_active").
+		Joins("JOIN product_types pt ON pt.tenant_id = u.tenant_id AND pt.code = u.unit_type").
+		Where("u.tenant_id = ? AND u.id = ?", tenantID, unitID).
+		Take(&row).Error
+	if err != nil {
+		return domain.ProductPolicy{}, fmt.Errorf("ResolveUnitProductPolicy(unit=%d): %w", unitID, err)
+	}
+	if !row.IsActive {
+		return domain.ProductPolicy{}, fmt.Errorf("ResolveUnitProductPolicy(unit=%d): product type %q nonaktif", unitID, row.Code)
+	}
+	var taxCat *domain.TaxCategory
+	if row.TaxCategory != nil {
+		c := domain.TaxCategory(*row.TaxCategory)
+		taxCat = &c
+	}
+	return domain.ProductPolicy{
+		Code:               row.Code,
+		Name:               row.Name,
+		Category:           domain.ProductCategory(row.Category),
+		RevenueAccountCode: row.RevenueAccountCode,
+		TaxCategory:        taxCat,
+	}, nil
+}
+
 // ── TaxStore ──────────────────────────────────────────────────────────────────
 
 func (r *GORMRepository) SaveObligation(ctx context.Context, o *TaxObligation) error {
@@ -337,7 +376,8 @@ func (r *GORMRepository) AccruePPhFinalInTx(ctx context.Context, tx *gorm.DB, te
 	txPosting := ledger.NewPostingService(txLedgerRepo, txLedgerRepo).WithPeriodChecker(txLedgerRepo)
 	txRepo := &GORMRepository{db: tx, posting: txPosting}
 	svc := NewService(txRepo, txRepo, txRepo, txRepo,
-		WithRuleResolution(txRepo, txRepo)) // Increment 4: tarif per kategori proyek
+		WithRuleResolution(txRepo, txRepo), // Increment 4: tarif per kategori proyek
+		WithUnitProductPolicy(txRepo))      // rule klien UAT #3: tarif per PRODUK unit
 	_, err := svc.AccrueTax(ctx, tenantID, AccrueTaxRequest{
 		UnitID:        &unitID,
 		ProjectID:     &projectID,

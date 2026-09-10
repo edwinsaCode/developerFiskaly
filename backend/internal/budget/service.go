@@ -27,9 +27,10 @@ type BudgetStore interface {
 	SumActiveBudgetByProject(ctx context.Context, tenantID uint64) (map[uint64]domain.Money, error)
 }
 
-// RealisasiProvider mengambil realisasi biaya dari CostEntry yang sudah diposting.
-// Hanya kategori yang bisa dikapitalisasi (land|hard|soft|financing) yang ada di sini.
-// marketing dan other tidak ada, sehingga realisasinya selalu 0.
+// RealisasiProvider mengambil realisasi biaya dari CostEntry yang sudah diposting,
+// untuk SEMUA kategori (kapitalisasi land|hard via akun Persediaan, dan beban
+// operational|marketing|other|soft via akun beban masing-masing) — lihat
+// GORMRealisasiProvider.GetRealisasiByProject.
 type RealisasiProvider interface {
 	GetRealisasiByProject(ctx context.Context, tenantID, projectID uint64, phaseID *uint64) (map[domain.CostCategory]domain.Money, error)
 	// GetRealisasiPerItem mengembalikan Σ amount cost entry yang tertaut ke tiap budget item
@@ -41,8 +42,11 @@ type RealisasiProvider interface {
 // ── Service ───────────────────────────────────────────────────────────────────
 
 // Service mengelola RAB (Rencana Anggaran Biaya).
-// RAB TIDAK memposting jurnal apa pun ke ledger — hanya perencanaan.
-// Tidak ada JournalWriter atau PostingService di sini.
+//
+// RAB TIDAK memposting jurnal sama sekali — murni budget/planning (Item 8,
+// UAT 2026-09-07). RULE KLIEN 2026-09-04 (kapitalisasi Construction penuh
+// saat approval) DICABUT klien: Persediaan/HPP kini murni biaya aktual dari
+// cost entry, bukan estimasi RAB. Lihat cost.Service untuk sisi actual-cost.
 type Service struct {
 	store     BudgetStore
 	realisasi RealisasiProvider
@@ -114,6 +118,15 @@ func (s *Service) AddItem(ctx context.Context, tenantID uint64, req AddItemReque
 	if !req.BudgetedAmount.IsWholeRupiah() {
 		return nil, ErrAmountFractional
 	}
+	// UAT 2026-09-07: RAB Konstruksi WAJIB menyatakan salah satu dari 4
+	// subkategori kanonik (Produksi Subsidi / Produksi Komersial / Sarana &
+	// Prasarana / Perizinan) — "Produksi" tunggal tidak cukup untuk menentukan
+	// unit mana yang berhak menerima HPP-nya (lihat allocation.HardPoolSource).
+	if req.Category == BudgetCategoryConstruction {
+		if !domain.ConstructionSubcategory(req.Subcategory).Valid() {
+			return nil, ErrInvalidConstructionSubcategory
+		}
+	}
 
 	plan, err := s.store.FindPlanByID(ctx, tenantID, req.PlanID)
 	if err != nil {
@@ -155,7 +168,26 @@ func (s *Service) DeleteItem(ctx context.Context, tenantID, planID, itemID uint6
 // ApprovePlan mengubah plan dari draft → active dan secara atomik men-supersede
 // plan active sebelumnya untuk (project, phase) yang sama.
 // Ini menegakkan INVARIANT #8: hanya satu BudgetPlan 'active' per (project, phase).
-// RAB TIDAK memposting jurnal apa pun ke ledger.
+//
+// RULE KLIEN 2026-09-04: saat plan diaktifkan, TOTAL budgeted_amount kategori
+// Construction (Produksi + Sarana & Prasarana + Perizinan, alias domain
+// CostCategoryHard) langsung dikapitalisasi ke Persediaan — Dr 1-3100 / Cr Hutang
+// Usaha 2-1000 — TANPA menunggu vendor payment. Vendor diidentifikasi belakangan
+// saat realisasi; realisasi itu HANYA menyelesaikan Hutang Usaha (lihat
+// cost.Service.plan(), yang mengalihkan debit dari Persediaan ke Hutang Usaha
+// begitu IsProjectHardCapitalized/alreadyCapitalized bernilai true), TIDAK
+// PERNAH mendebit Persediaan lagi (no double-capitalize).
+//
+// Land SENGAJA tidak ikut jalur ini: Land punya modul kapitalisasi sendiri
+// (internal/land, sudah shipped) dan klien hanya menyebut kategori Construction
+// dalam laporan bug ini. Soft juga tidak pernah ikut jalur ini — RULE KLIEN
+// FREEZE (2026-09-04): Soft Cost bukan lagi kategori kapitalisasi sama sekali
+// (lihat domain.CostCategorySoft), jadi tidak ada logika untuk diperluas di sini.
+//
+// Untuk plan yang MEN-SUPERSEDE plan aktif sebelumnya (revisi RAB), hanya
+// SELISIH (delta) terhadap CapitalizedHardAmount plan sebelumnya yang diposting
+// — delta positif menambah Persediaan, delta negatif membalikkannya sebagian
+// (Invariant #5: koreksi lewat jurnal, bukan edit histori).
 func (s *Service) ApprovePlan(ctx context.Context, tenantID uint64, req ApprovePlanRequest) (*BudgetPlan, error) {
 	plan, err := s.store.FindPlanByID(ctx, tenantID, req.PlanID)
 	if err != nil {
@@ -187,7 +219,6 @@ func (s *Service) ApprovePlan(ctx context.Context, tenantID uint64, req ApproveP
 	if err := s.store.ApproveAndSupersede(ctx, tenantID, req.PlanID, now, req.ApprovedBy); err != nil {
 		return nil, fmt.Errorf("ApproveAndSupersede: %w", err)
 	}
-
 	return s.store.FindPlanByID(ctx, tenantID, req.PlanID)
 }
 
@@ -206,12 +237,12 @@ func (s *Service) GetActivePlan(ctx context.Context, tenantID, projectID uint64,
 }
 
 // GetBudgetedHPPPool mengembalikan total RAB TERANGGARKAN per kategori HPP
-// (land/hard/soft/financing) dari plan RAB yang AKTIF & disetujui untuk
-// (project, phase). Ini adalah "pool" biaya teranggarkan yang akan dialokasikan
-// ke unit sebagai HPP (metode Budgeted Cost Allocation — lihat
-// docs/budgeted-cost-allocation-spec.md). Kategori BEBAN (marketing/other)
-// DIKECUALIKAN — bukan bagian HPP. Mengembalikan ErrNoActivePlan bila belum ada
-// RAB aktif (gate BCA-2). Fondasi untuk pengakuan HPP di BAST (P0-2).
+// (land/hard) dari plan RAB yang AKTIF & disetujui untuk (project, phase).
+// Ini adalah "pool" biaya teranggarkan yang akan dialokasikan ke unit sebagai
+// HPP (metode Budgeted Cost Allocation — lihat docs/budgeted-cost-allocation-spec.md).
+// Kategori BEBAN (operational/marketing/other/soft) DIKECUALIKAN — bukan bagian
+// HPP (RULE KLIEN FREEZE 2026-09-04). Mengembalikan ErrNoActivePlan bila belum
+// ada RAB aktif (gate BCA-2). Fondasi untuk pengakuan HPP di BAST (P0-2).
 func (s *Service) GetBudgetedHPPPool(ctx context.Context, tenantID, projectID uint64, phaseID *uint64) (domain.UnitCostBreakdown, error) {
 	basis, err := s.GetBudgetedHPPBasis(ctx, tenantID, projectID, phaseID)
 	if err != nil {
@@ -231,9 +262,12 @@ type BudgetedHPPBasis struct {
 }
 
 // GetBudgetedHPPBasis mengembalikan RAB aktif (id+versi) dan pool biaya
-// kapitalisasi (land/hard/soft/financing) — kategori BEBAN (marketing/other)
+// kapitalisasi (land/hard) — kategori BEBAN (operational/marketing/other/soft,
+// RULE KLIEN FREEZE 2026-09-04: HPP hanya Tanah + Konstruksi/Hard Cost)
 // DIKECUALIKAN. Mengembalikan ErrNoActivePlan bila belum ada RAB aktif (gate
-// BCA-2). Kategori dipetakan lewat taxonomy (ToCostCategory), tidak di-hardcode.
+// BCA-2). Kategori dipetakan lewat taxonomy (ToCostCategory), tidak di-hardcode
+// — pool.Soft SENGAJA tidak pernah diisi di sini (field itu legacy-only, lihat
+// domain.UnitCostBreakdown.Soft).
 func (s *Service) GetBudgetedHPPBasis(ctx context.Context, tenantID, projectID uint64, phaseID *uint64) (BudgetedHPPBasis, error) {
 	plan, err := s.store.FindActivePlan(ctx, tenantID, projectID, phaseID)
 	if err != nil {
@@ -245,7 +279,7 @@ func (s *Service) GetBudgetedHPPBasis(ctx context.Context, tenantID, projectID u
 	}
 	var pool domain.UnitCostBreakdown
 	for cat, amt := range byCat {
-		cc, ok := cat.ToCostCategory() // hanya kategori kapitalisasi; marketing/other → skip
+		cc, ok := cat.ToCostCategory() // hanya kategori kapitalisasi; operational/marketing/other/soft → skip
 		if !ok {
 			continue
 		}
@@ -254,10 +288,6 @@ func (s *Service) GetBudgetedHPPBasis(ctx context.Context, tenantID, projectID u
 			pool.Land = pool.Land.Add(amt)
 		case domain.CostCategoryHard:
 			pool.Hard = pool.Hard.Add(amt)
-		case domain.CostCategorySoft:
-			pool.Soft = pool.Soft.Add(amt)
-		case domain.CostCategoryFinancing:
-			pool.Financing = pool.Financing.Add(amt)
 		}
 	}
 	return BudgetedHPPBasis{PlanID: plan.ID, Version: plan.Version, Pool: pool}, nil
@@ -321,9 +351,10 @@ func (s *Service) GetRABvsRealisasi(ctx context.Context, tenantID, projectID uin
 		if budgeted.IsZero() {
 			persen = "N/A"
 		} else {
-			p := realisasi.Decimal().Div(budgeted.Decimal()).Mul(decimal.NewFromInt(100))
-			f64, _ := p.Float64()
-			persen = fmt.Sprintf("%.2f%%", f64)
+			// Fraksi mentah (bukan sudah dikali 100 / ber-suffix "%") — kontrak
+			// komponen FE <Persen> yang mengonsumsi field ini mengalikan 100
+			// sendiri. Lihat RABvsRealisasiSection.tsx.
+			persen = realisasi.Decimal().Div(budgeted.Decimal()).String()
 		}
 
 		rows = append(rows, RABvsRealisasiRow{

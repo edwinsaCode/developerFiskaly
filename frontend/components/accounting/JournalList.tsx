@@ -7,6 +7,7 @@ import type { JournalSummary, JournalSource } from "@/lib/types/api";
 import { Can } from "@/components/ui/Can";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
+import { LinkifiedText } from "@/components/documents/LinkifiedText";
 
 interface Props {
   token: string;
@@ -215,7 +216,7 @@ export function JournalList({ token }: Props) {
                   <td className="px-4 py-3 text-text-secondary whitespace-nowrap">{formatDate(j.date)}</td>
                   <td className="px-4 py-3 text-text-primary max-w-xs truncate">
                     {j.is_reversing && <span className="text-warning mr-1">↩</span>}
-                    {j.description}
+                    <LinkifiedText token={token} text={j.description} />
                   </td>
                   <td className="px-4 py-3 text-text-secondary">{j.reference || "—"}</td>
                   <td className="px-4 py-3 whitespace-nowrap">

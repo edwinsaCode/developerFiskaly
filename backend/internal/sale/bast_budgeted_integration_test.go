@@ -52,6 +52,10 @@ func bbSeedProject(t *testing.T, db *gorm.DB) uint64 {
 	return id
 }
 
+// bbSeedUnit memakai land_area == area (saleable_area) supaya fixture lama
+// (yang sudah menomorkan area 100/300 untuk mendapat rasio 25%/75%) tetap
+// menghasilkan rasio Land yang sama persis di bawah rule Item 9 (area-weighted)
+// — tanpa perlu mendesain ulang semua angka pool test ini.
 func bbSeedUnit(t *testing.T, db *gorm.DB, projectID uint64, code string, area int64) uint64 {
 	t.Helper()
 	// Status 'reserved': sejak Increment 6.1 (F-1) BAST hanya sah dari
@@ -61,9 +65,9 @@ func bbSeedUnit(t *testing.T, db *gorm.DB, projectID uint64, code string, area i
 	// yang dihasilkan fixture ini identik dengan sebelum hardening.
 	db.Exec(`INSERT IGNORE INTO product_types (tenant_id, code, name, category, revenue_account_code, is_active)
 		VALUES (?,?,?,?,?,TRUE)`, bbTenant, "villa", "villa", "property", "4-1000")
-	res := db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, list_price, status)
-		VALUES (?,?,?,?,?,?,?)`,
-		bbTenant, projectID, code, "villa", domain.FromInt(area), domain.FromInt(0), "reserved")
+	res := db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, land_area, list_price, status)
+		VALUES (?,?,?,?,?,?,?,?)`,
+		bbTenant, projectID, code, "villa", domain.FromInt(area), domain.FromInt(area), domain.FromInt(0), "reserved")
 	if res.Error != nil {
 		t.Fatalf("seed unit %s: %v", code, res.Error)
 	}
@@ -169,7 +173,9 @@ func TestIntegration_BAST_Budgeted_SnapshotAndPosting(t *testing.T) {
 	if recA.BudgetPlanVersion == nil || *recA.BudgetPlanVersion != 1 {
 		t.Errorf("A budget_plan_version: got %v, want 1", recA.BudgetPlanVersion)
 	}
-	// HPP A = 25%: land 100jt, hard 200jt, total 300jt.
+	// HPP A: land proporsional land_area (Item 9) = 100/400 = 25% dari 400jt =
+	// 100jt (land_area di fixture ini == saleable_area, lihat bbSeedUnit); hard
+	// 25% area-weighted = 200jt; total 300jt.
 	if recA.HPPLand.String() != "100000000" || recA.HPPHard.String() != "200000000" || recA.HPPTotal().String() != "300000000" {
 		t.Errorf("A HPP salah: land=%s hard=%s total=%s", recA.HPPLand, recA.HPPHard, recA.HPPTotal())
 	}
@@ -185,10 +191,14 @@ func TestIntegration_BAST_Budgeted_SnapshotAndPosting(t *testing.T) {
 	if snap.BudgetPlanID != plan.ID || snap.BudgetPlanVersion != 1 {
 		t.Errorf("snapshot A RAB ref salah: plan=%d ver=%d", snap.BudgetPlanID, snap.BudgetPlanVersion)
 	}
+	// RULE KLIEN (FREEZE 2026-09-04): HPP hanya 2 kelompok kapitalisasi — Tanah
+	// dan Konstruksi/Hard Cost (domain.AllCostCategories). Soft Cost & Operasional
+	// (dahulu Financing) sudah direklasifikasi jadi beban periode murni, jadi
+	// snapshot tidak lagi punya baris untuk kelas itu.
 	var lines []sale.AllocationSnapshotLine
 	db.Where("tenant_id = ? AND snapshot_id = ?", bbTenant, snap.ID).Find(&lines)
-	if len(lines) != 4 {
-		t.Fatalf("snapshot A lines: got %d, want 4 (satu per accounting_class)", len(lines))
+	if len(lines) != 2 {
+		t.Fatalf("snapshot A lines: got %d, want 2 (satu per accounting_class kapitalisasi: land, hard)", len(lines))
 	}
 	byClass := map[string]sale.AllocationSnapshotLine{}
 	for _, ln := range lines {
@@ -200,12 +210,15 @@ func TestIntegration_BAST_Budgeted_SnapshotAndPosting(t *testing.T) {
 	if byClass["hard"].Amount.String() != "200000000" || byClass["hard"].InventoryAccountCode != "1-3100" {
 		t.Errorf("line hard salah: %+v", byClass["hard"])
 	}
-	// Bukti basis di tiap baris: area 100 dari total 400 → 25%.
-	for _, cls := range []string{"land", "hard", "soft", "financing"} {
-		ln := byClass[cls]
-		if ln.BasisType != string(allocation.BasisSaleableArea) || ln.BasisValue.String() != "100" || !ln.AllocationPercentage.Equal(decimal.NewFromInt(25)) {
-			t.Errorf("bukti basis %s salah: type=%s value=%s pct=%s", cls, ln.BasisType, ln.BasisValue, ln.AllocationPercentage)
-		}
+	// Bukti basis hard: area 100 dari total 400 → 25%.
+	if ln := byClass["hard"]; ln.BasisType != string(allocation.BasisSaleableArea) || ln.BasisValue.String() != "100" || !ln.AllocationPercentage.Equal(decimal.NewFromInt(25)) {
+		t.Errorf("bukti basis hard salah: type=%s value=%s pct=%s", ln.BasisType, ln.BasisValue, ln.AllocationPercentage)
+	}
+	// Bukti basis land (Item 9): proporsional land_area — land_area A=100 dari
+	// Σland_area 400 → 25%, basis_type "land_area" (bukan lagi "equal"/rata
+	// per rule klien UAT #1 lama).
+	if ln := byClass["land"]; ln.BasisType != "land_area" || ln.BasisValue.String() != "100" || !ln.AllocationPercentage.Equal(decimal.NewFromInt(25)) {
+		t.Errorf("bukti basis land salah: type=%s value=%s pct=%s", ln.BasisType, ln.BasisValue, ln.AllocationPercentage)
 	}
 
 	// ── Jurnal HPP (Event 4) balanced: Dr 5-1000 / Cr 1-3xxx ──────────────────
@@ -221,6 +234,8 @@ func TestIntegration_BAST_Budgeted_SnapshotAndPosting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecordBAST B: %v", err)
 	}
+	// B: land proporsional land_area (Item 9) = 300/400 = 75% dari 400jt =
+	// 300jt; hard 75% area-weighted = 600jt.
 	if recB.HPPLand.String() != "300000000" || recB.HPPHard.String() != "600000000" {
 		t.Errorf("B HPP salah: land=%s hard=%s", recB.HPPLand, recB.HPPHard)
 	}
@@ -482,9 +497,14 @@ func TestIntegration_BAST_RejectedWhenUnitNotBASTReady(t *testing.T) {
 		{"hold", "HD-01"},      // hold administratif — dilindungi gate
 		{"blocked", "BL-01"},   // sengketa legal — justru tidak boleh dijual
 	} {
-		res := db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, list_price, status)
-			VALUES (?,?,?,?,?,?,?)`,
-			bbTenant, projectID, tc.code, "villa", domain.FromInt(100), domain.FromInt(0), tc.status)
+		// land_area (Item 9): meski test ini menguji gate STATUS (bukan HPP),
+		// GetUnitInputs/ComputeBudgeted tetap dipanggil sebelum gate ditolak
+		// (RecordAkad menghitung HPP terlebih dulu), jadi land_area harus > 0
+		// supaya kegagalan yang diuji benar ErrUnitNotBASTReady, bukan
+		// ErrLandAreaMissing.
+		res := db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, land_area, list_price, status)
+			VALUES (?,?,?,?,?,?,?,?)`,
+			bbTenant, projectID, tc.code, "villa", domain.FromInt(100), domain.FromInt(100), domain.FromInt(0), tc.status)
 		if res.Error != nil {
 			t.Fatalf("seed unit %s: %v", tc.code, res.Error)
 		}

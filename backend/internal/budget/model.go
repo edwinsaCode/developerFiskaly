@@ -11,28 +11,38 @@ import (
 // ── BudgetCategory ────────────────────────────────────────────────────────────
 
 // BudgetCategory classifies a RAB line item.
-// RAB menggunakan 6 kategori; hanya 4 yang bisa dikapitalisasi ke Persediaan.
+// RAB menggunakan 6 kategori; hanya 2 yang bisa dikapitalisasi ke Persediaan
+// (RULE KLIEN FREEZE 2026-09-04: HPP hanya Tanah + Konstruksi/Hard Cost. Soft
+// Cost, Biaya Lain-lain, dan Operasional — dahulu "Pendanaan" — dikeluarkan dari
+// HPP walaupun ada di RAB; lihat domain.CostCategoryOperational dan
+// domain.CostCategorySoft).
 //
 // 'construction' adalah ALIAS dari domain.CostCategoryHard.
 // Jangan rename CostCategoryHard — cukup petakan saat membandingkan RAB vs realisasi.
 //
-// 'marketing' dan 'other' adalah expense-only (di-expense, tidak dikapitalisasi ke
-// Persediaan Real Estat, tidak masuk HPP).
+// 'soft', 'marketing', 'other', dan 'operational' adalah expense-only (di-expense,
+// tidak dikapitalisasi ke Persediaan Real Estat, tidak masuk HPP) — diakui sebagai
+// beban saat REALISASI benar-benar terjadi, bukan saat approval RAB.
 type BudgetCategory string
 
 const (
 	BudgetCategoryLand         BudgetCategory = "land"
 	BudgetCategoryConstruction BudgetCategory = "construction" // alias: domain.CostCategoryHard
-	BudgetCategorySoft         BudgetCategory = "soft"
-	BudgetCategoryFinancing    BudgetCategory = "financing"
-	BudgetCategoryMarketing    BudgetCategory = "marketing" // expense-only, tidak ada akun Persediaan
-	BudgetCategoryOther        BudgetCategory = "other"     // expense-only, tidak ada akun Persediaan
+	// BudgetCategorySoft — RULE KLIEN FREEZE (2026-09-04): direklasifikasi jadi
+	// beban periode (bukan HPP), walaupun ada di RAB. Lihat domain.CostCategorySoft.
+	BudgetCategorySoft BudgetCategory = "soft"
+	// BudgetCategoryOperational — dahulu "financing"/"Pendanaan". RULE KLIEN
+	// (2026-09-04): direklasifikasi jadi beban periode (bukan HPP). Value string
+	// diganti "financing"→"operational"; lihat migrasi rename data lama.
+	BudgetCategoryOperational BudgetCategory = "operational"
+	BudgetCategoryMarketing   BudgetCategory = "marketing" // expense-only, tidak ada akun Persediaan
+	BudgetCategoryOther       BudgetCategory = "other"     // expense-only, tidak ada akun Persediaan
 )
 
 // AllBudgetCategories adalah urutan tetap kategori untuk laporan RAB vs Realisasi.
 var AllBudgetCategories = []BudgetCategory{
 	BudgetCategoryLand, BudgetCategoryConstruction,
-	BudgetCategorySoft, BudgetCategoryFinancing,
+	BudgetCategorySoft, BudgetCategoryOperational,
 	BudgetCategoryMarketing, BudgetCategoryOther,
 }
 
@@ -47,34 +57,37 @@ func (c BudgetCategory) Valid() bool {
 }
 
 // ToCostCategory memetakan BudgetCategory ke domain.CostCategory KAPITALISASI.
-// Returns ("", false) untuk marketing dan other (tidak dikapitalisasi — dipakai
-// sebagai gate pool HPP, lihat GetBudgetedHPPBasis). Untuk pemetaan realisasi
-// penuh (termasuk kategori beban) gunakan CostEntryCategory.
-// construction ↔ hard adalah satu-satunya alias; keempat lainnya name-identical.
+// Returns ("", false) untuk soft, operational, marketing, dan other (tidak
+// dikapitalisasi — dipakai sebagai gate pool HPP, lihat GetBudgetedHPPBasis).
+// Untuk pemetaan realisasi penuh (termasuk kategori beban) gunakan CostEntryCategory.
+// construction ↔ hard adalah satu-satunya alias; land name-identical.
+// RULE KLIEN FREEZE (2026-09-04): soft TIDAK LAGI punya case di sini — HPP
+// hanya land + construction/hard.
 func (c BudgetCategory) ToCostCategory() (domain.CostCategory, bool) {
 	switch c {
 	case BudgetCategoryLand:
 		return domain.CostCategoryLand, true
 	case BudgetCategoryConstruction:
 		return domain.CostCategoryHard, true // alias: construction = hard
-	case BudgetCategorySoft:
-		return domain.CostCategorySoft, true
-	case BudgetCategoryFinancing:
-		return domain.CostCategoryFinancing, true
 	}
-	return "", false // marketing dan other: tidak dikapitalisasi
+	return "", false // soft, operational, marketing, other: tidak dikapitalisasi
 }
 
 // CostEntryCategory memetakan BudgetCategory ke kategori cost_entries yang
 // MEREALISASIKAN baris RAB itu — mencakup SEMUA 6 kategori (Increment 2):
 // kategori kapitalisasi lewat ToCostCategory (construction→hard), kategori
-// beban ke padanan expense-nya (marketing→marketing, other→other; hanya sah
-// untuk CostTier overhead). Returns ("", false) hanya untuk kategori tak dikenal.
+// beban ke padanan expense-nya (soft→soft, operational→operational,
+// marketing→marketing, other→other; hanya sah untuk CostTier overhead). Returns
+// ("", false) hanya untuk kategori tak dikenal.
 func (c BudgetCategory) CostEntryCategory() (domain.CostCategory, bool) {
 	if cc, ok := c.ToCostCategory(); ok {
 		return cc, true
 	}
 	switch c {
+	case BudgetCategorySoft:
+		return domain.CostCategorySoft, true
+	case BudgetCategoryOperational:
+		return domain.CostCategoryOperational, true
 	case BudgetCategoryMarketing:
 		return domain.CostCategoryMarketing, true
 	case BudgetCategoryOther:
@@ -85,12 +98,13 @@ func (c BudgetCategory) CostEntryCategory() (domain.CostCategory, bool) {
 
 // IsExpenseOnly returns true untuk kategori yang tidak dikapitalisasi ke Persediaan Real Estat.
 func (c BudgetCategory) IsExpenseOnly() bool {
-	return c == BudgetCategoryMarketing || c == BudgetCategoryOther
+	return c == BudgetCategorySoft || c == BudgetCategoryOperational || c == BudgetCategoryMarketing || c == BudgetCategoryOther
 }
 
 // IsCapitalized adalah kebalikan IsExpenseOnly: kategori yang MASUK HPP unit
-// (land/construction/soft/financing → Persediaan Real Estat 1-3xxx). Sumber
-// kebenaran tunggal pemisahan HPP-vs-Beban. Lihat docs/budgeted-cost-allocation-spec.md §3.
+// (land/construction → Persediaan Real Estat 1-3xxx). Sumber kebenaran
+// tunggal pemisahan HPP-vs-Beban. Lihat docs/budgeted-cost-allocation-spec.md §3.
+// RULE KLIEN FREEZE (2026-09-04): soft dikeluarkan dari himpunan ini.
 func (c BudgetCategory) IsCapitalized() bool {
 	_, ok := c.ToCostCategory()
 	return ok
@@ -140,22 +154,26 @@ func (s BudgetPlanStatus) Valid() bool {
 //  2. App: ApproveAndSupersede menjaga active_key secara atomik dalam transaksi.
 //
 // Saat plan baru di-approve, plan lama otomatis menjadi 'superseded' (tidak dihapus).
-// RAB TIDAK memposting jurnal apa pun. Ini hanya perencanaan.
+//
+// Item 8 (UAT 2026-09-07): RAB TIDAK memposting jurnal apa pun saat approval.
+// RULE KLIEN 2026-09-04 (kapitalisasi Construction penuh ke Persediaan saat
+// approval) DICABUT klien — Persediaan/HPP kini murni biaya aktual dari cost
+// entry (lihat internal/cost). RAB adalah budget/planning saja.
 type BudgetPlan struct {
-	ID         uint64           `gorm:"primaryKey;autoIncrement"                      json:"id"`
-	TenantID   uint64           `gorm:"not null;index"                                json:"-"`
-	ProjectID  uint64           `gorm:"not null;index"                                json:"project_id"`
-	PhaseID    *uint64          `gorm:"index"                                         json:"phase_id,omitempty"`
-	PhaseIDKey uint64           `gorm:"not null;default:0"   json:"-"`
-	ActiveKey  *string          `gorm:"size:1"               json:"-"`
-	Version    int              `gorm:"not null;default:1"                            json:"version"`
-	Label      string           `gorm:"not null;size:100"                             json:"label"`
-	Status     BudgetPlanStatus `gorm:"not null;size:20;default:'draft'"              json:"status"`
-	Notes      string           `gorm:"size:2000"                                     json:"notes,omitempty"`
-	ApprovedAt *time.Time       `                                                     json:"approved_at,omitempty"`
-	ApprovedBy *string          `gorm:"size:200"                                      json:"approved_by,omitempty"`
-	CreatedAt  time.Time        `                                                     json:"created_at"`
-	UpdatedAt  time.Time        `                                                     json:"updated_at"`
+	ID                     uint64           `gorm:"primaryKey;autoIncrement"                      json:"id"`
+	TenantID               uint64           `gorm:"not null;index"                                json:"-"`
+	ProjectID              uint64           `gorm:"not null;index"                                json:"project_id"`
+	PhaseID                *uint64          `gorm:"index"                                         json:"phase_id,omitempty"`
+	PhaseIDKey             uint64           `gorm:"not null;default:0"   json:"-"`
+	ActiveKey              *string          `gorm:"size:1"               json:"-"`
+	Version                int              `gorm:"not null;default:1"                            json:"version"`
+	Label                  string           `gorm:"not null;size:100"                             json:"label"`
+	Status                 BudgetPlanStatus `gorm:"not null;size:20;default:'draft'"              json:"status"`
+	Notes                  string           `gorm:"size:2000"                                     json:"notes,omitempty"`
+	ApprovedAt             *time.Time       `                                                     json:"approved_at,omitempty"`
+	ApprovedBy             *string          `gorm:"size:200"                                      json:"approved_by,omitempty"`
+	CreatedAt              time.Time        `                                                     json:"created_at"`
+	UpdatedAt              time.Time        `                                                     json:"updated_at"`
 }
 
 func (BudgetPlan) TableName() string { return "budget_plans" }
@@ -255,4 +273,17 @@ func BudgetHealthStatus(usagePct decimal.Decimal) string {
 	default:
 		return "sehat"
 	}
+}
+
+// JournalLineInput is the per-line request type for the JournalWriter interface.
+// Mirrors ledger.LineInput (and cost.JournalLineInput) without importing the
+// ledger package — sama alasan seperti cost/model.go: package ini tetap bisa
+// diuji tanpa mengenal tipe ledger.
+type JournalLineInput struct {
+	AccountID   uint64
+	Debit       domain.Money
+	Credit      domain.Money
+	ProjectID   *uint64
+	PhaseID     *uint64
+	Description string
 }

@@ -28,6 +28,21 @@ interface Props {
   /** W-13: bila diisi (kontrak KPR ber-akad), opsi "Pencairan Dana Bank" muncul. */
   financingSourceId?: number;
   bankName?: string;
+  /** P1 Kelebihan Tanah: bila diisi, pembayaran ditarget ke SATU schedule (mis.
+   *  cicilan Kelebihan Tanah) — tidak memakai waterfall seluruh kontrak, dan
+   *  tidak menyentuh jadwal lain (mis. cicilan Rumah). */
+  scheduleId?: number;
+  /** Catatan default saat scheduleId diisi (mis. deskripsi produk/m²/harga
+   *  untuk kwitansi Kelebihan Tanah). */
+  defaultNotes?: string;
+  /** UAT 2026-09-03 #1: id jadwal Kelebihan Tanah unit ini (bila ada). Saat
+   *  user memilih "Jenis Penerimaan: Kelebihan Tanah" di modal umum (bukan
+   *  modal ber-scheduleId), pembayaran DITARGET ke jadwal ini — bukan
+   *  waterfall seluruh kontrak — supaya tidak menyentuh sisa cicilan Rumah. */
+  landScheduleId?: number;
+  /** Sisa jadwal Kelebihan Tanah SEKARANG (amount − paid_amount), untuk
+   *  default nominal & hint saat kind=land_excess dipilih. */
+  landOutstanding?: string;
   /** W-13: dipanggil setelah penerimaan/invoice kekurangan tersimpan — agar
    *  parent (mis. UnitSalePanel) bisa menyegarkan saldo/riwayat miliknya
    *  sendiri, terlepas dari router.refresh() yang hanya menyentuh data server. */
@@ -43,6 +58,7 @@ const KIND_OPTIONS: { value: TerminKind; label: string }[] = [
   { value: "dp", label: "DP (Uang Muka)" },
   { value: "installment", label: "Cicilan" },
   { value: "final_payment", label: "Pelunasan" },
+  { value: "land_excess", label: "Kelebihan Tanah" },
   { value: "other", label: "Lainnya" },
 ];
 
@@ -56,7 +72,9 @@ function isPositive(s: string) {
 export function RecordPaymentButton({
   token, contractId, outstanding, buyerName, variant = "primary", size = "md",
   label = "Catat Pembayaran", financingSourceId, bankName, onSuccess,
+  scheduleId, defaultNotes, landScheduleId, landOutstanding,
 }: Props) {
+  const isScheduleTargeted = !!scheduleId;
   const { toast } = useToast();
   const router = useRouter();
 
@@ -71,6 +89,9 @@ export function RecordPaymentButton({
   const [notes, setNotes] = useState("");
   const [kind, setKind] = useState<TerminKind>("other");
   const [installmentNo, setInstallmentNo] = useState("");
+  // UAT 2026-09-03 Rule #5: provisi/administrasi bank yang dipotong saat
+  // pencairan — ditanggung developer (Beban P&L), bukan titipan customer.
+  const [bankFee, setBankFee] = useState("");
 
   const [preview, setPreview] = useState<CollectionPreview | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
@@ -82,6 +103,15 @@ export function RecordPaymentButton({
   const [shortfallBusy, setShortfallBusy] = useState(false);
 
   const isDisbursement = kind === "bank_disbursement";
+  // UAT 2026-09-03 #1: memilih "Kelebihan Tanah" harus MENARGET jadwal tanah
+  // itu saja (schedule-targeted, bukan waterfall kontrak) — kalau tidak,
+  // nominal/outstanding/kwitansi ikut memakai sisa gabungan yang didominasi
+  // harga rumah. isTargetingLand hanya benar bila unit ini memang punya
+  // jadwal tanah (landScheduleId terisi dari parent); tanpa itu, kind
+  // land_excess tetap murni label deskriptif (perilaku lama).
+  const isTargetingLand = kind === "land_excess" && !!landScheduleId;
+  const effectiveScheduleId = isTargetingLand ? landScheduleId : scheduleId;
+  const effectiveOutstanding = isTargetingLand ? (landOutstanding ?? outstanding) : outstanding;
 
   function openModal() {
     setStep("input");
@@ -89,9 +119,10 @@ export function RecordPaymentButton({
     setAmount(intPart(outstanding));
     setBankCode("");
     setReference("");
-    setNotes("");
-    setKind("other");
+    setNotes(defaultNotes || "");
+    setKind(isScheduleTargeted ? "installment" : "other");
     setInstallmentNo("");
+    setBankFee("");
     setPreview(null);
     setDone(null);
     setIdemKey(typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${contractId}-${Date.now()}`);
@@ -123,7 +154,7 @@ export function RecordPaymentButton({
     if (!canProceed) return;
     setLoadingPreview(true);
     try {
-      setPreview(await previewCollectionPayment(token, contractId, amount, bankCode));
+      setPreview(await previewCollectionPayment(token, contractId, amount, bankCode, isDisbursement ? bankFee : undefined, effectiveScheduleId, isDisbursement ? financingSourceId : undefined));
       setStep("preview");
     } catch (err) {
       toast(err instanceof ApiError ? err.message : "Gagal memuat pratinjau", "error");
@@ -148,6 +179,8 @@ export function RecordPaymentButton({
         installment_no: kind === "installment" && installmentNo ? Number(installmentNo) : undefined,
         // Diabaikan/diturunkan otomatis backend bila kind bukan bank_disbursement.
         financing_source_id: isDisbursement ? financingSourceId : undefined,
+        bank_fee: isDisbursement && bankFee ? intPart(bankFee) : undefined,
+        schedule_id: effectiveScheduleId,
       });
       setDone({
         receiptNumber: res.receipt_number,
@@ -288,40 +321,60 @@ export function RecordPaymentButton({
   function renderInput() {
     return (
       <div className="space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <Field label="Jenis Penerimaan">
-            <select
-              value={kind}
-              onChange={(e) => setKind(e.target.value as TerminKind)}
-              className={inputCls}
-            >
-              {KIND_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-              {financingSourceId && (
-                <option value="bank_disbursement">Pencairan Dana Bank (KPR)</option>
-              )}
-            </select>
-          </Field>
-          {kind === "installment" ? (
-            <Field label="Cicilan ke-">
-              <input
-                type="number" min={1} value={installmentNo}
-                onChange={(e) => setInstallmentNo(e.target.value)}
-                placeholder="opsional" className={inputCls}
-              />
+        {!isScheduleTargeted && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Field label="Jenis Penerimaan">
+              <select
+                value={kind}
+                onChange={(e) => {
+                  const next = e.target.value as TerminKind;
+                  setKind(next);
+                  // UAT 2026-09-03 #1: pindah ke/dari Kelebihan Tanah mengganti
+                  // ceiling nominal (jadwal tanah vs sisa gabungan) — perbarui
+                  // default nominal supaya user tidak diam-diam membayar
+                  // lebih dari sisa jadwal yang sesungguhnya sedang dipilih.
+                  const nextOutstanding =
+                    next === "land_excess" && landScheduleId ? (landOutstanding ?? outstanding) : outstanding;
+                  setAmount(intPart(nextOutstanding));
+                }}
+                className={inputCls}
+              >
+                {KIND_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                {financingSourceId && (
+                  <option value="bank_disbursement">Pencairan Dana Bank (KPR)</option>
+                )}
+              </select>
             </Field>
-          ) : (
-            <Field label="Tanggal Pembayaran">
-              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={inputCls} />
-            </Field>
-          )}
-        </div>
-        {kind === "installment" && (
+            {kind === "installment" ? (
+              <Field label="Cicilan ke-">
+                <input
+                  type="number" min={1} value={installmentNo}
+                  onChange={(e) => setInstallmentNo(e.target.value)}
+                  placeholder="opsional" className={inputCls}
+                />
+              </Field>
+            ) : (
+              <Field label="Tanggal Pembayaran">
+                <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={inputCls} />
+              </Field>
+            )}
+          </div>
+        )}
+        {(isScheduleTargeted || kind === "installment") && (
           <Field label="Tanggal Pembayaran">
             <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={inputCls} />
           </Field>
         )}
         {isDisbursement && bankName && (
           <p className="text-xs text-text-secondary">Bank penyalur: <strong>{bankName}</strong></p>
+        )}
+        {isDisbursement && (
+          <RupiahInput
+            label="Provisi/Biaya Admin Bank (opsional)"
+            value={bankFee}
+            onChange={setBankFee}
+            hint="Dipotong bank saat pencairan, ditanggung developer — dibebankan sebagai Beban P&L, bukan mengurangi nilai piutang yang diselesaikan."
+          />
         )}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Field label="Rekening / Kas Tujuan">
@@ -343,7 +396,13 @@ export function RecordPaymentButton({
             )}
           </Field>
         </div>
-        <RupiahInput label="Nominal Pembayaran" value={amount} onChange={setAmount} required hint={`Sisa tagihan: ${formatRp(outstanding)}`} />
+        <RupiahInput
+          label="Nominal Pembayaran"
+          value={amount}
+          onChange={setAmount}
+          required
+          hint={isTargetingLand ? `Sisa Kelebihan Tanah: ${formatRp(effectiveOutstanding)}` : `Sisa tagihan: ${formatRp(effectiveOutstanding)}`}
+        />
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Field label="Referensi Pembayaran">
             <input value={reference} onChange={(e) => setReference(e.target.value)} placeholder="No. transfer / bukti" className={inputCls} />

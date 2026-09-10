@@ -99,6 +99,27 @@ func (r *GORMRepository) ListCostEntriesByProject(ctx context.Context, tenantID,
 	return es, nil
 }
 
+// TenantName dan ProjectName memberi label header cetak (Riwayat Biaya /
+// Bukti Kas Keluar) — pola sama dengan internal/reporting/repository.go,
+// duplikat karena domain package tidak saling impor.
+func (r *GORMRepository) TenantName(ctx context.Context, tenantID uint64) (string, error) {
+	var name string
+	err := r.db.WithContext(ctx).Raw(`SELECT name FROM tenants WHERE id = ?`, tenantID).Scan(&name).Error
+	if err != nil {
+		return "", fmt.Errorf("cost: TenantName: %w", err)
+	}
+	return name, nil
+}
+
+func (r *GORMRepository) ProjectName(ctx context.Context, tenantID, projectID uint64) (string, error) {
+	var name string
+	err := r.db.WithContext(ctx).Raw(`SELECT name FROM projects WHERE id = ? AND tenant_id = ?`, projectID, tenantID).Scan(&name).Error
+	if err != nil {
+		return "", fmt.Errorf("cost: ProjectName: %w", err)
+	}
+	return name, nil
+}
+
 func (r *GORMRepository) ListCostEntriesByUnit(ctx context.Context, tenantID, unitID uint64) ([]*CostEntry, error) {
 	var es []*CostEntry
 	err := r.db.WithContext(ctx).
@@ -153,6 +174,8 @@ func (r *GORMRepository) AccumulatedProjectWide(ctx context.Context, tenantID, p
 
 // breakdownFromCodes memetakan hasil pembaca kanonik (kode → total) ke
 // UnitCostBreakdown lewat taxonomy domain (bukan hardcode kode di sini).
+// AllCostCategories hanya land|hard (RULE KLIEN FREEZE 2026-09-04) — b.Soft
+// tidak pernah diisi dari sini (field itu legacy-only untuk baca data historis).
 func breakdownFromCodes(byCode map[string]domain.Money) domain.UnitCostBreakdown {
 	var b domain.UnitCostBreakdown
 	for _, c := range domain.AllCostCategories {
@@ -165,10 +188,6 @@ func breakdownFromCodes(byCode map[string]domain.Money) domain.UnitCostBreakdown
 			b.Land = m
 		case domain.CostCategoryHard:
 			b.Hard = m
-		case domain.CostCategorySoft:
-			b.Soft = m
-		case domain.CostCategoryFinancing:
-			b.Financing = m
 		}
 	}
 	return b

@@ -14,9 +14,17 @@ func TestSnapshotDraft_ToSnapshot_TaxonomyDriven(t *testing.T) {
 	draft := SnapshotDraft{
 		ProjectID: 10, UnitID: 42, BudgetPlanID: 7, BudgetPlanVersion: 2, Basis: "saleable_area",
 		BasisValue: decimal.NewFromInt(100), AllocationPercentage: decimal.NewFromInt(25),
+		// Land punya basis sendiri: land_area per unit (Item 9) — bukti basisnya
+		// terpisah dari Hard/Soft di atas.
+		LandBasisValue: decimal.NewFromInt(60), LandAllocationPercentage: decimal.NewFromInt(50),
 		Breakdown: domain.UnitCostBreakdown{
 			Land: domain.FromInt(100), Hard: domain.FromInt(200),
-			Soft: domain.Zero, Financing: domain.FromInt(50),
+			Soft: domain.Zero,
+			// Financing sengaja TIDAK diisi: field legacy, tidak pernah dipopulasi
+			// oleh alur produksi mana pun sejak RULE KLIEN 2026-09-04 (Pendanaan
+			// direname jadi Operasional, expense-only, tidak masuk HPP). toSnapshot
+			// menjumlahkan HPPTotal dari Lines (taxonomy-driven), bukan
+			// Breakdown.Total() — jadi field ini tidak lagi relevan untuk snapshot.
 		},
 	}
 
@@ -31,10 +39,10 @@ func TestSnapshotDraft_ToSnapshot_TaxonomyDriven(t *testing.T) {
 			t.Errorf("identitas baris salah: unit=%d nama=%q", l.UnitID, l.UnitNameSnapshot)
 		}
 	}
-	if snap.HPPTotal.String() != "350" {
-		t.Errorf("hpp_total: got %s, want 350", snap.HPPTotal)
+	if snap.HPPTotal.String() != "300" {
+		t.Errorf("hpp_total: got %s, want 300", snap.HPPTotal)
 	}
-	// Satu baris per accounting_class (4), termasuk yang nol (soft) — snapshot lengkap.
+	// Satu baris per accounting_class (3: land/hard/soft), termasuk yang nol (soft) — snapshot lengkap.
 	if len(snap.Lines) != len(domain.AllCostCategories) {
 		t.Fatalf("jumlah baris: got %d, want %d", len(snap.Lines), len(domain.AllCostCategories))
 	}
@@ -43,10 +51,9 @@ func TestSnapshotDraft_ToSnapshot_TaxonomyDriven(t *testing.T) {
 		amount string
 		code   string
 	}{
-		"land":      {"100", "1-3000"},
-		"hard":      {"200", "1-3100"},
-		"soft":      {"0", "1-3200"},
-		"financing": {"50", "1-3300"},
+		"land": {"100", "1-3000"},
+		"hard": {"200", "1-3100"},
+		"soft": {"0", "1-3200"},
 	}
 	var sum domain.Money
 	for _, ln := range snap.Lines {
@@ -64,8 +71,14 @@ func TestSnapshotDraft_ToSnapshot_TaxonomyDriven(t *testing.T) {
 		if ln.TenantID != 9001 {
 			t.Errorf("%s tenant: got %d, want 9001", ln.AccountingClass, ln.TenantID)
 		}
-		// Bukti basis didenormalisasi ke SETIAP baris (self-describing).
-		if ln.BasisType != "saleable_area" || ln.BasisValue.String() != "100" || !ln.AllocationPercentage.Equal(decimal.NewFromInt(25)) {
+		// Bukti basis didenormalisasi ke SETIAP baris (self-describing). Land
+		// memakai basis-nya sendiri (land_area per unit — Item 9), berbeda dari
+		// Hard/Soft/Financing.
+		if ln.AccountingClass == "land" {
+			if ln.BasisType != "land_area" || ln.BasisValue.String() != "60" || !ln.AllocationPercentage.Equal(decimal.NewFromInt(50)) {
+				t.Errorf("land bukti basis salah: type=%s value=%s pct=%s", ln.BasisType, ln.BasisValue, ln.AllocationPercentage)
+			}
+		} else if ln.BasisType != "saleable_area" || ln.BasisValue.String() != "100" || !ln.AllocationPercentage.Equal(decimal.NewFromInt(25)) {
 			t.Errorf("%s bukti basis salah: type=%s value=%s pct=%s", ln.AccountingClass, ln.BasisType, ln.BasisValue, ln.AllocationPercentage)
 		}
 		sum = sum.Add(ln.Amount)

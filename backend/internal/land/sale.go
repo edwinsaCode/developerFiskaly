@@ -64,9 +64,13 @@ type LandSale struct {
 	CogsJournalID            *uint64         `json:"cogs_journal_id,omitempty"`
 	RevenueReversalJournalID *uint64         `json:"revenue_reversal_journal_id,omitempty"`
 	CogsReversalJournalID    *uint64         `json:"cogs_reversal_journal_id,omitempty"`
-	CreatedBy                *uint64         `json:"created_by,omitempty"`
-	CreatedAt                time.Time       `json:"created_at"`
-	UpdatedAt                time.Time       `json:"updated_at"`
+	// gorm:"column:..." eksplisit — GORM default naming strategy salah menebak
+	// akronim "PPh" jadi "p_ph" (bukan "pph"), tak cocok dengan kolom migrasi.
+	PPhJournalID         *uint64   `gorm:"column:pph_journal_id"          json:"pph_journal_id,omitempty"`
+	PPhReversalJournalID *uint64   `gorm:"column:pph_reversal_journal_id" json:"pph_reversal_journal_id,omitempty"`
+	CreatedBy            *uint64   `json:"created_by,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 func (LandSale) TableName() string { return "land_sales" }

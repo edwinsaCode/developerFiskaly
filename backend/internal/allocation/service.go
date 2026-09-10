@@ -49,6 +49,12 @@ type Service struct {
 	userEmails  UserEmailFinder // opsional; diperlukan untuk Execute
 	versions    VersionStore    // opsional (P0-4 D1); nil = SetBasis legacy
 	landPool    LandPoolSource  // opsional (LT-5); nil = Land tetap saleable_area/sales_value-weighted
+
+	// hardPool/unitTaxCategories (UAT 2026-09-07): opsional, dipasang bersama
+	// via WithHardPoolSource. nil = Hard tetap satu pool diratakan ke semua
+	// unit (perilaku sebelum fitur ini) — lihat applyHardPoolOverride.
+	hardPool          HardPoolSource
+	unitTaxCategories UnitTaxCategorySource
 }
 
 // ServiceOption adalah functional option untuk konfigurasi opsional Service.
@@ -70,6 +76,17 @@ func WithUserEmailFinder(uf UserEmailFinder) ServiceOption {
 // applyLandPoolOverride.
 func WithLandPoolSource(lp LandPoolSource) ServiceOption {
 	return func(s *Service) { s.landPool = lp }
+}
+
+// WithHardPoolSource memasang sumber pecahan biaya Konstruksi/Hard Cost
+// per subkategori (Produksi Subsidi/Komersial/General) berikut sumber
+// TaxCategory unit (UAT 2026-09-07). Tanpa opsi ini, ComputeAllocation tetap
+// berperilaku seperti sebelum fitur ini: satu pool Hard diratakan ke semua
+// unit HPP-eligible sesuai basis alokasi proyek. Dengan opsi ini terpasang,
+// override HANYA memecah pool bila proyek benar-benar punya cost entry Hard
+// yang sudah diklasifikasikan Subsidi/Komersial — lihat applyHardPoolOverride.
+func WithHardPoolSource(hp HardPoolSource, utc UnitTaxCategorySource) ServiceOption {
+	return func(s *Service) { s.hardPool = hp; s.unitTaxCategories = utc }
 }
 
 // NewService membuat Service dengan dependency yang diinjeksikan.
@@ -172,7 +189,11 @@ func (s *Service) ComputeAllocation(ctx context.Context, tenantID, projectID uin
 	if err != nil {
 		return nil, err
 	}
-	return s.applyLandPoolOverride(ctx, tenantID, projectID, projectWide.Land, results)
+	results, err = s.applyLandPoolOverride(ctx, tenantID, projectID, projectWide.Land, results)
+	if err != nil {
+		return nil, err
+	}
+	return s.applyHardPoolOverride(ctx, tenantID, projectID, results)
 }
 
 // ComputeBudgeted mengalokasikan pool biaya TERANGGARKAN (RAB) — bukan biaya
@@ -187,6 +208,16 @@ func (s *Service) ComputeAllocation(ctx context.Context, tenantID, projectID uin
 //
 // Mengembalikan ErrConfigNotFound bila basis alokasi belum diatur (gate BCA-2 —
 // caller sale menerjemahkannya ke ErrAllocationBasisMissing).
+//
+// TODO(uat-2026-09-07): jalur budgeted/RAB-estimate ini SENGAJA belum
+// menerapkan applyHardPoolOverride — pool.Hard di sini berasal dari RAB
+// (budget.GetBudgetedHPPBasis, satu SUM per BudgetCategory, belum per
+// subkategori Produksi Subsidi/Komersial/Sarana/Perizinan). Acceptance
+// criteria fitur pemisahan Subsidi/Komersial (UAT 2026-09-07) seluruhnya
+// actual-cost-based (ComputeAllocation) — jalur budgeted ini dipakai untuk
+// estimasi pra-BAST dan akan di-true-up oleh ComputeAllocation (actual) saat
+// penjualan. Memisah Hard budgeted per subkategori adalah pekerjaan susulan
+// bila klien butuh estimasi pra-BAST yang sudah presisi per Subsidi/Komersial.
 func (s *Service) ComputeBudgeted(ctx context.Context, tenantID, projectID uint64, pool domain.UnitCostBreakdown) ([]AllocationResult, AllocationBasis, error) {
 	cfg, err := s.configs.GetConfig(ctx, tenantID, projectID)
 	if err != nil {
@@ -245,7 +276,10 @@ func (s *Service) applyLandPoolOverride(ctx context.Context, tenantID, projectID
 		return results, nil
 	}
 
-	landResults := ComputeLandPool(landPoolCost, participants)
+	landResults, err := ComputeLandPool(landPoolCost, participants)
+	if err != nil {
+		return nil, err
+	}
 	landByUnit := make(map[uint64]domain.Money, len(landResults))
 	for _, lr := range landResults {
 		if lr.Kind == LandPoolParticipantUnit {
@@ -267,6 +301,43 @@ func (s *Service) applyLandPoolOverride(ctx context.Context, tenantID, projectID
 	return overridden, nil
 }
 
+// applyHardPoolOverride menimpa porsi Hard pada results dengan alokasi 3-pool
+// (Produksi Subsidi/Komersial/General — UAT 2026-09-07), sehingga biaya
+// Produksi Subsidi hanya membentuk HPP unit ber-TaxCategory Subsidi, dan
+// sebaliknya untuk Komersial; Sarana & Prasarana/Perizinan/legacy tetap ke
+// semua unit HPP-eligible.
+//
+// NO-OP (results dikembalikan apa adanya) bila WithHardPoolSource tidak
+// terpasang — perilaku sebelum fitur ini (satu pool Hard diratakan ke semua
+// unit) berlaku untuk semua proyek yang belum memakai hard_subcategory sama
+// sekali. TaxCategory unit HANYA diambil bila proyek benar-benar punya cost
+// entry Hard yang sudah diklasifikasikan Subsidi/Komersial — General-only
+// (pool Subsidi dan Komersial sama-sama nol) mereproduksi hasil identik
+// dengan Compute() tanpa perlu tahu TaxCategory unit sama sekali.
+func (s *Service) applyHardPoolOverride(ctx context.Context, tenantID, projectID uint64, results []AllocationResult) ([]AllocationResult, error) {
+	if s.hardPool == nil {
+		return results, nil
+	}
+
+	pools, err := s.hardPool.GetHardSubpools(ctx, tenantID, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("ambil hard subpools: %w", err)
+	}
+
+	var unitTax map[uint64]domain.TaxCategory
+	if !pools.ProduksiSubsidi.IsZero() || !pools.ProduksiKomersial.IsZero() {
+		if s.unitTaxCategories == nil {
+			return nil, fmt.Errorf("ada biaya Produksi Subsidi/Komersial tapi UnitTaxCategorySource tidak terpasang")
+		}
+		unitTax, err = s.unitTaxCategories.GetUnitTaxCategories(ctx, tenantID, projectID)
+		if err != nil {
+			return nil, fmt.Errorf("ambil tax category unit: %w", err)
+		}
+	}
+
+	return ComputeHardPool(pools, results, unitTax)
+}
+
 // ComputeLandStockShare mengembalikan porsi pool biaya Land yang teralokasi ke
 // peserta land_stock proyek itu sendiri — pasangan dari applyLandPoolOverride,
 // yang menghitung porsi ini secara internal tapi hanya mengekspos porsi per-unit.
@@ -286,7 +357,10 @@ func (s *Service) ComputeLandStockShare(ctx context.Context, tenantID, projectID
 		return domain.Money{}, false, fmt.Errorf("ambil peserta pool land: %w", err)
 	}
 
-	landResults := ComputeLandPool(landPoolCost, participants)
+	landResults, err := ComputeLandPool(landPoolCost, participants)
+	if err != nil {
+		return domain.Money{}, false, err
+	}
 	for _, lr := range landResults {
 		if lr.Kind == LandPoolParticipantLandStock {
 			return lr.Allocated, true, nil

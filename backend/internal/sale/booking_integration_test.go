@@ -403,8 +403,9 @@ func TestIntegration_Booking_ExpireForfeitAndCancelRefundable(t *testing.T) {
 	db.Raw("SELECT LAST_INSERT_ID()").Scan(&unitB)
 	svc := bkWire(db)
 
-	// A: expiry 10 Jul. B: diminta "refundable" (DIABAIKAN — rule klien: tidak
-	// ada refund), dibatalkan manual. Keduanya kebijakan BARU (recognized).
+	// A: default non-refundable, expiry 10 Jul (recognized, 4-2100).
+	// B: Item 3 — ditandai Refundable SAAT DIBUAT → jalur held (2-2100 Titipan
+	// Booking), dibatalkan manual nanti (bukan diabaikan lagi sejak Item 3).
 	bA, err := svc.CreateBooking(ctx, bkTenant, bkBookingReq(unitA, customerID, false, time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)))
 	if err != nil {
 		t.Fatalf("booking A: %v", err)
@@ -413,8 +414,15 @@ func TestIntegration_Booking_ExpireForfeitAndCancelRefundable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("booking B: %v", err)
 	}
-	if bB.Refundable {
-		t.Error("Refundable harus diabaikan (rule klien: tidak ada refund)")
+	if !bB.Refundable || bB.FeeDisposition != sale.FeeHeld {
+		t.Errorf("B = refundable=%v disposisi=%s, want refundable=true/held (Item 3)", bB.Refundable, bB.FeeDisposition)
+	}
+	// 4-2100 hanya A (fee B belum diakui pendapatan); 2-2100 = fee B (titipan).
+	if bal := bkCreditBalance(t, db, "4-2100"); bal != "5000000.0000" {
+		t.Errorf("saldo 4-2100 = %s, want 5000000.0000 (hanya A)", bal)
+	}
+	if bal := bkCreditBalance(t, db, "2-2100"); bal != "5000000.0000" {
+		t.Errorf("saldo 2-2100 = %s, want 5000000.0000 (titipan B)", bal)
 	}
 	journalsBefore := int64(0)
 	db.Raw("SELECT COUNT(*) FROM journal_entries WHERE tenant_id = ?", bkTenant).Scan(&journalsBefore)
@@ -442,22 +450,28 @@ func TestIntegration_Booking_ExpireForfeitAndCancelRefundable(t *testing.T) {
 		t.Errorf("sweep kedua = %d, want 0", n)
 	}
 
-	// ── Cancel B: TANPA jurnal, TANPA refund — pendapatan tetap ──────────────
+	// ── Cancel B (held+refundable): TANPA jurnal saat cancel — reklas/refund
+	// baru terjadi lewat CreateBookingRefund/PayRefund terpisah (belum dipicu
+	// di sini) ─────────────────────────────────────────────────────────────
 	gB, err := svc.CancelBooking(ctx, bkTenant, bB.ID, "buyer mundur", time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("CancelBooking B: %v", err)
 	}
-	if gB.Status != sale.BookingStatusCancelled || gB.FeeDisposition != sale.FeeRecognized || gB.ForfeitJournalID != nil {
-		t.Errorf("B = %s/%s, want cancelled/recognized tanpa jurnal", gB.Status, gB.FeeDisposition)
+	if gB.Status != sale.BookingStatusCancelled || gB.FeeDisposition != sale.FeePendingRefund || gB.ForfeitJournalID != nil {
+		t.Errorf("B = %s/%s, want cancelled/pending_refund tanpa jurnal forfeit", gB.Status, gB.FeeDisposition)
 	}
 	var journalsAfter int64
 	db.Raw("SELECT COUNT(*) FROM journal_entries WHERE tenant_id = ?", bkTenant).Scan(&journalsAfter)
 	if journalsAfter != journalsBefore {
-		t.Errorf("expire/cancel rule baru tidak boleh menulis jurnal: %d → %d", journalsBefore, journalsAfter)
+		t.Errorf("cancel booking held→pending_refund tidak boleh menulis jurnal (reklas baru terjadi di CreateBookingRefund): %d → %d", journalsBefore, journalsAfter)
 	}
-	// Pendapatan Booking utuh (A+B = 10jt), tidak ada reversal saat batal.
-	if bal := bkCreditBalance(t, db, "4-2100"); bal != "10000000.0000" {
-		t.Errorf("saldo 4-2100 = %s, want 10000000.0000 (pendapatan tetap)", bal)
+	// Pendapatan A utuh (recognized, final); titipan B TETAP di 2-2100 sampai
+	// diproses refund (CreateBookingRefund/PayRefund) — belum dipicu di sini.
+	if bal := bkCreditBalance(t, db, "4-2100"); bal != "5000000.0000" {
+		t.Errorf("saldo 4-2100 = %s, want 5000000.0000 (hanya A, final)", bal)
+	}
+	if bal := bkCreditBalance(t, db, "2-2100"); bal != "5000000.0000" {
+		t.Errorf("saldo 2-2100 = %s, want 5000000.0000 (titipan B menunggu refund)", bal)
 	}
 
 	// ── JALUR LEGACY (baris histori 'held'): forfeit lama tetap jalan ─────────
@@ -480,7 +494,9 @@ func TestIntegration_Booking_ExpireForfeitAndCancelRefundable(t *testing.T) {
 	if bal := bkCreditBalance(t, db, "4-2000"); bal != "5000000.0000" {
 		t.Errorf("saldo 4-2000 = %s, want 5000000.0000 (forfeit legacy C)", bal)
 	}
-	if bal := bkCreditBalance(t, db, "2-2100"); bal != "0.0000" {
-		t.Errorf("saldo 2-2100 = %s, want 0.0000 (titipan legacy keluar)", bal)
+	// 2-2100 = titipan B yang masih pending_refund (Item 3, belum diproses
+	// CreateBookingRefund/PayRefund) — titipan legacy C sudah keluar (forfeit).
+	if bal := bkCreditBalance(t, db, "2-2100"); bal != "5000000.0000" {
+		t.Errorf("saldo 2-2100 = %s, want 5000000.0000 (titipan B pending_refund, titipan legacy C sudah keluar)", bal)
 	}
 }

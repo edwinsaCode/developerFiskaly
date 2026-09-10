@@ -50,7 +50,7 @@ export function FixedAssetList({ assets, categories }: { assets: FixedAsset[]; c
             Belum ada aset tetap yang dicatat.
           </p>
           <p className="text-xs text-text-tertiary mt-1 max-w-prose">
-            Aset tetap — kendaraan, peralatan kantor, dan sejenisnya yang dipakai
+            Aset tetap — kendaraan, peralatan kantor, gedung/bangunan, dan sejenisnya yang dipakai
             lebih dari satu tahun — dicatat lewat halaman Transaksi Pengeluaran
             dengan Jenis Pembelian "Aset Tetap". Setiap perolehan langsung terposting
             dan muncul di sini beserta jadwal penyusutannya.

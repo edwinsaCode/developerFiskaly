@@ -23,6 +23,12 @@ const (
 	// pemanggil charge.Service; billing tidak menghitung sendiri). Maksimal
 	// satu invoice REALISASI unpaid per grup (pola KEKURANGAN).
 	TypeRealisasi InvoiceType = "REALISASI"
+	// TypeKelebihanTanah: tagihan piutang Kelebihan Tanah (payment schedule
+	// type=land, migrasi 000095). Sebelumnya scheduleTypeToInvoiceType tidak
+	// punya case untuk "land" sehingga jatuh ke default TERMIN — invoice
+	// tercetak "Cicilan / Termin" padahal tagihannya tanah, bukan cicilan
+	// rumah. Ditemukan saat mengaudit UAT 2026-09-04 (kasus X-01).
+	TypeKelebihanTanah InvoiceType = "KELEBIHAN_TANAH"
 
 	StatusIssued    InvoiceStatus = "issued"
 	StatusPaid      InvoiceStatus = "paid"
@@ -104,6 +110,8 @@ func scheduleTypeToInvoiceType(t string) InvoiceType {
 		return TypeDP
 	case "final":
 		return TypePelunasan
+	case "land":
+		return TypeKelebihanTanah
 	default:
 		return TypeTermin
 	}

@@ -24,9 +24,12 @@ type LedgerQuerier interface {
 }
 
 // PLReader menyediakan data mentah Laba Rugi dari database.
+// from (Item 5, filter tanggal Neraca & L/R): nil = tanpa batas bawah (life-to-date
+// sejak tutup buku terakhir, perilaku lama); non-nil = hanya jurnal dgn
+// je.date >= from yang dihitung.
 type PLReader interface {
-	GetProjectPLRows(ctx context.Context, tenantID, projectID uint64, asOf time.Time) ([]PLRawRow, error)
-	GetConsolidatedPLRows(ctx context.Context, tenantID uint64, asOf time.Time) ([]PLRawRow, error)
+	GetProjectPLRows(ctx context.Context, tenantID, projectID uint64, from *time.Time, asOf time.Time) ([]PLRawRow, error)
+	GetConsolidatedPLRows(ctx context.Context, tenantID uint64, from *time.Time, asOf time.Time) ([]PLRawRow, error)
 }
 
 // TaxReader (S7): pembaca KANONIK laporan pajak — diimplementasi tax.Service
@@ -81,6 +84,22 @@ type LegacyReceivableReader interface {
 	ReceivableRows(ctx context.Context, tenantID uint64) ([]receivable.Row, error)
 }
 
+// LandReceivableReader menyediakan baris PIUTANG KELEBIHAN TANAH (produk
+// tambahan dari internal/land, bukan charge_items) — sumber SourceAddon
+// KEDUA, terpisah dari RealizationReceivableReader (yang memuat addon lama
+// berbasis charge_items). Diimplementasi oleh land.Service, dipasang lewat
+// SetLandReceivable.
+//
+// Bug ditemukan 2026-08-31: land_sales sebelumnya tidak pernah dibaca oleh
+// mesin AR sama sekali — piutang Kelebihan Tanah benar tercatat di jurnal
+// (GL 1-2000) tapi tidak pernah muncul di layar Piutang Customer/collection
+// dashboard. Belum ada pelacakan pembayaran per land_sale (lihat komentar di
+// land/receivable.go) — baris ini selalu tampil "belum dibayar" sepenuhnya
+// sampai mekanisme itu dibangun.
+type LandReceivableReader interface {
+	ReceivableRows(ctx context.Context, tenantID uint64) ([]receivable.Row, error)
+}
+
 // ── Service ───────────────────────────────────────────────────────────────────
 
 // Service mengelola laporan keuangan.
@@ -93,6 +112,7 @@ type Service struct {
 	house       HouseReceivableReader      // W-8: piutang harga rumah (WAJIB di produksi)
 	realization RealizationReceivableReader // W-4: tagihan biaya realisasi (opsional)
 	legacy      LegacyReceivableReader      // W-7: piutang proyek lama (opsional)
+	land        LandReceivableReader        // piutang Kelebihan Tanah (opsional, 2026-08-31)
 	finance     ContractFinanceReader       // R4: TotalAdvance kanonik (opsional)
 	tax         TaxReader                   // S7: laporan pajak kanonik (opsional)
 }
@@ -126,6 +146,14 @@ func (s *Service) WithLegacyReader(r LegacyReceivableReader) *Service {
 	return s
 }
 
+// WithLandReader memasang sumber piutang Kelebihan Tanah. Opsional dengan
+// alasan yang sama seperti realisasi/legacy: tenant tanpa modul Kelebihan
+// Tanah aktif tetap mendapat laporan yang benar tanpa memasangnya.
+func (s *Service) WithLandReader(r LandReceivableReader) *Service {
+	s.land = r
+	return s
+}
+
 // WithContractFinance (R4) memasang sumber kanonik keuangan kontrak
 // (sale.Service) — dipakai GetSalesPipeline utk TotalAdvance.
 func (s *Service) WithContractFinance(f ContractFinanceReader) *Service {
@@ -154,6 +182,33 @@ func (s *Service) WithTaxReader(t TaxReader) *Service {
 // Balance check: TotalAset == TotalKewajiban + TotalEkuitas + LabaRugiTahunBerjalan
 // Selalu true selama semua jurnal diposting balanced (Σ debit == Σ kredit).
 func ComputeNeraca(rows []ledger.TrialBalanceRow, asOf time.Time) NeracaReport {
+	return computeNeraca(rows, asOf, nil, nil)
+}
+
+// ComputeNeracaRange (Item 5): sama seperti ComputeNeraca (Aset/Kewajiban/
+// Ekuitas/LabaRugiTahunBerjalan/IsBalanced tetap life-to-date s/d asOf, TIDAK
+// PERNAH berubah oleh from), plus LabaRugiPeriodeTerpilih — Laba Rugi dihitung
+// dari jendela [from, asOf] via ComputePL (reuse mesin P&L yang sama, bukan
+// engine baru), MURNI sebagai baris informasi tambahan. Mencampur P&L
+// berjendela ke dalam identitas neraca akan merusak keseimbangan Aset =
+// Kewajiban+Ekuitas sebesar laba yang diakui sebelum `from` (kontra-akun
+// asetnya, mis. akumulasi penyusutan, tetap kumulatif) — karena itu jendela
+// TIDAK PERNAH menggantikan LabaRugiTahunBerjalan.
+func ComputeNeracaRange(rows []ledger.TrialBalanceRow, plRows []PLRawRow, from, asOf time.Time) NeracaReport {
+	pl := ComputePL(plRows, nil, asOf)
+	periodeTerpilih, err := domain.NewMoney(pl.LabaRugiBersih)
+	if err != nil {
+		// pl.LabaRugiBersih selalu string decimal valid (output domain.Money.String()) —
+		// tidak pernah gagal parse di jalur normal.
+		periodeTerpilih = domain.Zero
+	}
+	return computeNeraca(rows, asOf, &from, &periodeTerpilih)
+}
+
+// computeNeraca adalah inti bersama ComputeNeraca/ComputeNeracaRange.
+// periodeTerpilih!=nil hanya mengisi field informasi LabaRugiPeriodeTerpilih —
+// TIDAK PERNAH memengaruhi LabaRugiTahunBerjalan/TotalEkuitas/IsBalanced.
+func computeNeraca(rows []ledger.TrialBalanceRow, asOf time.Time, from *time.Time, periodeTerpilih *domain.Money) NeracaReport {
 	var totalAset, totalKewajiban, totalEkuitas, totalPendapatan, totalBeban domain.Money
 	var asetLines, kewajibanLines, ekuitasLines []NeracaLine
 
@@ -193,8 +248,9 @@ func ComputeNeraca(rows []ledger.TrialBalanceRow, asOf time.Time) NeracaReport {
 	labaRugi := totalPendapatan.Sub(totalBeban)
 	totalKE := totalKewajiban.Add(totalEkuitas).Add(labaRugi)
 
-	return NeracaReport{
+	report := NeracaReport{
 		AsOf:                  asOf,
+		From:                  from,
 		Aset:                  asetLines,
 		Kewajiban:             kewajibanLines,
 		Ekuitas:               ekuitasLines,
@@ -206,6 +262,10 @@ func ComputeNeraca(rows []ledger.TrialBalanceRow, asOf time.Time) NeracaReport {
 		TotalKewajibanEkuitas: totalKE.String(),
 		IsBalanced:            totalAset.Equal(totalKE),
 	}
+	if periodeTerpilih != nil {
+		report.LabaRugiPeriodeTerpilih = periodeTerpilih.String()
+	}
+	return report
 }
 
 // sumByPaymentType (P3, item A): jumlahkan baris RevenueByPaymentTypeRow ke
@@ -322,31 +382,47 @@ func ComputePL(rows []PLRawRow, projectID *uint64, asOf time.Time) PLReport {
 
 // ── Service methods ───────────────────────────────────────────────────────────
 
-func (s *Service) GetNeraca(ctx context.Context, tenantID uint64, asOf time.Time) (*NeracaReport, error) {
+// GetNeraca menghasilkan Neraca per asOf. Akun neraca (1-/2-/3-) SELALU
+// kumulatif s/d asOf — neraca adalah snapshot per tanggal, bukan rentang.
+// from (Item 5, opsional): saat diisi, baris "Laba Rugi Tahun Berjalan"
+// dihitung ulang dari jendela [from, asOf] (reuse ComputePL) menggantikan
+// default life-to-date sejak tutup buku terakhir — dipakai saat user memilih
+// Start Date pada filter Neraca. from=nil = perilaku lama (tanpa perubahan).
+func (s *Service) GetNeraca(ctx context.Context, tenantID uint64, from *time.Time, asOf time.Time) (*NeracaReport, error) {
 	tb, err := s.ledger.TrialBalance(ctx, tenantID, asOf)
 	if err != nil {
 		return nil, fmt.Errorf("reporting: GetNeraca: %w", err)
 	}
-	neraca := ComputeNeraca(tb.Rows, asOf)
+	if from == nil {
+		neraca := ComputeNeraca(tb.Rows, asOf)
+		return &neraca, nil
+	}
+	plRows, err := s.pl.GetConsolidatedPLRows(ctx, tenantID, from, asOf)
+	if err != nil {
+		return nil, fmt.Errorf("reporting: GetNeraca: %w", err)
+	}
+	neraca := ComputeNeracaRange(tb.Rows, plRows, *from, asOf)
 	return &neraca, nil
 }
 
-func (s *Service) GetProjectPL(ctx context.Context, tenantID, projectID uint64, asOf time.Time) (*PLReport, error) {
-	rows, err := s.pl.GetProjectPLRows(ctx, tenantID, projectID, asOf)
+func (s *Service) GetProjectPL(ctx context.Context, tenantID, projectID uint64, from *time.Time, asOf time.Time) (*PLReport, error) {
+	rows, err := s.pl.GetProjectPLRows(ctx, tenantID, projectID, from, asOf)
 	if err != nil {
 		return nil, fmt.Errorf("reporting: GetProjectPL: %w", err)
 	}
 	pid := projectID
 	report := ComputePL(rows, &pid, asOf)
+	report.From = from
 	return &report, nil
 }
 
-func (s *Service) GetKonsolidasiPL(ctx context.Context, tenantID uint64, asOf time.Time) (*PLReport, error) {
-	rows, err := s.pl.GetConsolidatedPLRows(ctx, tenantID, asOf)
+func (s *Service) GetKonsolidasiPL(ctx context.Context, tenantID uint64, from *time.Time, asOf time.Time) (*PLReport, error) {
+	rows, err := s.pl.GetConsolidatedPLRows(ctx, tenantID, from, asOf)
 	if err != nil {
 		return nil, fmt.Errorf("reporting: GetKonsolidasiPL: %w", err)
 	}
 	report := ComputePL(rows, nil, asOf)
+	report.From = from
 	return &report, nil
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"esaproperti/internal/domain"
 	"esaproperti/internal/ledger"
+	"esaproperti/internal/tax"
 )
 
 // GORMRepository implements Store against MySQL via GORM. Every query is
@@ -73,12 +74,13 @@ func FindPoolByProjectTx(ctx context.Context, tx *gorm.DB, tenantID, projectID u
 	return &pool, nil
 }
 
-func (r *GORMRepository) UpdatePoolQuantityAndPrice(ctx context.Context, tenantID, id uint64, totalQuantityM2 decimal.Decimal, unitPrice domain.Money) error {
+func (r *GORMRepository) UpdatePoolQuantityAndPrice(ctx context.Context, tenantID, id uint64, totalQuantityM2 decimal.Decimal, unitPrice, purchasePrice domain.Money) error {
 	res := r.db.WithContext(ctx).Model(&LandStock{}).
 		Where("id = ? AND tenant_id = ?", id, tenantID).
 		Updates(map[string]any{
 			"total_quantity_m2": totalQuantityM2,
 			"unit_price":        unitPrice,
+			"purchase_price":    purchasePrice,
 		})
 	if res.Error != nil {
 		if isCheckConstraintViolation(res.Error) {
@@ -331,14 +333,31 @@ func RecordAkadTx(ctx context.Context, tx *gorm.DB, tenantID uint64, in RecordAk
 		txLedgerRepo := ledger.NewGORMRepository(tx)
 		txPosting := ledger.NewPostingService(txLedgerRepo, txLedgerRepo).WithPeriodChecker(txLedgerRepo)
 
+		// Dokumen jurnal pendapatan HARUS COA-driven, bukan hardcoded DocCashIn:
+		// jalur standalone (land.Service.RecordAkad) mendebit Kas/Bank langsung
+		// (Event 3 land — lihat komentar di akad.go) dan BUTUH BKM; jalur
+		// bundled (PrepareBundledAkad, dipanggil dari sale.Execute) mendebit
+		// Piutang Customer tetap (1-2000) dan TIDAK menyentuh kas sama sekali,
+		// pola identik Event 3 rumah (buildEvent3Lines di sale/repository.go,
+		// di-posting tanpa DocumentSpec). Hardcode DocCashIn dulu memaksa BKM
+		// senilai Rp0 terbit untuk jalur bundled, menghabiskan nomor dokumen
+		// untuk pergerakan kas yang tak pernah terjadi. DefaultCashSpec
+		// menentukan lewat AccountInRole(RoleCashBank) — satu otoritas yang
+		// sama dipakai enforceDocument (INV-DOC-1) — sehingga kedua jalur
+		// selalu konsisten dengan akun apa pun yang benar-benar didebit.
+		revenueLines := toLedgerLines(in.RevenueLines)
+		revenueDocSpec, err := txPosting.DefaultCashSpec(ctx, tenantID, revenueLines)
+		if err != nil {
+			return fmt.Errorf("tentukan dokumen jurnal pendapatan Akad: %w", err)
+		}
 		revEntry, err := txPosting.CreateAndPost(ctx, ledger.CreateJournalRequest{
 			TenantID:    tenantID,
 			Date:        in.RecognitionDate,
 			Description: fmt.Sprintf("Akad Kelebihan Tanah proyek %d", in.ProjectID),
 			Source:      "land",
 			CreatedBy:   in.CreatedBy,
-			Lines:       toLedgerLines(in.RevenueLines),
-			Document:    ledger.DocumentSpec{TypeCode: ledger.DocCashIn},
+			Lines:       revenueLines,
+			Document:    revenueDocSpec,
 		})
 		if err != nil {
 			return fmt.Errorf("jurnal pendapatan Akad: %w", err)
@@ -360,6 +379,27 @@ func RecordAkadTx(ctx context.Context, tx *gorm.DB, tenantID uint64, in RecordAk
 			cogsJournalID = &cogsEntry.ID
 		}
 
+		// ── PPh Final Pengalihan (Event 5a) — otomatis, DALAM transaksi Akad
+		// yang sama, pola identik unit/BAST (AccruePPhFinalInTx). in.PPhPlan
+		// == nil bila tidak ada resolver PPh terpasang di layer Service —
+		// backward-compatible dengan land_sales historis dan test yang tidak
+		// peduli pajak.
+		var pphJournalID *uint64
+		if in.PPhPlan != nil {
+			pphEntry, err := txPosting.CreateAndPost(ctx, ledger.CreateJournalRequest{
+				TenantID:    tenantID,
+				Date:        in.RecognitionDate,
+				Description: fmt.Sprintf("Akrual PPh Final Pengalihan Event 5a — Kelebihan Tanah proyek %d", in.ProjectID),
+				Source:      "land",
+				CreatedBy:   in.CreatedBy,
+				Lines:       taxLinesToLedgerLines(in.PPhPlan.JournalLines()),
+			})
+			if err != nil {
+				return fmt.Errorf("jurnal PPh Final Akad: %w", err)
+			}
+			pphJournalID = &pphEntry.ID
+		}
+
 		recogDate := in.RecognitionDate
 		sale = LandSale{
 			TenantID:           tenantID,
@@ -379,10 +419,18 @@ func RecordAkadTx(ctx context.Context, tx *gorm.DB, tenantID uint64, in RecordAk
 			Status:             LandSaleStatusAkad,
 			RevenueJournalID:   &revEntry.ID,
 			CogsJournalID:      cogsJournalID,
+			PPhJournalID:       pphJournalID,
 			CreatedBy:          in.CreatedBy,
 		}
 		if err := tx.WithContext(ctx).Create(&sale).Error; err != nil {
 			return fmt.Errorf("simpan land_sales: %w", err)
+		}
+
+		if in.PPhPlan != nil {
+			obligation := in.PPhPlan.BuildObligation(tenantID, *pphJournalID, &sale.ID)
+			if err := tx.WithContext(ctx).Create(obligation).Error; err != nil {
+				return fmt.Errorf("simpan tax obligation PPh Final: %w", err)
+			}
 		}
 
 		if in.ReservationID != nil {
@@ -458,6 +506,33 @@ func CancelLandSaleTx(ctx context.Context, tx *gorm.DB, tenantID, id uint64, in 
 			return ErrLandSaleNotAkad
 		}
 
+		// Piutang Kelebihan Tanah (payment_schedules.land_sale_id, migrasi
+		// 000095 — land jadi AR anchor sah, pola identik unit) TIDAK BOLEH
+		// ditinggalkan begitu land_sale-nya batal: kalau dibiarkan, baris itu
+		// terus tampil sebagai outstanding di Penerimaan/collection walau
+		// land_sale-nya sudah cancelled (phantom AR). Guard PaidAmount>0 di
+		// bawah hanya berlaku jalur standalone (AllowPaidSchedule=false) —
+		// jalur bundled (internal/cancellation) sudah menghitung
+		// refund/settlement dana buyer secara utuh dan mengoper
+		// AllowPaidSchedule=true.
+		var linkedSchedule struct {
+			ID         uint64
+			PaidAmount domain.Money
+		}
+		lsErr := tx.WithContext(ctx).
+			Table("payment_schedules").
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id, paid_amount").
+			Where("tenant_id = ? AND land_sale_id = ? AND status <> ?", tenantID, sale.ID, "superseded").
+			Take(&linkedSchedule).Error
+		hasLinkedSchedule := lsErr == nil
+		if lsErr != nil && !errors.Is(lsErr, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("lock payment_schedules land_sale %d: %w", sale.ID, lsErr)
+		}
+		if hasLinkedSchedule && linkedSchedule.PaidAmount.GreaterThan(domain.Zero) && !in.AllowPaidSchedule {
+			return ErrLandSaleHasReceivedPayment
+		}
+
 		var pool LandStock
 		if err := tx.WithContext(ctx).
 			Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -490,6 +565,24 @@ func CancelLandSaleTx(ctx context.Context, tx *gorm.DB, tenantID, id uint64, in 
 			cogsReversalID = &cogsRev.ID
 		}
 
+		// PPh Final Pengalihan: balik jurnal akrual + tandai obligation
+		// cancelled — konsisten dgn pembalikan pendapatan/HPP di atas. nil
+		// bila land_sale ini historis (dibuat sebelum fitur ini) atau resolver
+		// PPh tidak terpasang saat Akad — tidak ada yang perlu dibalik.
+		var pphReversalID *uint64
+		if sale.PPhJournalID != nil {
+			pphRev, err := txPosting.Reverse(ctx, tenantID, *sale.PPhJournalID, in.CancelDate)
+			if err != nil {
+				return fmt.Errorf("balik jurnal PPh Final Akad: %w", err)
+			}
+			pphReversalID = &pphRev.ID
+			if err := tx.WithContext(ctx).Model(&tax.TaxObligation{}).
+				Where("tenant_id = ? AND land_sale_id = ?", tenantID, sale.ID).
+				Update("status", tax.ObligationStatusCancelled).Error; err != nil {
+				return fmt.Errorf("update status obligation PPh Final: %w", err)
+			}
+		}
+
 		upd := tx.WithContext(ctx).Model(&LandStock{}).
 			Where("id = ? AND tenant_id = ? AND sold_quantity_m2 >= ?", sale.LandStockID, tenantID, sale.QuantityM2).
 			Update("sold_quantity_m2", gorm.Expr("sold_quantity_m2 - ?", sale.QuantityM2))
@@ -509,11 +602,20 @@ func CancelLandSaleTx(ctx context.Context, tx *gorm.DB, tenantID, id uint64, in 
 			"cancelled_by":                in.CancelledBy,
 			"revenue_reversal_journal_id": revReversalID,
 			"cogs_reversal_journal_id":    cogsReversalID,
+			"pph_reversal_journal_id":     pphReversalID,
 		}
 		if err := tx.WithContext(ctx).Model(&LandSale{}).
 			Where("id = ? AND tenant_id = ?", id, tenantID).
 			Updates(updates).Error; err != nil {
 			return fmt.Errorf("update land_sales (cancelled): %w", err)
+		}
+
+		if hasLinkedSchedule {
+			if err := tx.WithContext(ctx).Table("payment_schedules").
+				Where("id = ? AND tenant_id = ?", linkedSchedule.ID, tenantID).
+				Update("status", "superseded").Error; err != nil {
+				return fmt.Errorf("supersede jadwal piutang Kelebihan Tanah: %w", err)
+			}
 		}
 
 		sale.Status = LandSaleStatusCancelled
@@ -522,6 +624,7 @@ func CancelLandSaleTx(ctx context.Context, tx *gorm.DB, tenantID, id uint64, in 
 		sale.CancelledBy = in.CancelledBy
 		sale.RevenueReversalJournalID = revReversalID
 		sale.CogsReversalJournalID = cogsReversalID
+		sale.PPhReversalJournalID = pphReversalID
 		return nil
 	}()
 	if err != nil {
@@ -554,6 +657,46 @@ func (r *GORMRepository) ListLandSalesByProject(ctx context.Context, tenantID, p
 		return nil, fmt.Errorf("ListLandSalesByProject: %w", err)
 	}
 	return list, nil
+}
+
+// ListReceivableLandSales returns every recognized (status=akad) land_sale
+// tenant-wide, joined to its buyer and — bila terhubung lewat reservation →
+// sale_contracts (kontrak bundled, kelebihan-tanah-booking-integration-2026-08)
+// — unit-nya. sale_contracts/units ikut LEFT JOIN karena sebuah land_sale sah
+// TANPA kontrak (dijual berdiri sendiri, bukan bundled dengan unit rumah).
+//
+// Sumber untuk land.Service.ReceivableRows (bug ditemukan 2026-08-31: baris
+// ini sebelumnya tidak pernah dibaca AR sama sekali — lihat
+// internal/land/receivable.go).
+func (r *GORMRepository) ListReceivableLandSales(ctx context.Context, tenantID uint64) ([]LandSaleReceivable, error) {
+	const q = `
+SELECT
+  ls.id                AS id,
+  ls.quantity_m2        AS quantity_m2,
+  ls.gross_amount        AS gross_amount,
+  ls.recognition_date    AS recognition_date,
+  c.name                AS customer_name,
+  c.phone                AS customer_phone,
+  c.email                AS customer_email,
+  sc.id                  AS contract_id,
+  sc.unit_id             AS unit_id,
+  u.code                 AS unit_code,
+  ps.paid_amount         AS paid_amount,
+  ps.status              AS schedule_status
+FROM land_sales ls
+JOIN customers c ON c.id = ls.customer_id AND c.tenant_id = ls.tenant_id
+LEFT JOIN sale_contracts sc ON sc.land_reservation_id = ls.reservation_id AND sc.tenant_id = ls.tenant_id
+LEFT JOIN units u ON u.id = sc.unit_id AND u.tenant_id = ls.tenant_id
+LEFT JOIN payment_schedules ps ON ps.land_sale_id = ls.id AND ps.tenant_id = ls.tenant_id
+  AND ps.status != 'superseded'
+WHERE ls.tenant_id = ? AND ls.status = 'akad'
+ORDER BY ls.id ASC`
+
+	var out []LandSaleReceivable
+	if err := r.db.WithContext(ctx).Raw(q, tenantID).Scan(&out).Error; err != nil {
+		return nil, fmt.Errorf("ListReceivableLandSales: %w", err)
+	}
+	return out, nil
 }
 
 func (r *GORMRepository) FindAccountIDByCode(ctx context.Context, tenantID uint64, code string) (uint64, error) {
@@ -600,6 +743,24 @@ func toLedgerLines(lines []JournalLineInput) []ledger.LineInput {
 			Debit:       l.Debit,
 			Credit:      l.Credit,
 			ProjectID:   l.ProjectID,
+			Description: l.Description,
+		}
+	}
+	return out
+}
+
+// taxLinesToLedgerLines converts tax.JournalLineInput (which carries UnitID,
+// unlike land's own JournalLineInput) into ledger.LineInput for posting the
+// PPh Final journal via land's own txPosting within RecordAkadTx.
+func taxLinesToLedgerLines(lines []tax.JournalLineInput) []ledger.LineInput {
+	out := make([]ledger.LineInput, len(lines))
+	for i, l := range lines {
+		out[i] = ledger.LineInput{
+			AccountID:   l.AccountID,
+			Debit:       l.Debit,
+			Credit:      l.Credit,
+			ProjectID:   l.ProjectID,
+			UnitID:      l.UnitID,
 			Description: l.Description,
 		}
 	}

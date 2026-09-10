@@ -1,6 +1,7 @@
 package tax
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -68,10 +69,10 @@ func (a RuleAppliesTo) Valid() bool {
 // (bukan DPP PPN), dan bahwa pajak ini bersifat final (tidak dapat dikreditkan).
 // Konfirmasi juga perlakuan untuk struktur HGB-80/leasehold ke pembeli asing (LITHOS).
 type TaxRate struct {
-	ID       uint64 `gorm:"primaryKey;autoIncrement" json:"id"`
-	TenantID uint64 `gorm:"not null;index"           json:"-"`
-	RateCode string `gorm:"not null;size:50"         json:"rate_code"`
-	Name     string `gorm:"size:200"                 json:"name"`
+	ID       uint64          `gorm:"primaryKey;autoIncrement" json:"id"`
+	TenantID uint64          `gorm:"not null;index"           json:"-"`
+	RateCode string          `gorm:"not null;size:50"         json:"rate_code"`
+	Name     string          `gorm:"size:200"                 json:"name"`
 	Rate     decimal.Decimal `gorm:"type:DECIMAL(10,6);not null" json:"rate"` // e.g. 0.025000
 	// AppliesTo: all|subsidi|komersial — dicocokkan dgn projects.tax_category.
 	AppliesTo RuleAppliesTo `gorm:"column:applies_to;size:20;default:'all'" json:"applies_to"`
@@ -131,24 +132,28 @@ const (
 // TaxAmount = tarif × nilai pengalihan, dibulatkan ke rupiah bulat (Invariant #2).
 // Rate di-snapshot pada saat akrual — perubahan tarif di masa depan tidak mengubah angka ini.
 type TaxObligation struct {
-	ID              uint64              `gorm:"primaryKey;autoIncrement"                        json:"id"`
-	TenantID        uint64              `gorm:"not null;index"                                  json:"-"`
-	UnitID          *uint64             `gorm:"index"                                           json:"unit_id,omitempty"`
-	ProjectID       *uint64             `gorm:"index"                                           json:"project_id,omitempty"`
-	RateCode        string              `gorm:"not null;size:50"                                json:"rate_code"`
-	TransferValue   domain.Money        `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'"   json:"transfer_value"` // nilai pengalihan bruto
-	Rate            decimal.Decimal     `gorm:"type:DECIMAL(10,6);not null"                     json:"rate"`           // snapshot tarif saat akrual
-	TaxAmount       domain.Money        `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'"   json:"tax_amount"`     // = round(transferValue × rate)
-	Status          TaxObligationStatus `gorm:"not null;size:20;default:'outstanding'"          json:"status"`
-	AccrualDate     time.Time           `gorm:"not null"                                        json:"accrual_date"`
-	JournalEntryID  uint64              `gorm:"not null;index"                                  json:"journal_entry_id"`
+	ID        uint64  `gorm:"primaryKey;autoIncrement"                        json:"id"`
+	TenantID  uint64  `gorm:"not null;index"                                  json:"-"`
+	UnitID    *uint64 `gorm:"index"                                           json:"unit_id,omitempty"`
+	ProjectID *uint64 `gorm:"index"                                           json:"project_id,omitempty"`
+	// LandSaleID: akrual PPh Final atas Kelebihan Tanah (standalone land sale,
+	// bukan unit). Mutually exclusive dengan UnitID — satu obligation berasal
+	// dari SATU sumber pengalihan.
+	LandSaleID     *uint64             `gorm:"index"                                           json:"land_sale_id,omitempty"`
+	RateCode       string              `gorm:"not null;size:50"                                json:"rate_code"`
+	TransferValue  domain.Money        `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'"   json:"transfer_value"` // nilai pengalihan bruto
+	Rate           decimal.Decimal     `gorm:"type:DECIMAL(10,6);not null"                     json:"rate"`          // snapshot tarif saat akrual
+	TaxAmount      domain.Money        `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'"   json:"tax_amount"`     // = round(transferValue × rate)
+	Status         TaxObligationStatus `gorm:"not null;size:20;default:'outstanding'"          json:"status"`
+	AccrualDate    time.Time           `gorm:"not null"                                        json:"accrual_date"`
+	JournalEntryID uint64              `gorm:"not null;index"                                  json:"journal_entry_id"`
 	// Provenance rule (Increment 4 + hardening): rule mana + REVISI konfigurasi
 	// berapa yang dipakai + snapshot cakupannya. NULL/'' = akrual legacy.
-	TaxRuleID       *uint64 `json:"tax_rule_id,omitempty"`
-	TaxRuleRevision *int    `json:"tax_rule_revision,omitempty"`
-	AppliesTo       string  `gorm:"column:applies_to;size:20;default:''" json:"applies_to,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	TaxRuleID       *uint64   `json:"tax_rule_id,omitempty"`
+	TaxRuleRevision *int      `json:"tax_rule_revision,omitempty"`
+	AppliesTo       string    `gorm:"column:applies_to;size:20;default:''" json:"applies_to,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 func (TaxObligation) TableName() string { return "tax_obligations" }
@@ -220,6 +225,7 @@ type SetTaxRateRequest struct {
 type TaxReportItem struct {
 	ObligationID  uint64              `json:"obligation_id"`
 	UnitID        *uint64             `json:"unit_id,omitempty"`
+	LandSaleID    *uint64             `json:"land_sale_id,omitempty"`
 	RateCode      string              `json:"rate_code"` // S7: dipakai reporting (satu pembaca)
 	TransferValue string              `json:"transfer_value"`
 	Rate          string              `json:"rate"`
@@ -228,14 +234,70 @@ type TaxReportItem struct {
 	AccrualDate   time.Time           `json:"accrual_date"`
 }
 
+// ── AccrualPlan — komputasi murni akrual PPh Final ────────────────────────────
+
+// AccrualPlan adalah hasil resolusi PPh Final (tarif, rule, formula, akun)
+// TANPA membuat jurnal atau obligation — komputasi murni, tidak menyentuh DB
+// atau ledger. Ini SATU-SATUNYA tempat logika akrual PPh Final hidup: dipakai
+// baik oleh Service.AccrueTax (unit/BAST) maupun caller lain (mis. Land
+// Kelebihan Tanah RecordAkad) yang perlu memposting jurnal identik di dalam
+// transaksinya sendiri — tanpa membuat "tax engine kedua".
+type AccrualPlan struct {
+	RateCode        string
+	TransferValue   domain.Money
+	Rate            decimal.Decimal
+	TaxAmount       domain.Money
+	AccrualDate     time.Time
+	DebitAccountID  uint64 // akun Beban PPh Final (Dr)
+	CreditAccountID uint64 // akun Hutang PPh Final (Cr)
+	UnitID          *uint64
+	ProjectID       *uint64
+	TaxRuleID       *uint64
+	TaxRuleRevision *int
+	AppliesTo       string
+}
+
+// JournalLines returns the balanced Dr Beban / Cr Hutang PPh Final lines for
+// this plan — identical shape/description to the unit/BAST accrual journal.
+func (p *AccrualPlan) JournalLines() []JournalLineInput {
+	return []JournalLineInput{
+		{AccountID: p.DebitAccountID, Debit: p.TaxAmount, UnitID: p.UnitID, ProjectID: p.ProjectID,
+			Description: fmt.Sprintf("PPh Final pengalihan — tarif %s", p.Rate.String())},
+		{AccountID: p.CreditAccountID, Credit: p.TaxAmount, UnitID: p.UnitID, ProjectID: p.ProjectID,
+			Description: fmt.Sprintf("Hutang PPh Final pengalihan — tarif %s", p.Rate.String())},
+	}
+}
+
+// BuildObligation builds the TaxObligation row for this plan once the caller
+// has created+posted the journal (journalID) inside its own transaction.
+// landSaleID is nil for unit-originated accruals.
+func (p *AccrualPlan) BuildObligation(tenantID, journalID uint64, landSaleID *uint64) *TaxObligation {
+	return &TaxObligation{
+		TenantID:        tenantID,
+		UnitID:          p.UnitID,
+		ProjectID:       p.ProjectID,
+		LandSaleID:      landSaleID,
+		RateCode:        p.RateCode,
+		TransferValue:   p.TransferValue,
+		Rate:            p.Rate,
+		TaxAmount:       p.TaxAmount,
+		Status:          ObligationStatusOutstanding,
+		AccrualDate:     p.AccrualDate,
+		JournalEntryID:  journalID,
+		TaxRuleID:       p.TaxRuleID,
+		TaxRuleRevision: p.TaxRuleRevision,
+		AppliesTo:       p.AppliesTo,
+	}
+}
+
 // TaxReport adalah laporan kewajiban pajak per periode.
 type TaxReport struct {
-	PeriodFrom        time.Time       `json:"period_from"`
-	PeriodTo          time.Time       `json:"period_to"`
-	Items             []TaxReportItem `json:"items"`
-	TotalObligation   string          `json:"total_obligation"`
-	TotalPaid         string          `json:"total_paid"`
-	TotalOutstanding  string          `json:"total_outstanding"`
+	PeriodFrom       time.Time       `json:"period_from"`
+	PeriodTo         time.Time       `json:"period_to"`
+	Items            []TaxReportItem `json:"items"`
+	TotalObligation  string          `json:"total_obligation"`
+	TotalPaid        string          `json:"total_paid"`
+	TotalOutstanding string          `json:"total_outstanding"`
 }
 
 // ── Phase 8: PPN report & penjaga ────────────────────────────────────────────

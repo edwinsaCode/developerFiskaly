@@ -32,6 +32,7 @@ func NewHandler(db *gorm.DB) *Handler {
 		WithBASTReader(repo),
 		WithLedgerReader(repo),
 		WithRuleResolution(repo, repo), // Increment 4: tarif per kategori proyek
+		WithUnitProductPolicy(repo),    // rule klien UAT #3: tarif per PRODUK unit
 		WithTxRunner(repo),             // W-3.0: PayTax atomik
 	)
 	return &Handler{svc: svc, rules: repo}
@@ -74,7 +75,7 @@ func (h *Handler) Mount(r chi.Router) {
 type setTaxRateRequest struct {
 	RateCode      string `json:"rate_code"`
 	Name          string `json:"name"`
-	Rate          string `json:"rate"` // string agar tidak ada float64
+	Rate          string `json:"rate"`           // string agar tidak ada float64
 	AppliesTo     string `json:"applies_to"`     // all|subsidi|komersial (kosong = all)
 	TriggerEvent  string `json:"trigger_event"`  // kosong = bast
 	CalcBase      string `json:"calc_base"`      // kosong = transfer_value

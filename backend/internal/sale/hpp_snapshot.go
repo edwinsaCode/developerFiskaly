@@ -32,14 +32,14 @@ const (
 // budgeted auditable & reproducible walau RAB kemudian di-supersede — karena
 // BudgetPlanID + BudgetPlanVersion membekukan versi RAB yang dipakai.
 type AllocationSnapshot struct {
-	ID                uint64       `gorm:"primaryKey;autoIncrement"                     json:"id"`
-	TenantID          uint64       `gorm:"not null;index"                               json:"-"`
-	ProjectID         uint64       `gorm:"not null;index"                               json:"project_id"`
-	PhaseID           *uint64      `gorm:"index"                                        json:"phase_id,omitempty"`
-	UnitID            uint64       `gorm:"not null;uniqueIndex"                         json:"unit_id"`
-	BudgetPlanID      uint64       `gorm:"not null;index"                               json:"budget_plan_id"`
-	BudgetPlanVersion int          `gorm:"not null;default:1"                           json:"budget_plan_version"`
-	Basis             string       `gorm:"not null;size:20"                             json:"basis"`
+	ID                uint64  `gorm:"primaryKey;autoIncrement"                     json:"id"`
+	TenantID          uint64  `gorm:"not null;index"                               json:"-"`
+	ProjectID         uint64  `gorm:"not null;index"                               json:"project_id"`
+	PhaseID           *uint64 `gorm:"index"                                        json:"phase_id,omitempty"`
+	UnitID            uint64  `gorm:"not null;uniqueIndex"                         json:"unit_id"`
+	BudgetPlanID      uint64  `gorm:"not null;index"                               json:"budget_plan_id"`
+	BudgetPlanVersion int     `gorm:"not null;default:1"                           json:"budget_plan_version"`
+	Basis             string  `gorm:"not null;size:20"                             json:"basis"`
 	// P0-4 D1 (migration 000030): pin version basis alokasi yang dipakai saat
 	// BAST. NULL = snapshot pra-P0-4 (diperlakukan sebagai basis aktif saat itu).
 	AllocationConfigVersionID *uint64      `gorm:"column:allocation_config_version_id"          json:"allocation_config_version_id,omitempty"`
@@ -68,13 +68,16 @@ type AllocationSnapshotLine struct {
 	UnitNameSnapshot     string `gorm:"size:100;not null;default:''"                 json:"unit_name_snapshot"`
 	AccountingClass      string `gorm:"not null;size:20"                             json:"accounting_class"`
 	InventoryAccountCode string `gorm:"not null;size:20"                             json:"inventory_account_code"`
-	// Bukti basis alokasi (audit trail; sama untuk keempat class dalam satu
-	// snapshot, didenormalisasi agar tiap baris berdiri sendiri):
-	//   BasisType            : saleable_area | sales_value
-	//   BasisValue           : bobot unit ini (sqm ATAU rupiah list_price)
+	// Bukti basis alokasi (audit trail, didenormalisasi agar tiap baris berdiri
+	// sendiri). Sama untuk baris hard/soft/financing dalam satu snapshot; baris
+	// land BERBEDA (basis_type="land_area" — Item 9, UAT 2026-09-07; sebelumnya
+	// "equal"/selalu rata per rule klien UAT #1, digantikan Item 9):
+	//   BasisType            : saleable_area | sales_value | land_area (khusus land)
+	//   BasisValue           : bobot unit ini (sqm/rupiah list_price, atau land_area m2 untuk land)
 	//   AllocationPercentage : porsi unit thd TOTAL basis, 0..100 (BasisValue/Σ×100)
 	// Relasi: Amount ≈ pool_kelas × AllocationPercentage% (deviasi ≤ Rp1 karena
-	// largest-remainder; Amount = nilai ACTUAL teralokasi).
+	// largest-remainder; Amount = nilai ACTUAL teralokasi) — berlaku juga untuk
+	// land karena baris ini memakai basis land-nya sendiri, bukan basis proyek.
 	BasisType            string          `gorm:"not null;size:20"                              json:"basis_type"`
 	BasisValue           decimal.Decimal `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'"  json:"basis_value"`
 	AllocationPercentage decimal.Decimal `gorm:"type:DECIMAL(9,6);not null;default:'0.000000'" json:"allocation_percentage"`
@@ -101,11 +104,24 @@ type SnapshotDraft struct {
 	// snapshot tetap sah, diperlakukan legacy).
 	ConfigVersionID *uint64
 	ConfigVersion   *int
-	// Bukti basis unit ini (dipetakan ke setiap baris snapshot):
+	// Bukti basis unit ini untuk kelas Hard/Soft/Financing (dipetakan ke baris
+	// snapshot ketiga kelas itu):
 	BasisValue           decimal.Decimal // bobot unit (sqm / rupiah list_price)
 	AllocationPercentage decimal.Decimal // porsi thd total basis, 0..100
-	Breakdown            domain.UnitCostBreakdown
+	// Bukti basis unit ini KHUSUS baris Land — land_area unit itu (Item 9, UAT
+	// 2026-09-07; sebelumnya selalu rata per rule klien UAT #1), dicatat
+	// terpisah dari BasisValue/AllocationPercentage di atas supaya baris Land
+	// tidak salah mengklaim memakai basis Hard/Soft/Financing.
+	LandBasisValue           decimal.Decimal // land_area unit ini (m2)
+	LandAllocationPercentage decimal.Decimal // LandBasisValue/Σland_area unit properti × 100
+	Breakdown                domain.UnitCostBreakdown
 }
+
+// landBasisTypeArea adalah basis_type baris snapshot Land — bukan bagian dari
+// allocation.AllocationBasis (saleable_area/sales_value) karena Land punya
+// basisnya sendiri: land_area per unit (Item 9, UAT 2026-09-07 — sebelumnya
+// "equal"/selalu rata per rule klien UAT #1, dicabut klien).
+const landBasisTypeArea = "land_area"
 
 // toSnapshot membangun AllocationSnapshot + baris per accounting_class dari
 // draft, memakai taxonomy sebagai satu-satunya sumber pemetaan class→akun.
@@ -121,10 +137,11 @@ func (d SnapshotDraft) toSnapshot(tenantID uint64, unitName string) *AllocationS
 		Basis:                     d.Basis,
 		AllocationConfigVersionID: d.ConfigVersionID,
 		AllocationConfigVersion:   d.ConfigVersion,
-		HPPTotal:                  d.Breakdown.Total(),
 	}
+	hppTotal := domain.Zero
 	for _, class := range domain.AllCostCategories {
-		snap.Lines = append(snap.Lines, AllocationSnapshotLine{
+		amount := d.Breakdown.Amount(class)
+		line := AllocationSnapshotLine{
 			TenantID:             tenantID,
 			UnitID:               d.UnitID,
 			UnitNameSnapshot:     unitName,
@@ -133,8 +150,23 @@ func (d SnapshotDraft) toSnapshot(tenantID uint64, unitName string) *AllocationS
 			BasisType:            d.Basis,
 			BasisValue:           d.BasisValue,
 			AllocationPercentage: d.AllocationPercentage,
-			Amount:               d.Breakdown.Amount(class),
-		})
+			Amount:               amount,
+		}
+		// Land punya basis sendiri: land_area per unit (Item 9) — basis_type/
+		// value/pct baris ini HARUS mencerminkan itu, bukan basis Hard/Soft,
+		// supaya "Amount ≈ pool_kelas × pct%" tetap benar untuk auditor.
+		if class == domain.CostCategoryLand {
+			line.BasisType = landBasisTypeArea
+			line.BasisValue = d.LandBasisValue
+			line.AllocationPercentage = d.LandAllocationPercentage
+		}
+		snap.Lines = append(snap.Lines, line)
+		hppTotal = hppTotal.Add(amount)
 	}
+	// HPPTotal SENGAJA dijumlahkan dari Lines (bukan d.Breakdown.Total(), yang
+	// masih menjumlahkan field legacy Financing) — menjamin Σ Lines == HPPTotal
+	// selalu benar by construction, bukan kebetulan karena Financing selalu Zero
+	// untuk plan baru (RULE KLIEN 2026-09-04).
+	snap.HPPTotal = hppTotal
 	return snap
 }

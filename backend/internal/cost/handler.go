@@ -30,6 +30,8 @@ type Handler struct {
 	// cost package tidak perlu tahu cara merangkai kolaborator fixedasset —
 	// cost hanya memegang instance jadi, sama seperti pola budgetItemAdapter.
 	fixedAssets *fixedasset.Service
+	// printRepo: nama tenant/proyek untuk header cetak (Riwayat Biaya, BKK).
+	printRepo *GORMRepository
 }
 
 // SetFixedAssetService menyuntikkan layanan aset tetap ke toggle "Jenis
@@ -62,7 +64,7 @@ func NewHandler(db *gorm.DB) *Handler {
 	svc.SetPaymentAccountValidator(repo)
 	svc.SetUnitProjectResolver(repo)
 	svc.SetExpenseReader(repo)
-	return &Handler{svc: svc, types: NewExpenseTypeService(db)}
+	return &Handler{svc: svc, types: NewExpenseTypeService(db), printRepo: repo}
 }
 
 // budgetItemAdapter menjembatani budget.GORMRepository ke cost.BudgetItemLookup.
@@ -188,6 +190,9 @@ func isCostDomainError(err error) bool {
 		errors.Is(err, ErrUnitNotInProject) ||
 		errors.Is(err, ErrUnitNotHPPEligible) ||
 		errors.Is(err, ErrUnitProductPolicyUnresolved) ||
+		errors.Is(err, ErrHardSubcategoryRequired) ||
+		errors.Is(err, ErrInvalidHardSubcategory) ||
+		errors.Is(err, ErrHardSubcategoryNotAllowed) ||
 		// Periode tertutup adalah penolakan yang SAH dan bisa dikoreksi user
 		// (ubah tanggal, atau buka periode) — bukan kegagalan server.
 		errors.Is(err, ledger.ErrPeriodClosed)
@@ -197,6 +202,9 @@ func isCostDomainError(err error) bool {
 
 type createCostEntryDTO struct {
 	Category        string  `json:"category"`
+	// HardSubcategory (UAT 2026-09-07): produksi_subsidi|produksi_komersial|
+	// sarana_prasarana|perizinan — wajib saat category=hard tanpa unit_id.
+	HardSubcategory string  `json:"hard_subcategory,omitempty"`
 	CostTier        string  `json:"cost_tier"` // direct|shared|overhead; kosong = infer (backward compat)
 	Amount          string  `json:"amount"`
 	PaymentMethod   string  `json:"payment_method"`
@@ -218,6 +226,7 @@ func (dto createCostEntryDTO) toRequest(projectID uint64, amount domain.Money, d
 		UnitID:          dto.UnitID,
 		PhaseID:         dto.PhaseID,
 		Category:        domain.CostCategory(dto.Category),
+		HardSubcategory: domain.ConstructionSubcategory(dto.HardSubcategory),
 		CostTier:        domain.CostTier(dto.CostTier),
 		Amount:          amount,
 		PaymentMethod:   PaymentMethod(dto.PaymentMethod),

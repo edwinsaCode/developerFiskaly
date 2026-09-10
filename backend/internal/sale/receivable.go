@@ -191,17 +191,32 @@ func (s *Service) HouseARRows(ctx context.Context, tenantID uint64) ([]HouseARRo
 
 	out := make([]HouseARRow, 0, len(units))
 	for _, u := range units {
-		code, cerr := s.houseControlAccount(ctx, tenantID, u.UnitID)
+		finCode, finAmt, defCode, cerr := s.houseControlSplit(ctx, tenantID, u.UnitID)
 		if cerr != nil {
 			return nil, cerr
 		}
-		out = append(out, s.rowsForUnit(u, byUnit[u.UnitID], code)...)
+		out = append(out, s.rowsForUnit(u, byUnit[u.UnitID], finCode, finAmt, defCode)...)
 	}
 	return out, nil
 }
 
-// rowsForUnit memecah sisa piutang satu unit menjadi baris ber-jatuh-tempo.
-func (s *Service) rowsForUnit(u HouseARUnit, scheds []HouseARSchedule, controlCode string) []HouseARRow {
+// controlPortion adalah sepotong nominal yang jatuh ke satu akun kontrol
+// tertentu — satu baris jadwal/sisa bisa pecah jadi dua controlPortion kalau
+// ia melewati batas antara Dana Jaminan Bank dan Piutang Usaha.
+type controlPortion struct {
+	Code string
+	Amt  domain.Money
+}
+
+// rowsForUnit memecah sisa piutang satu unit menjadi baris ber-jatuh-tempo,
+// SEKALIGUS membelahnya per akun kontrol: finCode/finAmt (Item 7A/7C) adalah
+// sisa yang MASIH di Dana Jaminan Bank — tidak lagi otomatis dianggap pindah
+// ke defCode begitu state maju ke `disbursed` (T-3 lama, sudah dicabut).
+// Konsumsi finAmt bersifat FIFO mengikuti urutan jadwal (jatuh tempo
+// terawal): tie-out hanya butuh Σ per akun kontrol cocok dengan GL, bukan
+// klaim baris jadwal MANA persis yang "milik bank" — split itu memang lahir
+// di level kontrak (Akad), bukan per-cicilan.
+func (s *Service) rowsForUnit(u HouseARUnit, scheds []HouseARSchedule, finCode string, finAmt domain.Money, defCode string) []HouseARRow {
 	outstanding := u.Outstanding()
 	if outstanding.IsNeg() {
 		outstanding = domain.Zero
@@ -209,10 +224,11 @@ func (s *Service) rowsForUnit(u HouseARUnit, scheds []HouseARSchedule, controlCo
 
 	// Unit lunas: tidak ada baris tabel, tetapi kontribusinya ke collection rate
 	// tetap harus terhitung — kalau tidak, tingkat penagihan naik palsu setiap
-	// kali seseorang melunasi.
+	// kali seseorang melunasi. Akun kontrolnya tak berpengaruh (Received=true
+	// dikecualikan dari total sub-ledger).
 	if outstanding.IsZero() {
 		return []HouseARRow{{
-			ControlAccountCode: controlCode,
+			ControlAccountCode: defCode,
 			Row: receivable.Row{
 				Source:     receivable.SourceHouse,
 				ContractID: u.ContractID,
@@ -230,6 +246,33 @@ func (s *Service) rowsForUnit(u HouseARUnit, scheds []HouseARSchedule, controlCo
 		}}
 	}
 
+	finBudget := finAmt
+	if finBudget.IsNeg() {
+		finBudget = domain.Zero
+	}
+	if finBudget.GreaterThan(outstanding) {
+		finBudget = outstanding
+	}
+	splitPortion := func(amt domain.Money) []controlPortion {
+		if finBudget.IsZero() {
+			return []controlPortion{{defCode, amt}}
+		}
+		finPart := amt
+		if finPart.GreaterThan(finBudget) {
+			finPart = finBudget
+		}
+		finBudget = finBudget.Sub(finPart)
+		defPart := amt.Sub(finPart)
+		out := make([]controlPortion, 0, 2)
+		if !finPart.IsZero() {
+			out = append(out, controlPortion{finCode, finPart})
+		}
+		if !defPart.IsZero() {
+			out = append(out, controlPortion{defCode, defPart})
+		}
+		return out
+	}
+
 	rows := make([]HouseARRow, 0, len(scheds)+1)
 	remaining := outstanding
 	for _, sc := range scheds {
@@ -245,46 +288,52 @@ func (s *Service) rowsForUnit(u HouseARUnit, scheds []HouseARSchedule, controlCo
 			take = remaining
 		}
 		remaining = remaining.Sub(take)
-		rows = append(rows, HouseARRow{
-			ControlAccountCode: controlCode,
-			Row: receivable.Row{
-				Source:        receivable.SourceHouse,
-				ContractID:    u.ContractID,
-				UnitID:        u.UnitID,
-				RefID:         sc.ID,
-				BuyerName:     u.BuyerName,
-				UnitCode:      u.UnitCode,
-				Label:         houseScheduleLabel(sc.Type, sc.InstallmentNo),
-				InvoiceNumber: sc.InvoiceNumber,
-				BuyerPhone:    u.BuyerPhone,
-				BuyerEmail:    u.BuyerEmail,
-				DueDate:       sc.DueDate,
-				Amount:        take,
-			},
-		})
+		for _, part := range splitPortion(take) {
+			rows = append(rows, HouseARRow{
+				ControlAccountCode: part.Code,
+				Row: receivable.Row{
+					Source:        receivable.SourceHouse,
+					ContractID:    u.ContractID,
+					UnitID:        u.UnitID,
+					RefID:         sc.ID,
+					BuyerName:     u.BuyerName,
+					UnitCode:      u.UnitCode,
+					Label:         houseScheduleLabel(sc.Type, sc.InstallmentNo),
+					InvoiceNumber: sc.InvoiceNumber,
+					BuyerPhone:    u.BuyerPhone,
+					BuyerEmail:    u.BuyerEmail,
+					DueDate:       sc.DueDate,
+					Amount:        part.Amt,
+				},
+			})
+		}
 	}
 
 	if !remaining.IsZero() {
-		rows = append(rows, HouseARRow{
-			ControlAccountCode: controlCode,
-			Row: receivable.Row{
-				Source:     receivable.SourceHouse,
-				ContractID: u.ContractID,
-				UnitID:     u.UnitID,
-				BuyerName:  u.BuyerName,
-				UnitCode:   u.UnitCode,
-				Label:      "Sisa harga unit (tanpa jadwal)",
-				BuyerPhone: u.BuyerPhone,
-				BuyerEmail: u.BuyerEmail,
-				DueDate:    u.RecognitionDate,
-				Amount:     remaining,
-			},
-		})
+		for _, part := range splitPortion(remaining) {
+			rows = append(rows, HouseARRow{
+				ControlAccountCode: part.Code,
+				Row: receivable.Row{
+					Source:     receivable.SourceHouse,
+					ContractID: u.ContractID,
+					UnitID:     u.UnitID,
+					BuyerName:  u.BuyerName,
+					UnitCode:   u.UnitCode,
+					Label:      "Sisa harga unit (tanpa jadwal)",
+					BuyerPhone: u.BuyerPhone,
+					BuyerEmail: u.BuyerEmail,
+					DueDate:    u.RecognitionDate,
+					Amount:     part.Amt,
+				},
+			})
+		}
 	}
 
 	// Yang sudah dibayar dititipkan pada baris pertama supaya basis collection
 	// rate (Σ Amount) tetap sama dengan harga unit: Σ Amount = sisa + terbayar.
 	// Menaruhnya di baris terpisah akan memunculkan baris lunas palsu di tabel.
+	// Amount − PaidAmount baris itu tidak berubah, jadi tidak menggeser total
+	// per akun kontrol di atas.
 	if len(rows) > 0 && !u.Collected.IsZero() {
 		rows[0].Row.Amount = rows[0].Row.Amount.Add(u.Collected)
 		rows[0].Row.PaidAmount = u.Collected
@@ -292,23 +341,54 @@ func (s *Service) rowsForUnit(u HouseARUnit, scheds []HouseARSchedule, controlCo
 	return rows
 }
 
-// houseControlAccount menjawab AKUN KONTROL mana yang menahan sisa piutang unit
-// ini — dari sumber yang sama yang menentukan ke mana BAST mendebit
-// (scheme.ResolveReceivableAccount). Kontrak tanpa scheme jatuh ke 1-2000.
-func (s *Service) houseControlAccount(ctx context.Context, tenantID, unitID uint64) (string, error) {
+// houseControlSplit menjawab BERAPA sisa piutang unit ini yang masih di Dana
+// Jaminan Bank (finCode/finAmt) dan berapa di Piutang Usaha (defCode) — dari
+// SUMBER YANG SAMA yang menentukan ke mana pencairan KPR mengkredit
+// (schemeCreditAccountForPayment source=kpr_disbursement) dan ke mana Akad
+// membelah piutang (schemeAkadSplitAccounts/financingOutstanding).
+//
+// Item 7C (UAT 2026-09-07): sisa Dana Jaminan Bank TIDAK LAGI otomatis
+// dianggap pindah ke Piutang Usaha begitu scheme_state maju ke `disbursed`
+// (itu bug T-3 lama). Reporting sebelumnya memakai resolusi berbasis STATE
+// generik (ResolveReceivableAccount) untuk memilih SATU akun kontrol per
+// unit — benar di rezim T-3 lump-sum, tapi salah sekarang: state bisa sudah
+// `disbursed` sementara Dana Jaminan Bank masih menyisakan saldo nyata di GL
+// (pencairan bertahap). Fungsi ini menghitung split NYATA dari GL
+// (financingOutstanding), bukan dari state.
+func (s *Service) houseControlSplit(ctx context.Context, tenantID, unitID uint64) (finCode string, finAmt domain.Money, defCode string, err error) {
+	defCode = accountCodePiutang
 	if s.contracts == nil {
-		return accountCodePiutang, nil
+		return "", domain.Zero, defCode, nil
 	}
-	c, err := s.contracts.FindContractByUnitID(ctx, tenantID, unitID)
-	if err != nil {
+	c, cerr := s.contracts.FindContractByUnitID(ctx, tenantID, unitID)
+	if cerr != nil {
 		// Unit ber-BAST tanpa kontrak: piutangnya tetap ada di 1-2000 (jalur
 		// BAST langsung tanpa kontrak). Bukan alasan menggagalkan laporan.
-		return accountCodePiutang, nil
+		return "", domain.Zero, defCode, nil
 	}
-	if code, ok := s.schemeCreditAccountForPayment(ctx, c); ok && code != "" {
-		return code, nil
+	candidateFinCode, candidateDefCode := s.schemeAkadSplitAccounts(ctx, c)
+	if candidateFinCode == "" || c.LoanAmount == nil {
+		// Kontrak tanpa financing (atau belum pernah diisi Nilai Persetujuan
+		// KPR Bank) — seluruhnya di akun default seperti semula.
+		return "", domain.Zero, defCode, nil
 	}
-	return accountCodePiutang, nil
+	remaining, ferr := s.financingOutstanding(ctx, tenantID, c, candidateFinCode)
+	if ferr != nil {
+		return "", domain.Zero, defCode, ferr
+	}
+	if candidateDefCode != "" {
+		defCode = candidateDefCode
+	}
+	return candidateFinCode, remaining, defCode, nil
+}
+
+// HouseControlSplit (Gap 2, UAT 2026-09-08) mengekspor houseControlSplit untuk
+// konsumen DI LUAR package ini (billing kwitansi, via adapter wiring) yang
+// tidak boleh mengimpor package sale langsung (aturan impor CLAUDE.md). SUMBER
+// SAMA dengan HouseARRows — bukan rumus kedua: Terutang kwitansi WAJIB tie-out
+// dengan Piutang Usaha/Dana Jaminan Bank yang sama dilihat laporan aging.
+func (s *Service) HouseControlSplit(ctx context.Context, tenantID, unitID uint64) (financingCode string, financingRemaining domain.Money, defaultReceivableCode string, err error) {
+	return s.houseControlSplit(ctx, tenantID, unitID)
 }
 
 // houseScheduleLabel memberi nama baris cicilan. Sama dengan label yang dipakai

@@ -147,7 +147,7 @@ func TestIntegration_UpdatePool_CapacityCheckEnforcedByDB(t *testing.T) {
 		t.Fatalf("seed reserved/sold: %v", err)
 	}
 
-	err := repo.UpdatePoolQuantityAndPrice(context.Background(), ltTenant, pool.ID, decimal.NewFromInt(400), domain.FromInt(1000))
+	err := repo.UpdatePoolQuantityAndPrice(context.Background(), ltTenant, pool.ID, decimal.NewFromInt(400), domain.FromInt(1000), domain.FromInt(800))
 	if err != land.ErrCapacityExceeded {
 		t.Fatalf("want ErrCapacityExceeded, got %v", err)
 	}

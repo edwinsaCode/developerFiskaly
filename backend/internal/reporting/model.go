@@ -18,7 +18,15 @@ type NeracaLine struct {
 // NeracaReport adalah output laporan neraca konsolidasi.
 // IsBalanced harus selalu true; jika false, ada jurnal yang tidak balanced.
 type NeracaReport struct {
-	AsOf                  time.Time    `json:"as_of"`
+	AsOf time.Time `json:"as_of"`
+	// From (Item 5, opsional): tanggal awal jendela Laba Rugi Periode Terpilih.
+	// PENTING: From TIDAK PERNAH mengubah LabaRugiTahunBerjalan/TotalEkuitas/
+	// IsBalanced — neraca adalah snapshot per tanggal (life-to-date sejak tutup
+	// buku terakhir), bukan rentang. Mencampur P&L berjendela ke dalam identitas
+	// neraca (Aset = Kewajiban+Ekuitas) akan merusak keseimbangan sebesar laba
+	// yang diakui sebelum From (kontra-akun asetnya tetap kumulatif). From hanya
+	// menghasilkan LabaRugiPeriodeTerpilih sebagai baris INFORMASI TAMBAHAN.
+	From                  *time.Time   `json:"from,omitempty"`
 	Aset                  []NeracaLine `json:"aset"`
 	Kewajiban             []NeracaLine `json:"kewajiban"`
 	Ekuitas               []NeracaLine `json:"ekuitas"`
@@ -26,6 +34,10 @@ type NeracaReport struct {
 	TotalKewajiban        string       `json:"total_kewajiban"`
 	TotalEkuitas          string       `json:"total_ekuitas"`
 	LabaRugiTahunBerjalan string       `json:"laba_rugi_tahun_berjalan"`
+	// LabaRugiPeriodeTerpilih (Item 5, opsional): Laba Rugi dihitung ulang dari
+	// jendela [From, AsOf] via ComputePL — MURNI INFORMASI, tidak ikut dalam
+	// TotalEkuitas/TotalKewajibanEkuitas/IsBalanced. Kosong bila From nil.
+	LabaRugiPeriodeTerpilih string `json:"laba_rugi_periode_terpilih,omitempty"`
 	// TotalEkuitasEfektif = TotalEkuitas + LabaRugiTahunBerjalan — angka yang
 	// ditampilkan sebagai "Total Ekuitas" ke user (laba berjalan termasuk).
 	TotalEkuitasEfektif   string `json:"total_ekuitas_efektif"`
@@ -78,8 +90,11 @@ type UnitPLRow struct {
 // prefix-matching flat "semua 4-x / semua 5-x" seperti versi lama.
 // ProjectID=nil berarti laporan konsolidasi.
 type PLReport struct {
-	AsOf      time.Time `json:"as_of"`
-	ProjectID *uint64   `json:"project_id,omitempty"`
+	AsOf time.Time `json:"as_of"`
+	// From (Item 5, opsional): batas bawah rentang filter tanggal. nil = tanpa
+	// batas bawah (life-to-date sejak tutup buku terakhir).
+	From      *time.Time `json:"from,omitempty"`
+	ProjectID *uint64    `json:"project_id,omitempty"`
 
 	Pendapatan      []PLLine `json:"pendapatan"`
 	TotalPendapatan string   `json:"total_pendapatan"`

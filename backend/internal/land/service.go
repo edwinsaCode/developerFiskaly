@@ -9,6 +9,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"esaproperti/internal/domain"
+	"esaproperti/internal/tax"
 )
 
 const defaultProductCode = "kelebihan_tanah"
@@ -60,6 +61,13 @@ type RecordAkadParams struct {
 	RevenueLines []JournalLineInput // Akad pengakuan pendapatan
 	COGSLines    []JournalLineInput // Akad HPP; nil jika hpp_total = 0
 
+	// PPhPlan: akrual PPh Final Pengalihan (Event 5a) yang harus diposting DALAM
+	// transaksi Akad yang sama, pola identik unit/BAST (AccruePPhFinalInTx) —
+	// bukan tax engine kedua, hanya konsumen lain dari internal/tax.AccrualPlan.
+	// nil = tidak ada resolver PPh terpasang (mis. test yang tidak peduli pajak);
+	// RecordAkadTx melewati seluruh logika PPh bila nil (backward-compatible).
+	PPhPlan *tax.AccrualPlan
+
 	HPPRatePerM2              domain.Money
 	HPPTotal                  domain.Money
 	Basis                     string
@@ -77,6 +85,16 @@ type CancelLandSaleParams struct {
 	Reason      string
 	CancelledBy *uint64
 	CancelDate  time.Time
+	// AllowPaidSchedule: izinkan pembatalan meski payment_schedules yang
+	// ter-link (land_sale_id) sudah menerima pembayaran (PaidAmount > 0).
+	// HANYA dipakai internal/cancellation (pembatalan unit bundled), yang
+	// menghitung refund/settlement dana buyer secara utuh untuk seluruh
+	// kontrak. Jalur standalone (Service.CancelLandSale, endpoint langsung)
+	// membiarkan ini false — tidak punya mekanisme refund sendiri, jadi
+	// membatalkan land_sale yang sudah dibayar lewat jalur itu akan
+	// menyisakan kas yang diterima tanpa penyelesaian (lihat
+	// ErrLandSaleHasReceivedPayment).
+	AllowPaidSchedule bool
 }
 
 // Store is the persistence seam for land_stock/land_stock_reservations — kept
@@ -85,7 +103,7 @@ type CancelLandSaleParams struct {
 type Store interface {
 	CreatePool(ctx context.Context, pool *LandStock) error
 	FindPoolByProject(ctx context.Context, tenantID, projectID uint64) (*LandStock, error)
-	UpdatePoolQuantityAndPrice(ctx context.Context, tenantID, id uint64, totalQuantityM2 decimal.Decimal, unitPrice domain.Money) error
+	UpdatePoolQuantityAndPrice(ctx context.Context, tenantID, id uint64, totalQuantityM2 decimal.Decimal, unitPrice, purchasePrice domain.Money) error
 
 	// Reserve atomically checks availability and inserts a reservation while
 	// incrementing land_stock.reserved_quantity_m2 — row-locked (§J), the sole
@@ -106,6 +124,8 @@ type Store interface {
 	RecordAkad(ctx context.Context, tenantID uint64, in RecordAkadParams) (*LandSale, error)
 	FindLandSale(ctx context.Context, tenantID, id uint64) (*LandSale, error)
 	ListLandSalesByProject(ctx context.Context, tenantID, projectID uint64) ([]LandSale, error)
+	// ListReceivableLandSales (receivable.go) — baris untuk AR aging.
+	ListReceivableLandSales(ctx context.Context, tenantID uint64) ([]LandSaleReceivable, error)
 
 	// ── LT-6: pembatalan pasca-Akad (§F.3) ──────────────────────────────────
 
@@ -130,6 +150,16 @@ type Store interface {
 type Service struct {
 	store       Store
 	hppResolver LandHPPResolver
+	pph         LandPPhResolver
+}
+
+// LandPPhResolver resolves the PPh Final Pengalihan accrual plan (rate, rule,
+// formula, akun) for a Kelebihan Tanah Akad — satisfied directly by
+// *tax.Service (method signature matches exactly, no adapter needed). Mirrors
+// the same seam sale.PPhFinalAccruer uses for unit/BAST, so both flows post
+// the IDENTICAL accounting treatment through the ONE tax engine.
+type LandPPhResolver interface {
+	ResolveAccrualPlan(ctx context.Context, tenantID uint64, req tax.AccrueTaxRequest) (*tax.AccrualPlan, error)
 }
 
 // ServiceOption configures optional Service collaborators (LT-5+).
@@ -139,6 +169,15 @@ type ServiceOption func(*Service)
 // Without it, RecordAkad fails closed with ErrHPPResolverNotConfigured.
 func WithHPPResolver(r LandHPPResolver) ServiceOption {
 	return func(s *Service) { s.hppResolver = r }
+}
+
+// WithPPhResolver wires automatic PPh Final Pengalihan accrual into Akad —
+// pola identik sale.SetTaxAccruer: OPSIONAL, bukan fail-closed. nil (default)
+// = Akad tidak mengakru PPh (perilaku lama, dipertahankan untuk test yang
+// tidak peduli pajak); terpasang = setiap Akad Kelebihan Tanah otomatis
+// mengakru PPh Final dalam transaksi yang sama, tanpa campur tangan user.
+func WithPPhResolver(r LandPPhResolver) ServiceOption {
+	return func(s *Service) { s.pph = r }
 }
 
 func NewService(store Store, opts ...ServiceOption) *Service {
@@ -153,12 +192,13 @@ func NewService(store Store, opts ...ServiceOption) *Service {
 type CreatePoolRequest struct {
 	ProjectID       uint64
 	TotalQuantityM2 decimal.Decimal
-	UnitPrice       domain.Money
+	UnitPrice       domain.Money // Harga Jual — dipakai di reservasi/Akad/DPP.
+	PurchasePrice   domain.Money // Harga Beli — tarif HPP per m² saat Akad (koreksi klien 2026-08-31).
 }
 
 // CreatePool creates the (single) land_stock pool for a project.
 func (s *Service) CreatePool(ctx context.Context, tenantID uint64, req CreatePoolRequest) (*LandStock, error) {
-	if req.TotalQuantityM2.IsNegative() || req.UnitPrice.IsNeg() {
+	if req.TotalQuantityM2.IsNegative() || req.UnitPrice.IsNeg() || req.PurchasePrice.IsNeg() {
 		return nil, ErrQuantityNegative
 	}
 	existing, err := s.store.FindPoolByProject(ctx, tenantID, req.ProjectID)
@@ -175,6 +215,7 @@ func (s *Service) CreatePool(ctx context.Context, tenantID uint64, req CreatePoo
 		ProductCode:     defaultProductCode,
 		TotalQuantityM2: req.TotalQuantityM2,
 		UnitPrice:       req.UnitPrice,
+		PurchasePrice:   req.PurchasePrice,
 	}
 	if err := s.store.CreatePool(ctx, pool); err != nil {
 		return nil, err
@@ -193,13 +234,15 @@ func (s *Service) GetPool(ctx context.Context, tenantID, projectID uint64) (*Lan
 type UpdatePoolRequest struct {
 	TotalQuantityM2 decimal.Decimal
 	UnitPrice       domain.Money
+	PurchasePrice   domain.Money
 }
 
-// UpdatePool corrects total_quantity_m2/unit_price. Rejects shrinking total
-// below what's already reserved+sold (INV-LAND-1) — enforced here AND by the
-// DB CHECK constraint (chk_land_stock_capacity) as a fail-closed backstop.
+// UpdatePool corrects total_quantity_m2/unit_price/purchase_price. Rejects
+// shrinking total below what's already reserved+sold (INV-LAND-1) — enforced
+// here AND by the DB CHECK constraint (chk_land_stock_capacity) as a
+// fail-closed backstop.
 func (s *Service) UpdatePool(ctx context.Context, tenantID, projectID uint64, req UpdatePoolRequest) (*LandStock, error) {
-	if req.TotalQuantityM2.IsNegative() || req.UnitPrice.IsNeg() {
+	if req.TotalQuantityM2.IsNegative() || req.UnitPrice.IsNeg() || req.PurchasePrice.IsNeg() {
 		return nil, ErrQuantityNegative
 	}
 	pool, err := s.store.FindPoolByProject(ctx, tenantID, projectID)
@@ -210,11 +253,12 @@ func (s *Service) UpdatePool(ctx context.Context, tenantID, projectID uint64, re
 	if req.TotalQuantityM2.LessThan(committed) {
 		return nil, ErrCapacityExceeded
 	}
-	if err := s.store.UpdatePoolQuantityAndPrice(ctx, tenantID, pool.ID, req.TotalQuantityM2, req.UnitPrice); err != nil {
+	if err := s.store.UpdatePoolQuantityAndPrice(ctx, tenantID, pool.ID, req.TotalQuantityM2, req.UnitPrice, req.PurchasePrice); err != nil {
 		return nil, err
 	}
 	pool.TotalQuantityM2 = req.TotalQuantityM2
 	pool.UnitPrice = req.UnitPrice
+	pool.PurchasePrice = req.PurchasePrice
 	return pool, nil
 }
 

@@ -91,6 +91,43 @@ func (r *GORMRepository) LoadScheduleInfo(ctx context.Context, tenantID, schedul
 	}, nil
 }
 
+// LoadTargetedScheduleOutstanding (UAT 2026-09-03 #1) — lihat ScheduleOutstandingLoader.
+// Satu termin dianggap "ditarget ke satu jadwal" hanya bila SEMUA baris
+// payment_allocations-nya menunjuk ke payment_schedule_id yang SAMA (0 baris =
+// tidak ditarget/pra-FE-2; >1 schedule berbeda = waterfall lintas cicilan) —
+// keduanya jatuh kembali ke Outstanding kontrak, bukan ditebak.
+func (r *GORMRepository) LoadTargetedScheduleOutstanding(ctx context.Context, tenantID, terminPaymentID uint64) (*TargetedSchedule, error) {
+	var scheduleIDs []uint64
+	if err := r.db.WithContext(ctx).
+		Table("payment_allocations").
+		Distinct("payment_schedule_id").
+		Where("tenant_id = ? AND termin_payment_id = ? AND payment_schedule_id IS NOT NULL", tenantID, terminPaymentID).
+		Pluck("payment_schedule_id", &scheduleIDs).Error; err != nil {
+		return nil, fmt.Errorf("LoadTargetedScheduleOutstanding: cari alokasi: %w", err)
+	}
+	if len(scheduleIDs) != 1 {
+		return nil, nil
+	}
+	type row struct {
+		Amount     domain.Money `gorm:"column:amount"`
+		PaidAmount domain.Money `gorm:"column:paid_amount"`
+		Type       string       `gorm:"column:type"`
+	}
+	var res row
+	err := r.db.WithContext(ctx).
+		Table("payment_schedules").
+		Select("amount, paid_amount, type").
+		Where("id = ? AND tenant_id = ?", scheduleIDs[0], tenantID).
+		First(&res).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("LoadTargetedScheduleOutstanding: cari jadwal: %w", err)
+	}
+	return &TargetedSchedule{Type: res.Type, Outstanding: res.Amount.Sub(res.PaidAmount)}, nil
+}
+
 // ── InvoiceStore ──────────────────────────────────────────────────────────────
 
 func (r *GORMRepository) CreateInvoice(ctx context.Context, inv *Invoice) error {

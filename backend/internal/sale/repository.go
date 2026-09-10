@@ -164,6 +164,22 @@ func (r *GORMRepository) SumTerminsByUnit(ctx context.Context, tenantID, unitID 
 	return res.Total, nil
 }
 
+func (r *GORMRepository) SumTerminsByUnitAndCreditAccount(ctx context.Context, tenantID, unitID uint64, creditAccountCode string) (domain.Money, error) {
+	type result struct {
+		Total domain.Money `gorm:"column:total"`
+	}
+	var res result
+	err := r.db.WithContext(ctx).
+		Table("termin_payments").
+		Select("COALESCE(SUM(amount), 0) AS total").
+		Where("tenant_id = ? AND unit_id = ? AND credit_account_code = ?", tenantID, unitID, creditAccountCode).
+		Scan(&res).Error
+	if err != nil {
+		return domain.Zero, fmt.Errorf("SumTerminsByUnitAndCreditAccount: %w", err)
+	}
+	return res.Total, nil
+}
+
 // FindSaleRecord mengembalikan SaleRecord (bukti BAST) sebuah unit, tenant-scoped.
 // Mengembalikan ErrSaleRecordNotFound bila unit belum BAST.
 func (r *GORMRepository) FindSaleRecord(ctx context.Context, tenantID, unitID uint64) (*SaleRecord, error) {
@@ -271,9 +287,151 @@ func (r *GORMRepository) Execute(ctx context.Context, params BASTAtomicParams) (
 		// DALAM tx yang sama: rumah dan tanah diakui atomik bersama, gagal
 		// salah satu = keduanya batal (Invariant #1/#5).
 		if params.Land != nil {
-			if _, err := land.RecordAkadTx(ctx, tx, params.TenantID, *params.Land); err != nil {
+			landSale, err := land.RecordAkadTx(ctx, tx, params.TenantID, *params.Land)
+			if err != nil {
 				return fmt.Errorf("Akad Kelebihan Tanah: %w", err)
 			}
+
+			// ── Bug UAT: land_sales sebagai anchor AR (migrasi 000095) ────────
+			// Sebelum ini, piutang Kelebihan Tanah sudah benar di GL (Cr akun
+			// Piutang Customer yang sama dengan rumah) tapi TIDAK PERNAH punya
+			// baris payment_schedules — sehingga ReceivePayment/planAllocation
+			// tidak pernah melihatnya sebagai piutang yang bisa dialokasikan
+			// (Neraca benar, Penerimaan tidak lengkap). Baris ini dibuat ATOMIK
+			// di transaksi yang sama dengan land.RecordAkadTx di atas, dengan
+			// tipe khusus ScheduleTypeLand + LandSaleID — bukan payment engine
+			// kedua, murni baris tambahan di sub-ledger yang sudah ada supaya
+			// waterfall (planAllocation), alokasi (payment_allocations), dan
+			// cancellation-supersede eksisting otomatis mencakupnya.
+			// InstallmentNumber sentinel besar: default land dilunasi PALING
+			// AKHIR dalam waterfall level-kontrak (cicilan rumah presedensi),
+			// tanpa menghalangi pembayaran langsung ke land via ScheduleID.
+			landSchedule := &PaymentSchedule{
+				TenantID:          params.TenantID,
+				SaleContractID:    params.SaleContractID,
+				UnitID:            params.UnitID,
+				LandSaleID:        &landSale.ID,
+				InstallmentNumber: 9999,
+				DueDate:           params.Land.RecognitionDate,
+				Amount:            landSale.GrossAmount,
+				Type:              ScheduleTypeLand,
+				Status:            ScheduleStatusScheduled,
+				ScheduleVersion:   1,
+			}
+			if err := tx.Create(landSchedule).Error; err != nil {
+				return fmt.Errorf("simpan jadwal piutang Kelebihan Tanah: %w", err)
+			}
+
+			// ── Netting advance Kelebihan Tanah pra-Akad (bug 2026-09-04) ─────
+			// Kontrak Tunai lump-sum menaruh SELURUH termin rumah+tanah sebagai
+			// SATU Uang Muka Penjualan; Event 3 (buildEvent3Lines, dipanggil di
+			// Service.RecordAkad) hanya menolkan bagian rumah (dicap ke gross
+			// rumah) — bagian yang secara ekonomi milik tanah (LandAdvance)
+			// dinolkan di sini: jurnal Dr UMP / Cr Piutang Kelebihan Tanah
+			// (LandAdvanceLines, sudah dibangun Service) DIPOSTING atomik +
+			// sub-ledgernya dicatat (credit_applications + payment_allocations
+			// + cache paid_amount landSchedule) SEBELUM sweep buyer-credit
+			// generik di bawah — urutan ini WAJIB: kalau sweep generik jalan
+			// duluan, ia akan menyapu SELURUH sisa saldo kredit (termasuk
+			// LandAdvance) ke SATU credit_application pool, lalu panggilan di
+			// sini akan menulis credit_application KEDUA untuk jumlah yang
+			// SAMA — double count pada creditBalance() (Σapplied > Σsources).
+			if !params.LandAdvance.IsZero() && !params.LandAdvance.IsNeg() {
+				nettingReq := ledger.CreateJournalRequest{
+					TenantID:    params.TenantID,
+					Date:        params.BASTDate,
+					Description: fmt.Sprintf("Netting uang muka Kelebihan Tanah unit %d saat BAST", params.UnitID),
+					Lines:       toledgerLines(params.LandAdvanceLines),
+				}
+				nettingEntry, err := txPosting.Create(ctx, nettingReq)
+				if err != nil {
+					return fmt.Errorf("buat jurnal netting Kelebihan Tanah: %w", err)
+				}
+				if _, err := txPosting.Post(ctx, params.TenantID, nettingEntry.ID); err != nil {
+					return fmt.Errorf("posting jurnal netting Kelebihan Tanah: %w", err)
+				}
+				if err := consumeCreditToScheduleInTx(ctx, tx, params.TenantID, params.UnitID, params.SaleContractID,
+					landSchedule, params.LandAdvance,
+					"Konsumsi otomatis saat Akad — uang muka gabungan dinetkan ke piutang Kelebihan Tanah",
+					params.CreatedBy); err != nil {
+					return fmt.Errorf("netting advance Kelebihan Tanah ke jadwal: %w", err)
+				}
+			}
+
+			// ── Baris jadwal RUMAH fallback (bug UAT — ketimpangan jadwal) ─────
+			// Kontrak Tunai/lunas-langsung TIDAK PERNAH punya baris
+			// payment_schedules rumah eksplisit (CreatePaymentSchedule hanya
+			// dipakai jalur cicilan/skema KPR) — sebelumnya itu aman karena
+			// outstandingForContract punya fallback gross−collected. Begitu
+			// kontrak SEKARANG juga punya baris land (di atas), fallback itu
+			// jadi bias: baris jadwal "ada" (landSchedule) tapi hanya mewakili
+			// tanah, rumah tetap tanpa jadwal — kalau dibiarkan waterfall
+			// kontrak (planForContract) hanya melihat cicilan tanah, dan
+			// pembayaran gabungan rumah+tanah salah alokasi (sisa rumah jatuh
+			// ke buyer-credit, bukan melunasi piutang rumah).
+			//
+			// Fix: kalau kontrak ini BELUM punya baris jadwal non-land sama
+			// sekali (bukan KPR/skema cicilan — itu sudah bikin baris sendiri
+			// lebih awal), buat SATU baris lump-sum mewakili SISA piutang
+			// rumah pasca-Akad (gross − total advance, angka yang SAMA dengan
+			// yang didebit ke akun Piutang di Event 3 — lihat buildEvent3Lines)
+			// supaya waterfall kontrak & outstandingForContract melihat rumah
+			// dan tanah dengan cara yang konsisten. Amount 0 (rumah lunas
+			// penuh via advance sebelum Akad) → tidak perlu baris.
+			if params.SaleContractID != 0 {
+				var nonLandCount int64
+				if err := tx.Model(&PaymentSchedule{}).
+					Where("tenant_id = ? AND sale_contract_id = ? AND type <> ? AND status <> ?",
+						params.TenantID, params.SaleContractID, ScheduleTypeLand, ScheduleStatusSuperseded).
+					Count(&nonLandCount).Error; err != nil {
+					return fmt.Errorf("cek jadwal rumah eksisting: %w", err)
+				}
+				if nonLandCount == 0 {
+					gross := params.SalePrice
+					if params.IsVAT {
+						gross = gross.Add(vatAmountOf(params.SalePrice, params.VATRate))
+					}
+					houseRemaining := gross.Sub(params.TotalAdvance)
+					if houseRemaining.GreaterThan(domain.Zero) {
+						houseSchedule := &PaymentSchedule{
+							TenantID:          params.TenantID,
+							SaleContractID:    params.SaleContractID,
+							UnitID:            params.UnitID,
+							InstallmentNumber: 1,
+							DueDate:           params.BASTDate,
+							Amount:            houseRemaining,
+							Type:              ScheduleTypeFinal,
+							Status:            ScheduleStatusScheduled,
+							ScheduleVersion:   1,
+						}
+						if err := tx.Create(houseSchedule).Error; err != nil {
+							return fmt.Errorf("simpan jadwal sisa piutang rumah: %w", err)
+						}
+					}
+				}
+			}
+		}
+
+		// ── Buyer Credit: konsumsi otomatis oleh netting Uang Muka (bug fix) ──
+		// Event 3 (buildEvent3Lines) mendebit bagian RUMAH dari Uang Muka
+		// Penjualan terkumpul unit ini ("nolkan uang muka penjualan saat
+		// BAST"), dan blok Kelebihan Tanah di atas (bila ada) sudah menolkan
+		// bagian TANAH-nya secara eksplisit ke jadwal tanah — jadi dipanggil
+		// DI SINI, SETELAH blok tanah, supaya hanya menyapu sisa saldo kredit
+		// yang BENAR-BENAR tidak tercakup jalur mana pun (mis. overpay yang
+		// melebihi gross rumah+tanah gabungan). Termasuk saldo kredit buyer
+		// yang masih berupa BELUM dialokasikan ke cicilan mana pun
+		// (payment_allocations allocation_type=buyer_credit, payment_
+		// schedule_id NULL). Sebelum perbaikan ini, konsumsi tsb tidak pernah
+		// tercatat di credit_applications — GetBuyerCredit terus menganggapnya
+		// "tersedia" selamanya meski GL Uang Muka sudah nol (kasus nyata:
+		// kontrak #4407, Rp37.000.000). credit_applications adalah
+		// SATU-SATUNYA source of truth untuk seluruh konsumsi (eksplisit via
+		// ApplyCredit MAUPUN otomatis di sini) — no-op bila tidak ada sisa
+		// saldo untuk unit ini.
+		if err := consumeRemainingCreditInTx(ctx, tx, params.TenantID, params.UnitID, params.SaleContractID,
+			"Konsumsi otomatis saat Akad — Uang Muka Penjualan dinetkan ke pengakuan pendapatan", params.CreatedBy); err != nil {
+			return fmt.Errorf("konsumsi saldo kredit buyer saat Akad: %w", err)
 		}
 
 		// ── Update unit status → sold ──────────────────────────────────────────
@@ -955,7 +1113,7 @@ func (r *GORMRepository) CommitPayment(ctx context.Context, tenantID uint64, p P
 		//    Mencegah race: dua pembayaran konkuren atas kontrak yang sama tidak
 		//    bisa membaca paid_amount yang sama lalu double-apply — yang kedua
 		//    menunggu lock, lalu me-replan atas nilai terbaru (waterfall benar).
-		scheduleAllocs, buyerCredit, err := planAllocationsLocked(ctx, tx, tenantID, p)
+		scheduleAllocs, buyerCredit, countsTowardPrice, err := planAllocationsLocked(ctx, tx, tenantID, p)
 		if err != nil {
 			return err
 		}
@@ -995,7 +1153,7 @@ func (r *GORMRepository) CommitPayment(ctx context.Context, tenantID uint64, p P
 			FinancingSourceID: p.FinancingSourceID,
 			Kind:              p.Kind,
 			InstallmentNo:     p.InstallmentNo,
-			CountsTowardPrice: true, // R4: pembayaran harga — selalu mengurangi outstanding
+			CountsTowardPrice: countsTowardPrice, // R4 + land (000095): false hanya jika SELURUH alokasi ke land
 		}
 		if err := tx.WithContext(ctx).Create(termin).Error; err != nil {
 			return fmt.Errorf("simpan termin: %w", err)
@@ -1089,7 +1247,15 @@ func (r *GORMRepository) CommitPayment(ctx context.Context, tenantID uint64, p P
 // planAllocationsLocked merencanakan alokasi dengan MENGUNCI cicilan terkait
 // (SELECT ... FOR UPDATE) memakai transaksi tx. Urutan lock deterministik
 // (installment, due_date, id) untuk mencegah deadlock antar transaksi.
-func planAllocationsLocked(ctx context.Context, tx *gorm.DB, tenantID uint64, p PaymentCommitParams) ([]ScheduleAllocation, domain.Money, error) {
+//
+// Return ketiga (countsTowardPrice) menjawab "apakah pembayaran ini mengurangi
+// harga rumah" (R4/CountsTowardPrice) — DEFAULT true (perilaku lama, semua
+// pembayaran harga), kecuali SELURUH alokasi menyasar baris ScheduleTypeLand
+// (migrasi 000095) DAN tidak ada sisa saldo kredit. Pembayaran campuran
+// unit+land dalam satu termin (unapplied>0 dari kontrak, atau salah satu
+// alokasi menyasar cicilan rumah) tetap true — aproksimasi yang sama seperti
+// perilaku pra-land untuk kombinasi lain, bukan regresi baru.
+func planAllocationsLocked(ctx context.Context, tx *gorm.DB, tenantID uint64, p PaymentCommitParams) ([]ScheduleAllocation, domain.Money, bool, error) {
 	switch {
 	case p.ScheduleID != nil:
 		var sch PaymentSchedule
@@ -1099,12 +1265,12 @@ func planAllocationsLocked(ctx context.Context, tx *gorm.DB, tenantID uint64, p 
 			First(&sch).Error
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, domain.Zero, ErrScheduleNotFound
+				return nil, domain.Zero, true, ErrScheduleNotFound
 			}
-			return nil, domain.Zero, fmt.Errorf("lock cicilan #%d: %w", *p.ScheduleID, err)
+			return nil, domain.Zero, true, fmt.Errorf("lock cicilan #%d: %w", *p.ScheduleID, err)
 		}
 		allocs, unapplied := planForSchedule(&sch, p.Amount)
-		return allocs, unapplied, nil
+		return allocs, unapplied, sch.Type != ScheduleTypeLand, nil
 	case p.ContractID != nil:
 		var schedules []*PaymentSchedule
 		err := tx.WithContext(ctx).
@@ -1113,12 +1279,23 @@ func planAllocationsLocked(ctx context.Context, tx *gorm.DB, tenantID uint64, p 
 			Order("installment_number ASC, due_date ASC, id ASC").
 			Find(&schedules).Error
 		if err != nil {
-			return nil, domain.Zero, fmt.Errorf("lock cicilan kontrak %d: %w", *p.ContractID, err)
+			return nil, domain.Zero, true, fmt.Errorf("lock cicilan kontrak %d: %w", *p.ContractID, err)
 		}
 		allocs, unapplied := planForContract(schedules, p.Amount)
-		return allocs, unapplied, nil
+		typeByID := make(map[uint64]ScheduleType, len(schedules))
+		for _, s := range schedules {
+			typeByID[s.ID] = s.Type
+		}
+		countsTowardPrice := unapplied.GreaterThan(domain.Zero)
+		for _, a := range allocs {
+			if typeByID[a.ScheduleID] != ScheduleTypeLand {
+				countsTowardPrice = true
+				break
+			}
+		}
+		return allocs, unapplied, countsTowardPrice, nil
 	default:
-		return nil, p.Amount, nil // tanpa kontrak → seluruhnya saldo kredit
+		return nil, p.Amount, true, nil // tanpa kontrak → seluruhnya saldo kredit
 	}
 }
 

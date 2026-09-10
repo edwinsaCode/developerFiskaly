@@ -33,7 +33,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./backend:/app
-      - go_cache:/root/go/pkg/mod
+      - go_cache:/go/pkg/mod
     # Host memakai systemd-resolved (stub 127.0.0.53) yang TIDAK bisa dipakai
     # dari dalam container. Tanpa ini, `go mod download` gagal saat go_cache
     # kosong (mis. volume baru/di-prune) dan backend gagal boot. Nilainya sama

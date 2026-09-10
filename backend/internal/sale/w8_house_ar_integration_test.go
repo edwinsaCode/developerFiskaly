@@ -198,9 +198,9 @@ func (e *w8Env) seedUnit(t *testing.T, code string) uint64 {
 	t.Helper()
 	e.db.Exec(`INSERT IGNORE INTO product_types (tenant_id, code, name, category, revenue_account_code, is_active)
 		VALUES (?,?,?,?,?,TRUE)`, e.tenant, "rumah", "rumah", "property", "4-1000")
-	if err := e.db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, list_price, status)
-		VALUES (?,?,?,?,?,?,?)`,
-		e.tenant, e.projectID, code, "rumah", domain.FromInt(100), domain.FromInt(0), "reserved").Error; err != nil {
+	if err := e.db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, land_area, list_price, status)
+		VALUES (?,?,?,?,?,?,?,?)`,
+		e.tenant, e.projectID, code, "rumah", domain.FromInt(100), domain.FromInt(100), domain.FromInt(0), "reserved").Error; err != nil {
 		t.Fatalf("seed unit: %v", err)
 	}
 	var id uint64
@@ -261,6 +261,22 @@ func (e *w8Env) bast(t *testing.T, unitID uint64, price int64, date time.Time) *
 	t.Helper()
 	rec, err := e.svc.RecordAkad(context.Background(), e.tenant, sale.RecordBASTRequest{
 		UnitID: unitID, SalePrice: domain.FromInt(price), BuyerRef: "Budi", BASTDate: date,
+	})
+	if err != nil {
+		t.Fatalf("RecordBAST: %v", err)
+	}
+	return rec
+}
+
+// bastWithApproval (Item 7A, UAT 2026-09-07): variant untuk kontrak KPR yang
+// Akad-nya sudah terjadi SEBELUM BAST — Nilai Persetujuan KPR Bank wajib
+// diisi di titik ini (lihat resolveBankApprovedAmount).
+func (e *w8Env) bastWithApproval(t *testing.T, unitID uint64, price, approved int64, date time.Time) *sale.SaleRecord {
+	t.Helper()
+	amt := domain.FromInt(approved)
+	rec, err := e.svc.RecordAkad(context.Background(), e.tenant, sale.RecordBASTRequest{
+		UnitID: unitID, SalePrice: domain.FromInt(price), BuyerRef: "Budi", BASTDate: date,
+		BankApprovedAmount: &amt,
 	})
 	if err != nil {
 		t.Fatalf("RecordBAST: %v", err)
@@ -471,28 +487,32 @@ func TestIntegration_W8_HouseAR_KPR_ControlAccountSplit(t *testing.T) {
 		}
 	}
 
-	// BAST pasca-akad: sisa 900jt menjadi piutang BANK (T-3), bukan customer.
-	env.bast(t, unitID, price, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	// BAST pasca-akad: Nilai Persetujuan KPR Bank 900jt (== sisa) → seluruhnya
+	// piutang BANK, bukan customer.
+	env.bastWithApproval(t, unitID, price, 900_000_000, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
 	env.assertTieOut(t, "BAST pasca-akad", "900000000",
 		map[string]string{"1-2200": "900000000", "1-2000": "0"})
 	if got := env.customerARTotal(t); got != "0" {
 		t.Errorf("piutang CUSTOMER saat debitur adalah bank = %s, want 0 (D-W8-6)", got)
 	}
 
-	// Pencairan SEBAGIAN: bank selesai pada nilai cair, sisanya menjadi piutang
-	// customer (T-3). Dua akun kontrol bergerak berlawanan — persis kasus yang
-	// akan lolos kalau tie-out hanya membandingkan satu angka total.
+	// Pencairan SEBAGIAN (Item 7C, UAT 2026-09-07 — T-3 lama DICABUT): sisa
+	// komitmen bank TETAP di Dana Jaminan Bank, TIDAK diam-diam pindah ke
+	// piutang customer. Dua akun kontrol bergerak berlawanan adalah PERSIS
+	// bug lama yang wajib direproduksi & dicegah di sini.
 	env.pay(t, c.ID, 800_000_000, sale.PaymentSourceKPRDisbursement,
 		time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC), &env.finSourceID)
 	env.assertTieOut(t, "pencairan sebagian", "100000000",
-		map[string]string{"1-2200": "0", "1-2000": "100000000"})
-	if got := env.customerARTotal(t); got != "100000000" {
-		t.Errorf("kekurangan pasca-pencairan = %s, want 100000000 (T-3)", got)
+		map[string]string{"1-2200": "100000000", "1-2000": "0"})
+	if got := env.customerARTotal(t); got != "0" {
+		t.Errorf("kekurangan pasca-pencairan #1 = %s, want 0 (Item 7C: tetap tanggungan bank, bukan customer)", got)
 	}
 
-	// Pelunasan kekurangan oleh customer.
-	env.pay(t, c.ID, 100_000_000, sale.PaymentSourceCollection, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), nil)
-	env.assertTieOut(t, "kekurangan lunas", "0",
+	// Pencairan bank KEDUA melunasi sisa Dana Jaminan Bank persis — TIDAK ada
+	// pelunasan oleh customer di jalur ini.
+	env.pay(t, c.ID, 100_000_000, sale.PaymentSourceKPRDisbursement,
+		time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), &env.finSourceID)
+	env.assertTieOut(t, "Dana Jaminan Bank lunas", "0",
 		map[string]string{"1-2200": "0", "1-2000": "0"})
 }
 

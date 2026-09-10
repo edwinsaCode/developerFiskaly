@@ -26,8 +26,8 @@ Pengecualian: 1-4900 Akumulasi Penyusutan adalah kontra-aset — saldo normalnya
 | 1-2000 | Piutang Usaha                                | Aset  | D            | Sistem; tagihan buyer pasca-BAST |
 | 1-2100 | Piutang Lain-lain                            | Aset  | D            | |
 | 1-3000 | ★ Persediaan Real Estat — Tanah              | Aset  | D            | Sistem; biaya tanah yang dikapitalisasi |
-| 1-3100 | ★ Persediaan Real Estat — Hard Cost          | Aset  | D            | Sistem; biaya konstruksi yang dikapitalisasi |
-| 1-3200 | ★ Persediaan Real Estat — Soft Cost          | Aset  | D            | Sistem; desain, perizinan, legal |
+| 1-3100 | ★ Persediaan Real Estat — Hard Cost          | Aset  | D            | Sistem; biaya konstruksi (produksi, sarana & prasarana, perizinan) yang dikapitalisasi |
+| 1-3200 | ★ Persediaan Real Estat — Soft Cost          | Aset  | D            | Sistem; desain, legal |
 | 1-3300 | ★ Persediaan Real Estat — Biaya Pembiayaan   | Aset  | D            | Sistem; bunga/biaya pinjaman yang dikapitalisasi |
 | 1-4000 | Aset Tetap — Peralatan Kantor                | Aset  | D            | |
 | 1-4100 | Aset Tetap — Kendaraan                       | Aset  | D            | |
@@ -101,8 +101,8 @@ Saldo normal: **Debit**.
 | Kode     | Nama                              | Peran dalam mekanik |
 |----------|-----------------------------------|---------------------|
 | 1-3000   | Persediaan Real Estat — Tanah     | Menampung biaya tanah yang dikapitalisasi |
-| 1-3100   | Persediaan Real Estat — Hard Cost | Menampung biaya konstruksi yang dikapitalisasi |
-| 1-3200   | Persediaan Real Estat — Soft Cost | Menampung biaya perizinan/desain/legal yang dikapitalisasi |
+| 1-3100   | Persediaan Real Estat — Hard Cost | Menampung biaya konstruksi (produksi, sarana & prasarana, perizinan) yang dikapitalisasi — RULE KLIEN 2026-09-03: HPP Konstruksi = Produksi + Sarana & Prasarana + Perizinan |
+| 1-3200   | Persediaan Real Estat — Soft Cost | Menampung biaya desain/legal yang dikapitalisasi (perizinan TIDAK di sini — lihat 1-3100) |
 | 1-3300   | Persediaan Real Estat — Pembiayaan| Menampung bunga/biaya pinjaman yang dikapitalisasi |
 | 2-2000   | Uang Muka Penjualan               | Kewajiban atas DP/termin sebelum BAST; **bukan pendapatan** |
 | 2-4000   | Hutang PPh Final Pengalihan       | Kewajiban pajak final 2,5% per unit yang dialihkan |

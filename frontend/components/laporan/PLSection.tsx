@@ -11,6 +11,10 @@ interface Props {
   title?: string;
 }
 
+function fmtID(dateStr: string): string {
+  return new Date(dateStr).toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" });
+}
+
 export function PLSection({ data, error, title = "Laba Rugi" }: Props) {
   if (error) {
     return <Card><p className="text-sm text-danger">Gagal memuat {title}. Coba lagi nanti.</p></Card>;
@@ -33,6 +37,11 @@ export function PLSection({ data, error, title = "Laba Rugi" }: Props) {
 
   return (
     <div className="space-y-6">
+      {data.from && (
+        <p className="text-xs text-text-secondary">
+          Periode: {fmtID(data.from)} s/d {fmtID(data.as_of)}
+        </p>
+      )}
       {/* Ringkasan */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <SummaryPill label="Total Pendapatan" value={data.total_pendapatan} />

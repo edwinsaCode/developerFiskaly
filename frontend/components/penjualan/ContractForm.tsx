@@ -159,7 +159,6 @@ export function ContractForm({
 
   const [buyerName, setBuyerName] = useState("");
   const [buyerId, setBuyerId] = useState("");
-  const [loanAmount, setLoanAmount] = useState("");
   const [contractDate, setContractDate] = useState(todayLocalStr());
   const [totalPrice, setTotalPrice] = useState(listPrice ?? "");
 
@@ -172,10 +171,9 @@ export function ContractForm({
   const [addons, setAddons] = useState<AddonRow[]>([]);
   const addonKey = useRef(0);
 
-  // Produk Tambahan: Kelebihan Tanah (kelebihan-tanah-booking-integration-2026-08)
-  // — HANYA untuk kontrak LANGSUNG (tanpa booking). Jalur konversi booking sudah
-  // membawa komponen tanah dari Booking di backend; menampilkan picker lagi di
-  // sini akan membingungkan/bisa dobel input, jadi disembunyikan bila bookingId ada.
+  // Produk Tambahan: Kelebihan Tanah (kelebihan-tanah-konversi-kontrak-2026-08)
+  // — dipilih di SINI, di Konversi Kontrak, baik untuk kontrak langsung maupun
+  // konversi dari Booking (Booking sendiri tidak lagi membawa komponen tanah).
   const [landPool, setLandPool] = useState<LandStock | null>(null);
   const [wantsLand, setWantsLand] = useState(false);
   const [landQty, setLandQty] = useState("");
@@ -189,10 +187,8 @@ export function ContractForm({
     fetchProductTypes(token)
       .then((pts) => setAddonProducts(pts.filter(isAddonProduct)))
       .catch(() => {});
-    if (!bookingId) {
-      fetchLandStock(token, projectId).then(setLandPool).catch(() => setLandPool(null));
-    }
-  }, [open, token, projectId, bookingId]);
+    fetchLandStock(token, projectId).then(setLandPool).catch(() => setLandPool(null));
+  }, [open, token, projectId]);
 
   useEffect(() => {
     if (!open) {
@@ -273,7 +269,6 @@ export function ContractForm({
         buyer_name: buyerName.trim(),
         buyer_id: buyerId.trim(),
         payment_type: isKPR ? "kpr" : "tunai",
-        loan_amount: isKPR && loanAmount ? loanAmount : undefined,
         contract_date: new Date(contractDate).toISOString(),
         total_price: totalPrice,
         payment_scheme_id: parseInt(schemeId, 10),
@@ -282,7 +277,7 @@ export function ContractForm({
         admin_marketing_person_id: adminMarketingPersonId ? parseInt(adminMarketingPersonId, 10) : undefined,
         financing_source_id: isKPR ? parseInt(financingSourceId, 10) : undefined,
         booking_id: bookingId,
-        land_quantity_m2: !bookingId && wantsLand && landQty ? landQty : undefined,
+        land_quantity_m2: wantsLand && landQty ? landQty : undefined,
       });
 
       // Grup addon butuh sale_contract_id, jadi baru bisa dibuat setelah
@@ -500,20 +495,11 @@ export function ContractForm({
           required
           error={totalPrice && priceErr ? priceErr : undefined}
         />
-        {isKPR && (
-          <RupiahInput
-            label="Nilai Pengajuan KPR"
-            value={loanAmount}
-            onChange={setLoanAmount}
-            hint="Opsional; bisa diisi saat pengajuan ke bank."
-          />
-        )}
-
-        {/* Produk Tambahan: Kelebihan Tanah — hanya untuk kontrak LANGSUNG
-            (bookingId kosong). Jalur konversi booking membawa komponen tanah
-            dari Booking-nya sendiri di backend. Sales HANYA mengisi kuantitas;
-            harga & total di bawah murni preview dari harga pool proyek. */}
-        {!bookingId && landPool && landAvailable > 0 && (
+        {/* Produk Tambahan: Kelebihan Tanah — dipilih di sini baik untuk
+            kontrak langsung maupun konversi Booking (kelebihan-tanah-konversi-
+            kontrak-2026-08). Sales HANYA mengisi kuantitas; harga & total di
+            bawah murni preview dari harga JUAL pool proyek. */}
+        {landPool && landAvailable > 0 && (
           <FormFull>
             {!wantsLand ? (
               <button

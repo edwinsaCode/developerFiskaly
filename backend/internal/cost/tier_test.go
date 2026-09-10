@@ -18,6 +18,7 @@ import (
 func overheadReq() cost.CreateCostEntryRequest {
 	r := baseReq()
 	r.Category = domain.CostCategoryMarketing
+	r.HardSubcategory = "" // hard_subcategory hanya berlaku untuk category=hard
 	r.CostTier = domain.CostTierOverhead
 	r.Description = "Iklan pemasaran Proyek LITHOS"
 	return r
@@ -39,9 +40,11 @@ func TestTier_Inference_MatchesBackfillRule(t *testing.T) {
 		}, domain.CostTierShared},
 		{"kategori_marketing_jadi_overhead", func(r *cost.CreateCostEntryRequest) {
 			r.Category = domain.CostCategoryMarketing
+			r.HardSubcategory = ""
 		}, domain.CostTierOverhead},
 		{"kategori_other_jadi_overhead", func(r *cost.CreateCostEntryRequest) {
 			r.Category = domain.CostCategoryOther
+			r.HardSubcategory = ""
 		}, domain.CostTierOverhead},
 	}
 	for _, tc := range cases {
@@ -78,12 +81,16 @@ func TestTier_CategoryMatrix_InvalidCombos_Rejected(t *testing.T) {
 	}{
 		{"direct_marketing", domain.CostTierDirect, domain.CostCategoryMarketing, ptr64(7)},
 		{"direct_other", domain.CostTierDirect, domain.CostCategoryOther, ptr64(7)},
+		{"direct_operational", domain.CostTierDirect, domain.CostCategoryOperational, ptr64(7)},
+		// RULE KLIEN FREEZE (2026-09-04): Soft Cost bukan lagi kapitalisasi —
+		// direct/shared+soft sekarang ditolak juga (dulu valid, sekarang tidak).
+		{"direct_soft", domain.CostTierDirect, domain.CostCategorySoft, ptr64(7)},
 		{"shared_marketing", domain.CostTierShared, domain.CostCategoryMarketing, nil},
 		{"shared_other", domain.CostTierShared, domain.CostCategoryOther, nil},
+		{"shared_operational", domain.CostTierShared, domain.CostCategoryOperational, nil},
+		{"shared_soft", domain.CostTierShared, domain.CostCategorySoft, nil},
 		{"overhead_land", domain.CostTierOverhead, domain.CostCategoryLand, nil},
 		{"overhead_hard", domain.CostTierOverhead, domain.CostCategoryHard, nil},
-		{"overhead_soft", domain.CostTierOverhead, domain.CostCategorySoft, nil},
-		{"overhead_financing", domain.CostTierOverhead, domain.CostCategoryFinancing, nil},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -159,8 +166,12 @@ func TestTier_Overhead_PostsToExpenseAccount(t *testing.T) {
 		category      domain.CostCategory
 		wantDebitAcc  uint64 // ID akun beban di standardAccounts
 	}{
-		{domain.CostCategoryMarketing, 400}, // 5-3000 Beban Pemasaran
-		{domain.CostCategoryOther, 401},     // 5-4000 Beban Umum & Administrasi
+		{domain.CostCategoryMarketing, 400},   // 5-3000 Beban Pemasaran
+		{domain.CostCategoryOther, 401},       // 5-4000 Beban Umum & Administrasi
+		{domain.CostCategoryOperational, 402}, // 5-4600 Beban Operasional
+		// RULE KLIEN FREEZE (2026-09-04): Soft Cost bergabung ke himpunan beban
+		// overhead — akun 5-4700, tidak lagi Persediaan (1-3200).
+		{domain.CostCategorySoft, 403}, // 5-4700 Beban Soft Cost
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -407,6 +418,7 @@ func TestTier_ExplicitDirectShared_StillCapitalized(t *testing.T) {
 		req := baseReq()
 		req.CostTier = domain.CostTierShared
 		req.Category = domain.CostCategoryLand
+		req.HardSubcategory = ""
 		entry, err := svc.CreateCostEntry(context.Background(), 1, req)
 		if err != nil {
 			t.Fatalf("CreateCostEntry: %v", err)

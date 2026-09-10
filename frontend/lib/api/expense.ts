@@ -1,4 +1,4 @@
-import { apiFetch } from "./client";
+import { apiBase, apiFetch } from "./client";
 import type {
   CostPreviewResponse,
   ExpenseListItem,
@@ -39,6 +39,10 @@ export interface ExpenseBody {
   budget_item_id?: number;
   category?: string;
   cost_tier?: string;
+  // UAT 2026-09-07: produksi_subsidi|produksi_komersial|sarana_prasarana|
+  // perizinan — hanya bermakna saat category="hard", wajib saat cost_tier
+  // "shared" (tidak ditautkan unit).
+  hard_subcategory?: string;
 
   // purchase_type == fixed_asset
   fixed_asset_category_id?: number;
@@ -86,6 +90,41 @@ export async function fetchExpenses(
 
 export async function fetchExpense(token: string, id: number): Promise<ExpenseListItem> {
   return apiFetch<ExpenseListItem>(`/expenses/${id}`, { token });
+}
+
+// fetchExpenseListPrintHTML mengambil HTML cetak Riwayat Biaya siap-A4 untuk
+// satu proyek — representasi baca dari cost_entries, tidak ada apa pun yang
+// ditulis di sini.
+export async function fetchExpenseListPrintHTML(
+  token: string,
+  filter: ExpenseListFilter = {},
+): Promise<string> {
+  const q = new URLSearchParams();
+  if (filter.scope) q.set("scope", filter.scope);
+  if (filter.project_id) q.set("project_id", String(filter.project_id));
+  if (filter.from) q.set("from", filter.from);
+  if (filter.to) q.set("to", filter.to);
+  const qs = q.toString();
+  const res = await fetch(`${apiBase()}/expenses/print${qs ? `?${qs}` : ""}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Gagal memuat riwayat biaya (${res.status})`);
+  }
+  return res.text();
+}
+
+// fetchExpensePrintHTML mengambil HTML cetak Bukti Kas Keluar (BKK) siap-A4
+// untuk satu transaksi pengeluaran — representasi baca dari cost_entries,
+// dokumen sudah ada (document_number), tidak ada apa pun yang ditulis di sini.
+export async function fetchExpensePrintHTML(token: string, id: number): Promise<string> {
+  const res = await fetch(`${apiBase()}/expenses/${id}/print`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Gagal memuat bukti kas keluar (${res.status})`);
+  }
+  return res.text();
 }
 
 // previewExpense: dry-run. Mengembalikan jurnal PERSIS yang akan terbit,

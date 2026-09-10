@@ -251,9 +251,14 @@ func (f *w10Fixture) operasional(t *testing.T, expenseTypeID uint64, amount stri
 func (f *w10Fixture) proyek(t *testing.T, projectID uint64, amount string) cost.CreateCostEntryRequest {
 	t.Helper()
 	return cost.CreateCostEntryRequest{
-		ProjectID:       projectID,
-		Category:        domain.CostCategoryHard,
-		CostTier:        domain.CostTierShared,
+		ProjectID: projectID,
+		Category:  domain.CostCategoryHard,
+		CostTier:  domain.CostTierShared,
+		// UAT 2026-09-07: wajib diisi untuk tier=shared. Sarana & Prasarana
+		// dipilih di sini karena test-test W-10 ini menguji mekanika
+		// pencatatan/dokumen, bukan alokasi Subsidi/Komersial — subkategori
+		// yang tidak restricted-by-tax-category menjaga fixture tetap netral.
+		HardSubcategory: domain.ConstructionSaranaPrasarana,
 		Amount:          w10Money(t, amount),
 		PaymentMethod:   cost.PaymentMethodBank,
 		BankAccountCode: "1-1300",

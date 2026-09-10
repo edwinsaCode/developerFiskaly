@@ -45,6 +45,9 @@ export interface ProductType {
   category: "property" | "land" | "non_property";
   revenue_account_code: string;
   is_active: boolean;
+  // Rule klien UAT #3: subsidi|komersial, opsional. Kosong/absen = produk ini
+  // ikut projects.tax_category (jalur legacy) — lihat backend product_type.go.
+  tax_category?: "subsidi" | "komersial" | null;
 }
 
 // W-13 — satu produk, satu jalan jual.
@@ -73,7 +76,7 @@ export async function fetchProductTypes(token: string): Promise<ProductType[]> {
 
 export async function createProductType(
   token: string,
-  data: { code: string; name: string; category: string; revenue_account_code?: string },
+  data: { code: string; name: string; category: string; revenue_account_code?: string; tax_category?: string },
 ): Promise<ProductType> {
   return apiFetch<ProductType>("/product-types", { token, method: "POST", body: data });
 }
@@ -81,7 +84,8 @@ export async function createProductType(
 export async function updateProductType(
   token: string,
   id: number,
-  data: { name?: string; revenue_account_code?: string; is_active?: boolean },
+  // tax_category: "" mengosongkan (kembali ke jalur legacy projects.tax_category).
+  data: { name?: string; revenue_account_code?: string; is_active?: boolean; tax_category?: string },
 ): Promise<ProductType> {
   return apiFetch<ProductType>(`/product-types/${id}`, { token, method: "PATCH", body: data });
 }
@@ -95,6 +99,7 @@ export interface BulkCreateUnitsInput {
   unit_type: string;
   type_label?: string;
   saleable_area?: string;
+  land_area?: string; // m² — diterapkan sama ke seluruh unit dalam blok
   list_price: string;
   phase_id?: number;
 }

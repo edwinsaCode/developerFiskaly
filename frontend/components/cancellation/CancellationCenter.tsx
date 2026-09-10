@@ -239,7 +239,7 @@ export function CancellationCenter({ token, initialTab = "cancellation", openId 
       ) : pendingRefunds.length === 0 && refunds.length === 0 ? (
         <EmptyState
           title="Belum ada refund"
-          description="Refund muncul dari pembatalan kontrak (sisa dana buyer) atau baris booking legacy pending-refund. Booking baru: fee = Pendapatan Booking, tidak ada refund."
+          description="Refund muncul dari pembatalan kontrak (sisa dana buyer) atau booking yang ditandai Refundable saat dibuat lalu dibatalkan. Booking non-refundable (default): fee = Pendapatan Booking, tidak ada refund."
         />
       ) : (
         <Card padding="sm" className="overflow-x-auto">

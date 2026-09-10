@@ -26,7 +26,9 @@ export interface Booking {
   expiry_date: string;
   status: BookingStatus;
   fee_disposition: FeeDisposition;
-  termin_payment_id: number;
+  // Client final note 2026-09-10: null bila booking_fee = 0 (tanpa termin/
+  // jurnal/kwitansi — murni reservasi unit).
+  termin_payment_id?: number;
   /** Kwitansi KWB penerimaan fee — selalu terbit bersama booking (INV-DOC-1). */
   receipt_id?: number;
   receipt_number?: string;
@@ -36,11 +38,6 @@ export interface Booking {
   closed_event_date?: string;
   notes?: string;
   created_at: string;
-  /** Produk Tambahan: Kelebihan Tanah — hadir hanya bila booking ini menyertakannya. */
-  land_stock_id?: number;
-  land_reservation_id?: number;
-  land_quantity_m2?: string;
-  land_unit_price_snapshot?: string;
 }
 
 export interface CreateBookingInput {
@@ -52,12 +49,6 @@ export interface CreateBookingInput {
   booking_date?: string; // YYYY-MM-DD
   expiry_date: string;   // YYYY-MM-DD
   notes?: string;
-  /**
-   * Produk Tambahan: Kelebihan Tanah (kelebihan-tanah-booking-integration-2026-08).
-   * Salesperson mengisi HANYA kuantitas (m²) — harga & reservasi diselesaikan
-   * server-side dari LandStock proyek unit ini. Kosong = booking tanpa tanah.
-   */
-  land_quantity_m2?: string;
 }
 
 export async function fetchBookings(
@@ -105,6 +96,20 @@ export async function cancelBooking(
   return apiFetch<Booking>(`/bookings/${id}/cancel`, {
     method: "POST",
     body: { reason, event_date: eventDate },
+    token,
+  });
+}
+
+export async function transferBooking(
+  token: string,
+  id: number,
+  newUnitId: number,
+  reason?: string,
+  eventDate?: string,
+): Promise<Booking> {
+  return apiFetch<Booking>(`/bookings/${id}/transfer`, {
+    method: "POST",
+    body: { new_unit_id: newUnitId, reason, event_date: eventDate },
     token,
   });
 }

@@ -247,7 +247,12 @@ func (s *Service) PreviewAll(ctx context.Context, tenantID uint64, at time.Time)
 type ListFilter struct {
 	TypeCode   string
 	FiscalYear uint16
-	Limit      int
+	// Number — pencarian PERSIS satu nomor dokumen (mis. "BKK/2026/000002"),
+	// dipakai layar mana pun yang menampilkan nomor dokumen sebagai teks dan
+	// perlu membukanya (lihat DocumentNumberLink di frontend). Nomor bersifat
+	// unik per tenant dan tidak pernah dipakai ulang (append-only).
+	Number string
+	Limit  int
 }
 
 func (s *Service) ListDocuments(ctx context.Context, tenantID uint64, f ListFilter) ([]*Document, error) {
@@ -260,6 +265,9 @@ func (s *Service) ListDocuments(ctx context.Context, tenantID uint64, f ListFilt
 	}
 	if f.FiscalYear > 0 {
 		q = q.Where("fiscal_year = ?", f.FiscalYear)
+	}
+	if n := strings.TrimSpace(f.Number); n != "" {
+		q = q.Where("number = ?", n)
 	}
 	var out []*Document
 	if err := q.Order("id DESC").Limit(f.Limit).Find(&out).Error; err != nil {

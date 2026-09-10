@@ -79,7 +79,8 @@ func (c ProductCategory) ParticipatesInProjectProgress() bool {
 // menjawab "ikut pool APA PUN") — dipakai allocation engine saat Compute()
 // dipanggil per-pool (LT-5, belum ada pemanggil pada LT-1).
 //
-//	property → semua pool (Land/Hard/Soft/Financing).
+//	property → semua pool kapitalisasi (RULE KLIEN FREEZE 2026-09-04: Land/Hard
+//	           saja — Soft/Operational bukan lagi pool kapitalisasi).
 //	land     → hanya pool Land.
 //	lainnya  → tidak ada pool.
 func (c ProductCategory) ParticipatesInCostPool(pool CostCategory) bool {
@@ -126,6 +127,12 @@ type ProductPolicy struct {
 	Name               string
 	Category           ProductCategory
 	RevenueAccountCode string
+	// TaxCategory (rule klien UAT #3): subsidi/komersial adalah klasifikasi
+	// PRODUK (mis. kode "rumah_subsidi" vs "rumah_komersial"), bukan skema KPR
+	// dan bukan cuma atribut proyek — satu proyek boleh menjual keduanya.
+	// nil = produk ini tidak menentukan sendiri (proyek tetap sumber penentu,
+	// mis. kode legacy "rumah" atau produk non-rumah seperti ruko/PDAM).
+	TaxCategory *TaxCategory
 }
 
 // ParticipatesInHPP mendelegasikan ke fungsi kanonik kategori.

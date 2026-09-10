@@ -14,19 +14,30 @@ import type {
   ARAgingReport,
 } from "@/lib/types/api";
 
+// startDate (Item 5, opsional): filter batas bawah tanggal — Neraca (Laba Rugi
+// Tahun Berjalan dihitung dari [startDate, asOf], akun neraca tetap kumulatif
+// s/d asOf) dan L/R (semua baris dibatasi ke jendela [startDate, asOf]).
 export async function fetchNeraca(
   token: string,
   asOf?: string,
+  startDate?: string,
 ): Promise<NeracaReport> {
-  const qs = asOf ? `?as_of=${asOf}` : "";
+  const params = new URLSearchParams();
+  if (asOf) params.set("as_of", asOf);
+  if (startDate) params.set("start_date", startDate);
+  const qs = params.toString() ? `?${params}` : "";
   return apiFetch<NeracaReport>(`/reports/balance-sheet${qs}`, { token });
 }
 
 export async function fetchPL(
   token: string,
   asOf?: string,
+  startDate?: string,
 ): Promise<PLReport> {
-  const qs = asOf ? `?as_of=${asOf}` : "";
+  const params = new URLSearchParams();
+  if (asOf) params.set("as_of", asOf);
+  if (startDate) params.set("start_date", startDate);
+  const qs = params.toString() ? `?${params}` : "";
   return apiFetch<PLReport>(`/reports/income-statement${qs}`, { token });
 }
 
@@ -34,8 +45,12 @@ export async function fetchProjectPL(
   token: string,
   projectId: number,
   asOf?: string,
+  startDate?: string,
 ): Promise<PLReport> {
-  const qs = asOf ? `?as_of=${asOf}` : "";
+  const params = new URLSearchParams();
+  if (asOf) params.set("as_of", asOf);
+  if (startDate) params.set("start_date", startDate);
+  const qs = params.toString() ? `?${params}` : "";
   return apiFetch<PLReport>(`/reports/project-pl/${projectId}${qs}`, { token });
 }
 
@@ -300,7 +315,11 @@ export async function fetchKPRPipeline(token: string): Promise<KPRPipelineReport
 const PRINT_PATHS: Record<string, (p: URLSearchParams) => string> = {
   "balance-sheet": (p) => `/reports/balance-sheet/print?${p}`,
   "income-statement": (p) => `/reports/income-statement/print?${p}`,
-  "project-pl": (p) => `/reports/project-pl/${p.get("project_id") ?? "0"}/print?as_of=${p.get("as_of") ?? ""}`,
+  "project-pl": (p) => {
+    const rest = new URLSearchParams(p);
+    rest.delete("project_id");
+    return `/reports/project-pl/${p.get("project_id") ?? "0"}/print?${rest}`;
+  },
   "cash-flow": (p) => `/reports/cash-flow/print?${p}`,
   "sales-pipeline": () => `/reports/sales-pipeline/print`,
   "tax-liability": (p) => `/reports/tax-liability/print?${p}`,

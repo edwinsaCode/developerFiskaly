@@ -277,6 +277,7 @@ func mustCreateDraftWithItem(t *testing.T, svc *budget.Service, tenantID, projec
 	_, err = svc.AddItem(context.Background(), tenantID, budget.AddItemRequest{
 		PlanID:         plan.ID,
 		Category:       budget.BudgetCategoryConstruction,
+		Subcategory:    string(domain.ConstructionSaranaPrasarana),
 		BudgetedAmount: rupiah(amount),
 	})
 	if err != nil {
@@ -376,6 +377,7 @@ func TestBudget_AddItem_FractionalAmount_Error(t *testing.T) {
 	_, err := svc.AddItem(context.Background(), 1, budget.AddItemRequest{
 		PlanID:         plan.ID,
 		Category:       budget.BudgetCategoryConstruction,
+		Subcategory:    string(domain.ConstructionSaranaPrasarana),
 		BudgetedAmount: fractional,
 	})
 	if !errors.Is(err, budget.ErrAmountFractional) {
@@ -434,9 +436,14 @@ func TestBudget_AddItem_AllSixCategories_Valid(t *testing.T) {
 	plan, _ := svc.CreatePlan(context.Background(), 1, budget.CreatePlanRequest{ProjectID: 10, Label: "RAB"})
 
 	for _, cat := range budget.AllBudgetCategories {
+		sub := ""
+		if cat == budget.BudgetCategoryConstruction {
+			sub = string(domain.ConstructionSaranaPrasarana)
+		}
 		_, err := svc.AddItem(context.Background(), 1, budget.AddItemRequest{
 			PlanID:         plan.ID,
 			Category:       cat,
+			Subcategory:    sub,
 			BudgetedAmount: rupiah(10_000_000),
 		})
 		if err != nil {
@@ -682,6 +689,7 @@ func TestBudget_RABvsRealisasi_ConstructionMapsToHard(t *testing.T) {
 	plan, _ := svc.CreatePlan(context.Background(), 1, budget.CreatePlanRequest{ProjectID: 10, Label: "RAB"})
 	_, _ = svc.AddItem(context.Background(), 1, budget.AddItemRequest{
 		PlanID: plan.ID, Category: budget.BudgetCategoryConstruction,
+		Subcategory:    string(domain.ConstructionSaranaPrasarana),
 		BudgetedAmount: rupiah(1_000_000_000),
 	})
 	_, _ = svc.ApprovePlan(context.Background(), 1, budget.ApprovePlanRequest{PlanID: plan.ID, ApprovedBy: "admin"})
@@ -715,9 +723,9 @@ func TestBudget_RABvsRealisasi_ConstructionMapsToHard(t *testing.T) {
 	if constructionRow.Selisih != "400000000" {
 		t.Errorf("Selisih=%s, want 400000000", constructionRow.Selisih)
 	}
-	// Persen = 60.00%
-	if constructionRow.PersenRealisasi != "60.00%" {
-		t.Errorf("PersenRealisasi=%s, want 60.00%%", constructionRow.PersenRealisasi)
+	// Persen = fraksi 0.6 (kontrak <Persen> FE: fraksi mentah, bukan sudah *100)
+	if constructionRow.PersenRealisasi != "0.6" {
+		t.Errorf("PersenRealisasi=%s, want 0.6", constructionRow.PersenRealisasi)
 	}
 }
 
@@ -751,8 +759,8 @@ func TestBudget_RABvsRealisasi_MarketingOther_TerealisasiViaOverhead(t *testing.
 			if row.Realisasi != "30000000" {
 				t.Errorf("marketing: realisasi=%s, want 30000000 (via tier overhead)", row.Realisasi)
 			}
-			if row.PersenRealisasi != "60.00%" {
-				t.Errorf("marketing: persen=%s, want 60.00%%", row.PersenRealisasi)
+			if row.PersenRealisasi != "0.6" {
+				t.Errorf("marketing: persen=%s, want 0.6", row.PersenRealisasi)
 			}
 		case budget.BudgetCategoryOther:
 			if row.Realisasi != "5000000" {
@@ -766,10 +774,10 @@ func TestBudget_RABvsRealisasi_MarketingOther_TerealisasiViaOverhead(t *testing.
 func TestBudget_RABvsRealisasi_SemuaKategori(t *testing.T) {
 	store := newMockStore()
 	realisasi := &mockRealisasiProvider{data: map[domain.CostCategory]domain.Money{
-		domain.CostCategoryLand:      rupiah(180_000_000),
-		domain.CostCategoryHard:      rupiah(350_000_000),
-		domain.CostCategorySoft:      rupiah(40_000_000),
-		domain.CostCategoryFinancing: rupiah(15_000_000),
+		domain.CostCategoryLand:        rupiah(180_000_000),
+		domain.CostCategoryHard:        rupiah(350_000_000),
+		domain.CostCategorySoft:        rupiah(40_000_000),
+		domain.CostCategoryOperational: rupiah(15_000_000),
 	}}
 	svc := buildService(store, realisasi)
 
@@ -778,13 +786,17 @@ func TestBudget_RABvsRealisasi_SemuaKategori(t *testing.T) {
 		budget.BudgetCategoryLand:         200_000_000,
 		budget.BudgetCategoryConstruction: 500_000_000, // construction ↔ hard
 		budget.BudgetCategorySoft:         80_000_000,
-		budget.BudgetCategoryFinancing:    30_000_000,
+		budget.BudgetCategoryOperational:  30_000_000,
 		budget.BudgetCategoryMarketing:    25_000_000,
 		budget.BudgetCategoryOther:        10_000_000,
 	}
 	for cat, amt := range budgets {
+		sub := ""
+		if cat == budget.BudgetCategoryConstruction {
+			sub = string(domain.ConstructionSaranaPrasarana)
+		}
 		_, _ = svc.AddItem(context.Background(), 1, budget.AddItemRequest{
-			PlanID: plan.ID, Category: cat, BudgetedAmount: rupiah(amt),
+			PlanID: plan.ID, Category: cat, Subcategory: sub, BudgetedAmount: rupiah(amt),
 		})
 	}
 	_, _ = svc.ApprovePlan(context.Background(), 1, budget.ApprovePlanRequest{PlanID: plan.ID, ApprovedBy: "x"})
@@ -819,7 +831,7 @@ func TestBudget_RABvsRealisasi_BudgetNol_PersenNA(t *testing.T) {
 	// Buat plan dengan item construction saja; land tidak ada item → budget land = 0
 	plan, _ := svc.CreatePlan(context.Background(), 1, budget.CreatePlanRequest{ProjectID: 10, Label: "RAB"})
 	_, _ = svc.AddItem(context.Background(), 1, budget.AddItemRequest{
-		PlanID: plan.ID, Category: budget.BudgetCategoryConstruction, BudgetedAmount: rupiah(100_000_000),
+		PlanID: plan.ID, Category: budget.BudgetCategoryConstruction, Subcategory: string(domain.ConstructionSaranaPrasarana), BudgetedAmount: rupiah(100_000_000),
 	})
 	_, _ = svc.ApprovePlan(context.Background(), 1, budget.ApprovePlanRequest{PlanID: plan.ID})
 
@@ -842,19 +854,17 @@ func TestBudget_RABvsRealisasi_NoActivePlan_Error(t *testing.T) {
 	}
 }
 
-// ── Test: RAB TIDAK memposting jurnal apa pun ─────────────────────────────────
+// ── Test: RAB APPROVED tidak memposting jurnal apa pun (Item 8, UAT 2026-09-07) ─
+// RULE KLIEN 2026-09-04 (kapitalisasi Construction penuh ke Persediaan saat
+// approval) DICABUT klien: RAB murni budget/planning. Persediaan/HPP kini
+// murni biaya AKTUAL dari cost entry (internal/cost), tidak lagi dari RAB.
+// ApprovePlan hanya mengaktifkan plan (dan men-supersede versi lama) — tidak
+// menyentuh ledger sama sekali.
 
-// TestBudget_RABTidakPostingKeJurnal membuktikan bahwa Service tidak mempunyai
-// dependensi ke JournalWriter atau PostingService. RAB adalah perencanaan, bukan
-// transaksi keuangan. Bukti: budget.Service hanya menerima BudgetStore dan
-// RealisasiProvider — tidak ada JournalWriter dalam constructor-nya.
-func TestBudget_RABTidakPostingKeJurnal(t *testing.T) {
+func TestBudget_ApprovePlan_DoesNotPostAnyJournal(t *testing.T) {
 	store := newMockStore()
 	realisasi := &mockRealisasiProvider{}
-
-	// NewService hanya menerima BudgetStore dan RealisasiProvider.
-	// Jika ada upaya menambahkan JournalWriter, kompilasi akan gagal (type error).
-	svc := budget.NewService(store, realisasi)
+	svc := buildService(store, realisasi)
 
 	planID := mustCreateDraftWithItem(t, svc, 1, 10, nil, 100_000_000)
 	approved, err := svc.ApprovePlan(context.Background(), 1, budget.ApprovePlanRequest{
@@ -863,12 +873,10 @@ func TestBudget_RABTidakPostingKeJurnal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApprovePlan: %v", err)
 	}
-
-	// Store tidak punya metode CreateJournal → tidak ada jurnal yang dibuat
-	// (kompilasi membuktikan ini: mockBudgetStore tidak mengimplementasi JournalWriter)
 	if approved.Status != budget.BudgetPlanStatusActive {
 		t.Error("plan harus active setelah approve")
 	}
-	// Tidak ada side effect ke ledger
-	t.Log("RAB approve tidak memposting ke ledger — terbukti dari tidak adanya JournalWriter dependency")
+	// Tidak ada TxRunner/JournalWriter untuk dipasang lagi — ApprovePlan sukses
+	// tanpa kolaborator ledger sama sekali, membuktikan tidak ada jurnal yang
+	// bisa terposting dari jalur ini.
 }

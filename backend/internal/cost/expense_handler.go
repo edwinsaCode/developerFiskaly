@@ -13,6 +13,7 @@ package cost
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -42,9 +43,11 @@ const (
 func (h *Handler) mountExpenses(r chi.Router) {
 	r.Route("/expenses", func(r chi.Router) {
 		r.Get("/", h.listExpenses)
+		r.Get("/print", h.printExpenses)
 		r.Post("/preview", h.previewExpense)
 		r.With(auth.RequireWrite()).Post("/", h.createExpense)
 		r.Get("/{id}", h.getExpense)
+		r.Get("/{id}/print", h.printExpenseReceipt)
 	})
 
 	r.Route("/expense-types", func(r chi.Router) {
@@ -82,6 +85,11 @@ type expenseDTO struct {
 	BudgetItemID *uint64 `json:"budget_item_id,omitempty"`
 	Category     string  `json:"category,omitempty"`
 	CostTier     string  `json:"cost_tier,omitempty"`
+	// HardSubcategory (UAT 2026-09-07): produksi_subsidi|produksi_komersial|
+	// sarana_prasarana|perizinan — hanya bermakna saat Category=hard. Wajib
+	// diisi lewat jalur Pengeluaran yang sama seperti jalur Cost Entry
+	// langsung, karena keduanya menulis ke CreateCostEntryRequest yang sama.
+	HardSubcategory string `json:"hard_subcategory,omitempty"`
 
 	// PurchaseType = fixed_asset
 	FixedAssetCategoryID *uint64 `json:"fixed_asset_category_id,omitempty"`
@@ -133,6 +141,7 @@ func (dto expenseDTO) toRequest(amount domain.Money, date time.Time) (CreateCost
 		}
 		req.Category = domain.CostCategory(dto.Category)
 		req.CostTier = domain.CostTier(dto.CostTier)
+		req.HardSubcategory = domain.ConstructionSubcategory(dto.HardSubcategory)
 
 	default:
 		return CreateCostEntryRequest{}, errors.New("scope tidak valid: gunakan operasional atau proyek")
@@ -430,6 +439,105 @@ func (h *Handler) listExpenses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeCostJSON(w, http.StatusOK, items)
+}
+
+// ── Cetak (HTML A4 siap-cetak, bukan JSON) ───────────────────────────────────
+//
+// Pola sama dengan internal/ap/handler.go (getPaymentPrint): sumber data SAMA
+// dengan endpoint JSON di atas (listExpenses/getExpense), tidak ada yang
+// dihitung ulang. Lihat internal/cost/print.go untuk template HTML-nya.
+
+func writeCostPrintHTML(w http.ResponseWriter, render func(io.Writer) error) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = render(w)
+}
+
+// printExpenses merender Riwayat Biaya (satu proyek, atau seluruh tenant bila
+// project_id tidak diisi) — filter SAMA dengan listExpenses, hanya batasnya
+// dilonggarkan supaya cetakan tidak terpotong diam-diam.
+func (h *Handler) printExpenses(w http.ResponseWriter, r *http.Request) {
+	tenantID, err := costTenantID(r)
+	if err != nil {
+		writeCostError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	q := r.URL.Query()
+	f := ExpenseFilter{Scope: q.Get("scope"), Limit: 5000}
+	if v := q.Get("from"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			f.From = &t
+		}
+	}
+	if v := q.Get("to"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			f.To = &t
+		}
+	}
+	var projectID uint64
+	var hasProject bool
+	if v := q.Get("project_id"); v != "" {
+		if id, err := parseUint(v); err == nil {
+			f.ProjectID = &id
+			projectID = id
+			hasProject = true
+		}
+	}
+	items, err := h.svc.ListExpenses(r.Context(), tenantID, f)
+	if err != nil {
+		writeCostError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	company, _ := h.printRepo.TenantName(r.Context(), tenantID)
+	var projectName string
+	if hasProject {
+		projectName, _ = h.printRepo.ProjectName(r.Context(), tenantID, projectID)
+	}
+	writeCostPrintHTML(w, func(w io.Writer) error { return RenderCostHistoryPrint(w, company, projectName, items) })
+}
+
+// printExpenseReceipt merender Bukti Kas Keluar satu transaksi pengeluaran —
+// hanya bermakna untuk baris yang benar-benar sudah punya dokumen (kas/bank
+// yang sudah diposting, INV-DOC-1); baris tanpa dokumen ditolak alih-alih
+// mencetak lembar kosong yang menyesatkan.
+func (h *Handler) printExpenseReceipt(w http.ResponseWriter, r *http.Request) {
+	tenantID, err := costTenantID(r)
+	if err != nil {
+		writeCostError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	id, err := parseCostUintParam(r, "id")
+	if err != nil {
+		writeCostError(w, http.StatusBadRequest, "id tidak valid")
+		return
+	}
+	item, err := h.svc.GetExpense(r.Context(), tenantID, id)
+	if errors.Is(err, ErrCostEntryNotFound) {
+		writeCostError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err != nil {
+		writeCostError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if item.DocumentNumber == "" {
+		writeCostError(w, http.StatusConflict, "transaksi ini belum punya dokumen kas (belum diposting atau tidak melalui kas/bank)")
+		return
+	}
+	company, _ := h.printRepo.TenantName(r.Context(), tenantID)
+	data := &CostReceiptData{
+		DocumentNumber:  item.DocumentNumber,
+		Date:            item.Date,
+		Amount:          item.Amount,
+		BankAccountCode: item.BankAccountCode,
+		BankAccountName: item.BankAccountName,
+		CategoryLabel:   categoryLabelOf(item),
+		Vendor:          item.Vendor,
+		Description:     item.Description,
+		CompanyName:     company,
+		IsReversed:      item.Status == ExpenseStatusReversed,
+	}
+	writeCostPrintHTML(w, func(w io.Writer) error { return RenderCostReceiptPrint(w, data) })
 }
 
 // ── Master jenis pengeluaran ────────────────────────────────────────────────

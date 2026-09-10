@@ -41,6 +41,11 @@ type CollectionPaymentRequest struct {
 	// FinancingSourceID diisi.
 	Kind          TerminKind
 	InstallmentNo *int
+	// BankFee (UAT 2026-09-03, Rule #5): provisi/administrasi bank yang
+	// dipotong dari nominal pencairan (mis. KPR) — ditanggung developer, bukan
+	// titipan customer (K-1 tidak berubah). Nol (default) = tanpa perubahan
+	// perilaku.
+	BankFee domain.Money
 }
 
 // AppliedSchedule mencatat alokasi pembayaran ke satu cicilan.
@@ -78,7 +83,7 @@ type CollectionPreviewLine struct {
 // PreviewAllocationLine adalah satu baris rencana "dialokasikan ke tagihan".
 type PreviewAllocationLine struct {
 	ScheduleID uint64 `json:"schedule_id"`
-	Label      string `json:"label"`     // "Uang Muka (DP)", "Termin 2", ...
+	Label      string `json:"label"` // "Uang Muka (DP)", "Termin 2", ...
 	DueDate    string `json:"due_date"`
 	Amount     string `json:"amount"`
 	FullyPaid  bool   `json:"fully_paid"` // true=Lunas, false=Sebagian
@@ -128,23 +133,114 @@ func accountLabel(code string) string {
 	case accountCodePiutang:
 		return "Piutang Usaha"
 	case "1-2200":
-		return "Piutang Bank (KPR)"
+		return "Dana Jaminan Bank (KPR)"
+	case accountCodeBankFeeExpense:
+		return "Beban Provisi & Administrasi Bank KPR"
 	default:
 		return code
 	}
 }
 
-// outstandingForContract menghitung sisa tagihan kontrak = gross − Σ termin.
+// outstandingForContract menghitung sisa tagihan kontrak = Σ(schedule.Amount −
+// schedule.PaidAmount) atas SEMUA baris jadwal kontrak (status != superseded).
+//
+// BUG UAT (2026-09): sebelumnya = c.GrossAmount − Σ termin, dan GrossAmount
+// kontrak HANYA berisi harga unit — piutang Kelebihan Tanah (land_sale, migrasi
+// 000095) tidak pernah ikut terhitung meski sudah benar di Neraca. Dengan
+// menjumlah langsung dari payment_schedules (yang sekarang mencakup baris
+// ScheduleTypeLand), outstanding otomatis mencakup land tanpa engine kedua.
+//
+// Fallback ke gross−collected bila kontrak SAMA SEKALI belum punya baris
+// jadwal (mis. kontrak legacy tunai tanpa CreatePaymentSchedule pernah
+// dipanggil) — kontrak semacam itu juga tidak pernah punya komponen tanah
+// bundled (jalur itu SELALU menulis payment_schedules, lihat repository.go
+// Execute), jadi fallback ini aman dan tidak menyembunyikan piutang land.
 func (s *Service) outstandingForContract(ctx context.Context, tenantID uint64, c *SaleContract) (domain.Money, error) {
-	collected, err := s.store.SumTerminsByUnit(ctx, tenantID, c.UnitID)
+	schedules, err := s.contracts.ListSchedulesByContract(ctx, tenantID, c.ID)
 	if err != nil {
-		return domain.Zero, fmt.Errorf("hitung termin terkumpul: %w", err)
+		return domain.Zero, fmt.Errorf("baca jadwal kontrak: %w", err)
 	}
-	return c.GrossAmount.Sub(collected), nil
+
+	// House dan land DIHITUNG TERPISAH lalu dijumlah — BUKAN sekadar "kalau ada
+	// baris jadwal apa saja, jumlahkan semuanya". Sebab (bug UAT 2026-09,
+	// migrasi 000095): kontrak Tunai/lunas-langsung lazimnya TIDAK PERNAH
+	// punya baris payment_schedules rumah eksplisit (CreatePaymentSchedule
+	// tidak selalu dipanggil), sedangkan Akad dgn Kelebihan Tanah SELALU
+	// menulis satu baris ScheduleTypeLand (repository.go Execute). Kalau
+	// "ada baris jadwal" dipakai sebagai sinyal tunggal untuk memilih jalur
+	// sum-berbasis-jadwal, kontrak semacam itu salah hitung: piutang rumah
+	// (yang tak punya baris jadwal) hilang total dari outstanding, hanya
+	// piutang tanah yang terhitung — kebalikan dari bug asli.
+	houseHasSchedules := false
+	houseOutstanding := domain.Zero
+	landOutstanding := domain.Zero
+	for _, sch := range schedules {
+		if sch.Status == ScheduleStatusSuperseded {
+			continue
+		}
+		remaining := sch.Amount.Sub(sch.PaidAmount)
+		if sch.Type == ScheduleTypeLand {
+			landOutstanding = landOutstanding.Add(remaining)
+			continue
+		}
+		houseHasSchedules = true
+		houseOutstanding = houseOutstanding.Add(remaining)
+	}
+
+	if !houseHasSchedules {
+		// Tanpa baris jadwal rumah eksplisit: houseOutstanding = gross kontrak
+		// (house-only, land tak pernah masuk GrossAmount — lihat CreateContract)
+		// dikurangi termin yang mengurangi harga. SumTerminsByUnit memfilter
+		// counts_toward_price=TRUE, dan pembayaran land-murni (000095) kini
+		// ditandai FALSE (planAllocationsLocked/CommitPayment) — jadi aman,
+		// tak ganda-hitung dgn landOutstanding di atas.
+		collected, err := s.store.SumTerminsByUnit(ctx, tenantID, c.UnitID)
+		if err != nil {
+			return domain.Zero, fmt.Errorf("hitung termin terkumpul: %w", err)
+		}
+		houseOutstanding = c.GrossAmount.Sub(collected)
+	}
+
+	return houseOutstanding.Add(landOutstanding), nil
+}
+
+// customerRemainingForContract adalah sisa kewajiban CUSTOMER sendiri pasca
+// pembayaran — outstandingForContract dikurangi bagian yang masih Dana
+// Jaminan Bank (UAT 2026-09-09, KPR bertahap). SoT SAMA dengan
+// HouseControlSplit/CustomerReceivableRemaining yang dipakai kwitansi
+// (receipt_service.go) dan invoice KEKURANGAN (billing.GenerateShortfallInvoice)
+// — bukan rumus ketiga. Untuk kontrak tanpa financing bank (atau pra-Akad),
+// finRemaining nol sehingga hasilnya identik dengan outstandingForContract
+// (perilaku lama tidak berubah).
+func (s *Service) customerRemainingForContract(ctx context.Context, tenantID uint64, c *SaleContract) (domain.Money, error) {
+	total, err := s.outstandingForContract(ctx, tenantID, c)
+	if err != nil {
+		return domain.Zero, err
+	}
+	_, finRemaining, _, err := s.houseControlSplit(ctx, tenantID, c.UnitID)
+	if err != nil {
+		return domain.Zero, err
+	}
+	if finRemaining.IsNeg() {
+		finRemaining = domain.Zero
+	}
+	if finRemaining.GreaterThan(total) {
+		finRemaining = total
+	}
+	return total.Sub(finRemaining), nil
 }
 
 // PreviewCollectionPayment menghasilkan pratinjau jurnal + validasi tanpa posting.
-func (s *Service) PreviewCollectionPayment(ctx context.Context, tenantID, contractID uint64, amount domain.Money, bankCode string) (*CollectionPreview, error) {
+// bankFee (UAT 2026-09-03, Rule #5): domain.Zero bila tidak ada provisi bank —
+// pratinjau 2 baris seperti sebelumnya, tanpa perubahan perilaku.
+//
+// scheduleID (opsional, 0 = tidak diisi): saat diisi, pratinjau ditarget ke SATU
+// cicilan spesifik (mis. baris Kelebihan Tanah) — Outstanding dan Applied
+// dihitung dari cicilan itu saja (planForSchedule), bukan waterfall seluruh
+// kontrak, sehingga pembayaran produk tambahan tidak "melimpah" membayar
+// cicilan rumah dulu. Reuse penuh: satu engine (ReceivePayment/preparePayment)
+// yang sama tetap dipakai saat submit — lihat recordCollectionPayment.
+func (s *Service) PreviewCollectionPayment(ctx context.Context, tenantID, contractID uint64, amount domain.Money, bankCode string, bankFee domain.Money, scheduleID uint64, source PaymentSource) (*CollectionPreview, error) {
 	if err := s.requireContractStore(); err != nil {
 		return nil, err
 	}
@@ -156,6 +252,25 @@ func (s *Service) PreviewCollectionPayment(ctx context.Context, tenantID, contra
 	if err != nil {
 		return nil, err
 	}
+
+	var targetSchedule *PaymentSchedule
+	if scheduleID != 0 {
+		sch, serr := s.contracts.FindScheduleByID(ctx, tenantID, scheduleID)
+		if serr != nil {
+			return nil, serr
+		}
+		if sch.SaleContractID != contractID {
+			return nil, ErrScheduleContractMismatch
+		}
+		targetSchedule = sch
+		// Outstanding pratinjau menjadi sisa cicilan ini saja — konsisten dengan
+		// apa yang ditampilkan/divalidasi di kartu pembayaran produk tambahan.
+		outstanding = sch.Amount.Sub(sch.PaidAmount)
+		if outstanding.IsNeg() {
+			outstanding = domain.Zero
+		}
+	}
+
 	saleRec, srErr := s.store.FindSaleRecord(ctx, tenantID, contract.UnitID)
 	if srErr != nil && !errors.Is(srErr, ErrSaleRecordNotFound) {
 		return nil, fmt.Errorf("cek status BAST: %w", srErr)
@@ -169,26 +284,57 @@ func (s *Service) PreviewCollectionPayment(ctx context.Context, tenantID, contra
 		// baris ini hardcode 1-2000 sehingga pratinjau bisa berbeda dari jurnal
 		// yang benar-benar terbentuk.
 		creditCode = accountCodePiutang
-		if code, ok := s.schemeCreditAccountForPayment(ctx, contract); ok {
+		if code, ok := s.schemeCreditAccountForPayment(ctx, contract, source); ok {
 			creditCode = code
 		}
 	}
 
-	// Rencana alokasi ke tagihan (read-only) + saldo kredit (kelebihan).
-	schedules, err := s.contracts.ListSchedulesByContract(ctx, tenantID, contractID)
-	if err != nil {
-		return nil, err
+	// 7C (UAT 2026-09-07, Gap 2): pencairan KPR mengurangi Dana Jaminan Bank,
+	// BUKAN piutang umum kontrak — pratinjau HARUS memakai bucket yang sama
+	// dengan preparePayment (lihat guard 7C di service.go), bukan
+	// outstandingForContract. Tanpa ini, Outstanding & validasi "melebihi
+	// piutang" salah bucket walau baris jurnal (creditCode) sudah benar.
+	isFinancingDisbursement := source == PaymentSourceKPRDisbursement && isBAST && creditCode != accountCodePiutang
+	if isFinancingDisbursement && targetSchedule == nil {
+		finRemaining, ferr := s.financingOutstanding(ctx, tenantID, contract, creditCode)
+		if ferr != nil {
+			return nil, ferr
+		}
+		outstanding = finRemaining
 	}
-	plan, unapplied := planAllocation(schedules, amount)
-	appliedLines := make([]PreviewAllocationLine, 0, len(plan))
-	for _, p := range plan {
-		appliedLines = append(appliedLines, PreviewAllocationLine{
-			ScheduleID: p.schedule.ID,
-			Label:      p.label,
-			DueDate:    p.schedule.DueDate.Format("2006-01-02"),
-			Amount:     p.apply.String(),
-			FullyPaid:  p.fullyPaid,
-		})
+
+	// Rencana alokasi ke tagihan (read-only) + saldo kredit (kelebihan).
+	var appliedLines []PreviewAllocationLine
+	var unapplied domain.Money
+	if targetSchedule != nil {
+		allocs, unappliedAmt := planForSchedule(targetSchedule, amount)
+		unapplied = unappliedAmt
+		for _, a := range allocs {
+			appliedLines = append(appliedLines, PreviewAllocationLine{
+				ScheduleID: a.ScheduleID,
+				Label:      scheduleLabel(targetSchedule),
+				DueDate:    targetSchedule.DueDate.Format("2006-01-02"),
+				Amount:     a.Apply.String(),
+				FullyPaid:  a.FullyPaid,
+			})
+		}
+	} else {
+		schedules, serr := s.contracts.ListSchedulesByContract(ctx, tenantID, contractID)
+		if serr != nil {
+			return nil, serr
+		}
+		var plan []plannedAllocation
+		plan, unapplied = planAllocation(schedules, amount)
+		appliedLines = make([]PreviewAllocationLine, 0, len(plan))
+		for _, p := range plan {
+			appliedLines = append(appliedLines, PreviewAllocationLine{
+				ScheduleID: p.schedule.ID,
+				Label:      p.label,
+				DueDate:    p.schedule.DueDate.Format("2006-01-02"),
+				Amount:     p.apply.String(),
+				FullyPaid:  p.fullyPaid,
+			})
+		}
 	}
 
 	// S8: proyeksi saldo kredit kanonik = saldo sekarang + sisa tak teralokasi.
@@ -208,17 +354,29 @@ func (s *Service) PreviewCollectionPayment(ctx context.Context, tenantID, contra
 		}
 	}
 
+	// BankFee (Rule #5): pecah baris debit bank net-cash + Beban Provisi Bank —
+	// nilai yang dikreditkan ke tagihan (amount) tidak berubah, sama seperti preparePaymentFunded.
+	lines := []CollectionPreviewLine{
+		{AccountCode: bankCode, AccountName: accountLabel(bankCode), Debit: amount.Sub(bankFee).String(), Credit: domain.Zero.String()},
+	}
+	if !bankFee.IsZero() {
+		lines = append(lines, CollectionPreviewLine{
+			AccountCode: accountCodeBankFeeExpense, AccountName: accountLabel(accountCodeBankFeeExpense),
+			Debit: bankFee.String(), Credit: domain.Zero.String(),
+		})
+	}
+	lines = append(lines, CollectionPreviewLine{
+		AccountCode: creditCode, AccountName: accountLabel(creditCode), Debit: domain.Zero.String(), Credit: amount.String(),
+	})
+
 	preview := &CollectionPreview{
-		ContractID:  contractID,
-		UnitID:      contract.UnitID,
-		IsBAST:      isBAST,
-		Outstanding: outstanding.String(),
-		Amount:      amount.String(),
-		Valid:       true,
-		Lines: []CollectionPreviewLine{
-			{AccountCode: bankCode, AccountName: accountLabel(bankCode), Debit: amount.String(), Credit: domain.Zero.String()},
-			{AccountCode: creditCode, AccountName: accountLabel(creditCode), Debit: domain.Zero.String(), Credit: amount.String()},
-		},
+		ContractID:           contractID,
+		UnitID:               contract.UnitID,
+		IsBAST:               isBAST,
+		Outstanding:          outstanding.String(),
+		Amount:               amount.String(),
+		Valid:                true,
+		Lines:                lines,
 		Applied:              appliedLines,
 		BuyerCredit:          projectedCredit.String(),
 		OverpaymentUnapplied: unapplied.String(),
@@ -229,9 +387,17 @@ func (s *Service) PreviewCollectionPayment(ctx context.Context, tenantID, contra
 	case !amount.IsWholeRupiah() || amount.IsZero() || amount.IsNeg():
 		preview.Valid = false
 		preview.Reason = ErrCollectionAmountInvalid.Error()
+	case !bankFee.IsZero() && (!bankFee.IsWholeRupiah() || bankFee.IsNeg() || !bankFee.LessThan(amount)):
+		preview.Valid = false
+		preview.Reason = ErrBankFeeInvalid.Error()
 	case s.accounts.ValidateCashBankAccount(ctx, tenantID, bankCode) != nil:
 		preview.Valid = false
 		preview.Reason = s.accounts.ValidateCashBankAccount(ctx, tenantID, bankCode).Error()
+	case isFinancingDisbursement && amount.GreaterThan(outstanding):
+		// Pencairan melebihi sisa Dana Jaminan Bank — error yang sama dgn
+		// guard 7C di preparePayment (service.go), bukan piutang umum.
+		preview.Valid = false
+		preview.Reason = ErrDisbursementExceedsFinancing.Error()
 	case isBAST && amount.GreaterThan(outstanding):
 		// Kelebihan bayar SETELAH BAST belum didukung (butuh split-credit).
 		preview.Valid = false
@@ -274,6 +440,10 @@ type ReceivePaymentRequest struct {
 	// InstallmentNo: nomor cicilan bila Kind=installment. Kosong = diturunkan
 	// dari cicilan target (bila ScheduleID diisi).
 	InstallmentNo *int
+	// BankFee (UAT 2026-09-03, Rule #5): provisi/administrasi bank yang
+	// dipotong dari nominal pencairan (mis. KPR) — ditanggung developer, bukan
+	// titipan customer. Nol (default) = tanpa perubahan perilaku.
+	BankFee domain.Money
 }
 
 // ReceivePaymentResult adalah hasil penerimaan.
@@ -388,10 +558,11 @@ func (s *Service) ReceivePayment(ctx context.Context, tenantID uint64, req Recei
 		BankAccountCode: req.BankAccountCode,
 		Amount:          req.Amount,
 		Date:            req.Date,
-		Description:     buildReceiveDescription(req),
+		Description:     buildReceiveDescription(req, kind, installmentNo),
 		CreatedBy:       req.CreatedBy,
 		IdempotencyKey:  idemPtr(req.IdempotencyKey),
 		Source:          req.Source,
+		BankFee:         req.BankFee,
 	}, contract)
 	if err != nil {
 		return nil, err
@@ -417,7 +588,7 @@ func (s *Service) ReceivePayment(ctx context.Context, tenantID uint64, req Recei
 		PhaseID:           prepared.phaseID,
 		Amount:            req.Amount,
 		Date:              req.Date,
-		Description:       buildReceiveDescription(req),
+		Description:       buildReceiveDescription(req, kind, installmentNo),
 		BankAccountCode:   req.BankAccountCode,
 		CreditAccountCode: prepared.creditCode,
 		CreatedBy:         req.CreatedBy,
@@ -464,9 +635,11 @@ func (s *Service) ReceivePayment(ctx context.Context, tenantID uint64, req Recei
 	}
 
 	// 7. Sisa tagihan setelah pembayaran (SumTermin sudah termasuk termin baru).
+	// UAT 2026-09-09: KPR bertahap → sisa CUSTOMER sendiri (bagian bank yang
+	// belum cair dikecualikan), SoT sama dgn kwitansi/invoice kekurangan.
 	remaining := domain.Zero.String()
 	if contract != nil {
-		if out, oerr := s.outstandingForContract(ctx, tenantID, contract); oerr == nil {
+		if out, oerr := s.customerRemainingForContract(ctx, tenantID, contract); oerr == nil {
 			remaining = out.String()
 		}
 	}
@@ -531,6 +704,7 @@ func (s *Service) RecordCollectionPayment(ctx context.Context, tenantID uint64, 
 		FinancingSourceID: req.FinancingSourceID,
 		Kind:              req.Kind,
 		InstallmentNo:     req.InstallmentNo,
+		BankFee:           req.BankFee,
 	})
 	if err != nil {
 		return nil, err
@@ -664,7 +838,7 @@ func planAllocation(schedules []*PaymentSchedule, amount domain.Money) ([]planne
 func (s *Service) existingPaymentResult(ctx context.Context, tenantID uint64, termin *TerminPayment) *ReceivePaymentResult {
 	remaining := domain.Zero.String()
 	if contract, err := s.contracts.FindContractByUnitID(ctx, tenantID, termin.UnitID); err == nil {
-		if out, oerr := s.outstandingForContract(ctx, tenantID, contract); oerr == nil {
+		if out, oerr := s.customerRemainingForContract(ctx, tenantID, contract); oerr == nil {
 			remaining = out.String()
 		}
 	}
@@ -701,6 +875,8 @@ func resolveTerminKind(req ReceivePaymentRequest, targetSchedule *PaymentSchedul
 			return TerminKindDP, nil
 		case ScheduleTypeFinal:
 			return TerminKindFinalPayment, nil
+		case ScheduleTypeLand:
+			return TerminKindLandExcess, nil
 		default:
 			n := targetSchedule.InstallmentNumber
 			return TerminKindInstallment, &n
@@ -712,8 +888,12 @@ func resolveTerminKind(req ReceivePaymentRequest, targetSchedule *PaymentSchedul
 	return TerminKindOther, req.InstallmentNo
 }
 
-func buildReceiveDescription(req ReceivePaymentRequest) string {
-	desc := "Penerimaan pembayaran"
+// buildReceiveDescription menyusun deskripsi termin_payments/jurnal yang
+// SELALU menyebut jenis penerimaannya (DP/Cicilan/Pelunasan/Kelebihan Tanah/
+// dst) di depan — supaya riwayat & audit trail gampang ditelusuri tanpa
+// terkecuali, bukan hanya "Penerimaan pembayaran" generik.
+func buildReceiveDescription(req ReceivePaymentRequest, kind TerminKind, installmentNo *int) string {
+	desc := "Penerimaan " + TerminKindLabel(kind, installmentNo)
 	if req.Reference != "" {
 		desc += " ref " + req.Reference
 	}

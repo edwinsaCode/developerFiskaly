@@ -49,7 +49,12 @@ func docConnect(t *testing.T) *gorm.DB {
 
 func docCleanup(t *testing.T, db *gorm.DB) {
 	t.Helper()
-	for _, tbl := range []string{"documents", "document_sequences", "document_types", "master_data_changes"} {
+	// Urutan FK: anak sebelum induk (ap_payments/cost_entries → journal_entries
+	// & vendors/projects; documents tidak punya FK ke tabel-tabel ini).
+	for _, tbl := range []string{
+		"documents", "document_sequences", "document_types", "master_data_changes",
+		"ap_payments", "cost_entries", "journal_entries", "vendors", "projects",
+	} {
 		if err := db.Exec("DELETE FROM "+tbl+" WHERE tenant_id = ?", docTenant).Error; err != nil {
 			t.Fatalf("cleanup %s: %v", tbl, err)
 		}
@@ -277,6 +282,36 @@ func TestRegistry_SatuSumberSatuDokumen(t *testing.T) {
 	}
 }
 
+// ── 6a. ListFilter.Number: pencarian persis satu nomor ──────────────────────
+
+// Dipakai layar mana pun yang menampilkan nomor dokumen sebagai teks dan perlu
+// membukanya (DocumentNumberLink di frontend). Nomor bersifat unik per tenant,
+// jadi filter ini wajib mengembalikan tepat satu baris untuk nomor yang tepat,
+// dan nol baris untuk nomor yang tidak pernah terbit.
+func TestListFilter_NomorPersisSatuBaris(t *testing.T) {
+	db := docSetup(t)
+	svc := document.NewService(db)
+	target := issue(t, db, document.TypeHousePayment, at(2026, time.April, 1), 800)
+	issue(t, db, document.TypeHousePayment, at(2026, time.April, 2), 801)
+
+	docs, err := svc.ListDocuments(context.Background(), docTenant, document.ListFilter{Number: target.Number})
+	if err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("jumlah dokumen = %d, mau 1", len(docs))
+	}
+	wantNumber(t, docs[0].Number, target.Number)
+
+	none, err := svc.ListDocuments(context.Background(), docTenant, document.ListFilter{Number: "KWT/2026/999999"})
+	if err != nil {
+		t.Fatalf("ListDocuments (tak ada): %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("jumlah dokumen untuk nomor tak dikenal = %d, mau 0", len(none))
+	}
+}
+
 // ── 6b. Forward-only: konfigurasi berubah, dokumen lama tidak ───────────────
 
 // Verifikasi yang diminta owner sebelum W-3.
@@ -469,4 +504,170 @@ func TestPreview_TidakMemakaiNomor(t *testing.T) {
 		}
 	}
 	wantNumber(t, issue(t, db, document.TypeHousePayment, at(2026, time.July, 2), 601).Number, "KWT/2026/000002")
+}
+
+// ── 9. ResolvePrintTargetByNumber — bypass cetak, bukan navigasi ────────────
+
+// Perbaikan atas koreksi owner: klik nomor dokumen di FE harus langsung
+// mencetak/mengunduh, BUKAN mengarahkan ke layar lain (mis. detail jurnal).
+// Backend menjawab "kalau nomor ini diklik, cetakan mana yang harus dibuka"
+// sebagai {kind, id} yang dipetakan FE ke fetcher cetak modul terkait — tidak
+// pernah tebakan, dan tidak pernah alamat layar.
+func TestResolvePrintTarget_KwitansiDanInvoiceLangsungKeSumbernya(t *testing.T) {
+	db := docSetup(t)
+	svc := document.NewService(db)
+
+	receiptDoc := issueFromSource(t, db, document.TypeHousePayment, at(2026, time.May, 1), "receipts", 4001)
+	invoiceDoc := issueFromSource(t, db, document.TypeInvoice, at(2026, time.May, 1), "invoices", 4002)
+
+	target, err := svc.ResolvePrintTargetByNumber(context.Background(), docTenant, receiptDoc.Number)
+	if err != nil {
+		t.Fatalf("resolve kwitansi: %v", err)
+	}
+	if target.Kind != document.PrintReceipt || target.ID != 4001 {
+		t.Fatalf("target kwitansi = %+v, mau {receipt 4001}", target)
+	}
+
+	target, err = svc.ResolvePrintTargetByNumber(context.Background(), docTenant, invoiceDoc.Number)
+	if err != nil {
+		t.Fatalf("resolve invoice: %v", err)
+	}
+	if target.Kind != document.PrintInvoice || target.ID != 4002 {
+		t.Fatalf("target invoice = %+v, mau {invoice 4002}", target)
+	}
+}
+
+// Dokumen kas (BKK) yang lahir dari jurnal — SourceID di registry adalah
+// journal_entries.id, bukan id entitas yang bisa dicetak. Resolver harus
+// menembus ke pemilik jurnal itu (ap_payments ATAU cost_entries) untuk
+// menemukan cetakan yang SUDAH ADA di aplikasi.
+func TestResolvePrintTarget_BKKMenembusKePemilikJurnal(t *testing.T) {
+	db := docSetup(t)
+	svc := document.NewService(db)
+
+	seedProject(t, db, 9001)
+	seedVendor(t, db, 9002, "Vendor Uji BKK")
+
+	// BKK milik pembayaran vendor.
+	apJournalID := seedJournal(t, db, at(2026, time.June, 1))
+	seedAPPayment(t, db, 9101, 9002, apJournalID)
+	apDoc := issueFromSource(t, db, document.TypeCashOut, at(2026, time.June, 1), document.SourceJournal, apJournalID)
+
+	// BKK milik biaya tunai langsung.
+	costJournalID := seedJournal(t, db, at(2026, time.June, 1))
+	seedCostEntry(t, db, 9201, 9001, costJournalID)
+	costDoc := issueFromSource(t, db, document.TypeCashOut, at(2026, time.June, 2), document.SourceJournal, costJournalID)
+
+	// BKK jurnal manual murni — bukan pembayaran vendor, bukan biaya tunai
+	// (mis. setoran modal). Belum ada cetakan untuk ini di aplikasi mana pun.
+	manualJournalID := seedJournal(t, db, at(2026, time.June, 3))
+	manualDoc := issueFromSource(t, db, document.TypeCashOut, at(2026, time.June, 3), document.SourceJournal, manualJournalID)
+
+	target, err := svc.ResolvePrintTargetByNumber(context.Background(), docTenant, apDoc.Number)
+	if err != nil {
+		t.Fatalf("resolve BKK vendor: %v", err)
+	}
+	if target.Kind != document.PrintAPPayment || target.ID != 9101 {
+		t.Fatalf("target BKK vendor = %+v, mau {ap_payment 9101}", target)
+	}
+
+	target, err = svc.ResolvePrintTargetByNumber(context.Background(), docTenant, costDoc.Number)
+	if err != nil {
+		t.Fatalf("resolve BKK biaya: %v", err)
+	}
+	if target.Kind != document.PrintExpense || target.ID != 9201 {
+		t.Fatalf("target BKK biaya = %+v, mau {expense 9201}", target)
+	}
+
+	target, err = svc.ResolvePrintTargetByNumber(context.Background(), docTenant, manualDoc.Number)
+	if err != nil {
+		t.Fatalf("resolve BKK manual: %v", err)
+	}
+	if target.Kind != document.PrintUnknown {
+		t.Fatalf("target BKK manual = %+v, mau {unknown}", target)
+	}
+}
+
+// Nomor yang tidak pernah terbit harus gagal jelas (ErrDocumentNotFound), tidak
+// pernah dipetakan ke tebakan.
+func TestResolvePrintTarget_NomorTakDikenalGagalJelas(t *testing.T) {
+	db := docSetup(t)
+	svc := document.NewService(db)
+
+	_, err := svc.ResolvePrintTargetByNumber(context.Background(), docTenant, "BKK/2026/999999")
+	if !errors.Is(err, document.ErrDocumentNotFound) {
+		t.Fatalf("err = %v, mau ErrDocumentNotFound", err)
+	}
+}
+
+// issueFromSource menerbitkan satu dokumen dengan SourceTable/SourceID
+// eksplisit — dipakai untuk meniru asal dokumen kwitansi/invoice/jurnal kas,
+// berbeda dari issue() yang selalu memakai "it_sources" generik.
+func issueFromSource(t *testing.T, db *gorm.DB, typeCode string, when time.Time, srcTable string, srcID uint64) *document.Document {
+	t.Helper()
+	var doc *document.Document
+	err := db.Transaction(func(tx *gorm.DB) error {
+		d, err := document.Issue(tx, docTenant, typeCode, when,
+			document.Source{Table: srcTable, ID: srcID}, domain.FromInt(1_000_000), nil)
+		if err != nil {
+			return err
+		}
+		doc = d
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("terbitkan %s dari %s#%d: %v", typeCode, srcTable, srcID, err)
+	}
+	return doc
+}
+
+func seedProject(t *testing.T, db *gorm.DB, id uint64) {
+	t.Helper()
+	if err := db.Exec(`INSERT INTO projects (id, tenant_id, name) VALUES (?, ?, ?)`,
+		id, docTenant, "Proyek Uji Print Target").Error; err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+}
+
+func seedVendor(t *testing.T, db *gorm.DB, id uint64, name string) {
+	t.Helper()
+	if err := db.Exec(`INSERT INTO vendors (id, tenant_id, name) VALUES (?, ?, ?)`,
+		id, docTenant, name).Error; err != nil {
+		t.Fatalf("seed vendor: %v", err)
+	}
+}
+
+func seedJournal(t *testing.T, db *gorm.DB, when time.Time) uint64 {
+	t.Helper()
+	res := db.Exec(`INSERT INTO journal_entries (tenant_id, date, description, reference)
+		VALUES (?, ?, ?, ?)`, docTenant, when, "jurnal uji print target", "")
+	if res.Error != nil {
+		t.Fatalf("seed journal: %v", res.Error)
+	}
+	var id uint64
+	if err := db.Raw(`SELECT id FROM journal_entries WHERE tenant_id = ? AND date = ? ORDER BY id DESC LIMIT 1`,
+		docTenant, when).Scan(&id).Error; err != nil {
+		t.Fatalf("baca id journal: %v", err)
+	}
+	return id
+}
+
+func seedAPPayment(t *testing.T, db *gorm.DB, id, vendorID, journalID uint64) {
+	t.Helper()
+	if err := db.Exec(`INSERT INTO ap_payments
+		(id, tenant_id, vendor_id, payment_kind, payment_date, amount, cash_account_code, journal_entry_id)
+		VALUES (?, ?, ?, 'invoice', CURDATE(), 1000000, '1-1000', ?)`,
+		id, docTenant, vendorID, journalID).Error; err != nil {
+		t.Fatalf("seed ap_payment: %v", err)
+	}
+}
+
+func seedCostEntry(t *testing.T, db *gorm.DB, id, projectID, journalID uint64) {
+	t.Helper()
+	if err := db.Exec(`INSERT INTO cost_entries
+		(id, tenant_id, project_id, category, amount, payment_method, bank_account_code, date, journal_entry_id)
+		VALUES (?, ?, ?, 'hard', 1000000, 'bank', '1-1000', CURDATE(), ?)`,
+		id, docTenant, projectID, journalID).Error; err != nil {
+		t.Fatalf("seed cost_entry: %v", err)
+	}
 }

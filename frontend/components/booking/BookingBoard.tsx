@@ -8,7 +8,7 @@ import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
-import { Input } from "@/components/ui/Input";
+import { Input, Select } from "@/components/ui/Input";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Rupiah } from "@/components/format/Rupiah";
 import { Tanggal } from "@/components/format/Tanggal";
@@ -19,6 +19,7 @@ import { fetchCustomers, type Customer } from "@/lib/api/party";
 import {
   fetchBookings,
   cancelBooking,
+  transferBooking,
   markExpiredBookings,
   type Booking,
   type BookingStatus,
@@ -61,6 +62,22 @@ export function BookingBoard({ token, projectFilter, embedded = false }: Booking
   const [cancelTarget, setCancelTarget] = useState<Booking | null>(null);
   const [cancelReason, setCancelReason] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Item 3 — Transfer: alternatif dari Batalkan, bukan lanjutan sesudahnya.
+  // Booking TETAP active, hanya unit_id-nya berpindah — TANPA jurnal baru
+  // (fee sudah tercatat final/held di unit asal).
+  const [transferTarget, setTransferTarget] = useState<Booking | null>(null);
+  const [transferUnitId, setTransferUnitId] = useState("");
+  const [transferReason, setTransferReason] = useState("");
+
+  const availableUnits = useMemo(
+    () =>
+      Object.entries(unitMap)
+        .filter(([id, u]) => u.status === "available" && Number(id) !== transferTarget?.unit_id)
+        .map(([id, u]) => ({ id: Number(id), ...u }))
+        .sort((a, b) => a.code.localeCompare(b.code)),
+    [unitMap, transferTarget],
+  );
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -126,6 +143,24 @@ export function BookingBoard({ token, projectFilter, embedded = false }: Booking
       await refresh();
     } catch (err) {
       toast(err instanceof ApiError ? err.message : "Gagal membatalkan", "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleTransfer() {
+    if (!transferTarget || !transferUnitId) return;
+    setBusy(true);
+    try {
+      const newUnit = unitMap[Number(transferUnitId)];
+      await transferBooking(token, transferTarget.id, Number(transferUnitId), transferReason || undefined);
+      toast(`Booking #${transferTarget.id} dipindah ke unit ${newUnit?.code ?? transferUnitId}`, "success");
+      setTransferTarget(null);
+      setTransferUnitId("");
+      setTransferReason("");
+      await refresh();
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Gagal transfer booking", "error");
     } finally {
       setBusy(false);
     }
@@ -272,6 +307,9 @@ export function BookingBoard({ token, projectFilter, embedded = false }: Booking
                             <Button size="sm" variant="secondary" onClick={() => setCancelTarget(b)}>
                               Batalkan
                             </Button>
+                            <Button size="sm" variant="secondary" onClick={() => setTransferTarget(b)}>
+                              Transfer Unit
+                            </Button>
                           </>
                         )}
                         {b.fee_disposition === "pending_refund" && !isMarketing && (
@@ -325,10 +363,56 @@ export function BookingBoard({ token, projectFilter, embedded = false }: Booking
             {cancelTarget?.fee_disposition === "recognized"
               ? "Booking fee sudah diakui sebagai Pendapatan Booking — pembatalan TIDAK mengubah pendapatan (tidak ada refund/reversal)."
               : cancelTarget?.refundable
-                ? "Baris legacy: fee refundable — akan menunggu proses refund (dana di Titipan)."
-                : "Baris legacy: fee non-refundable — akan hangus menjadi Pendapatan Lain-lain."}{" "}
+                ? "Fee refundable (Titipan Booking) — akan menunggu proses refund."
+                : "Fee non-refundable — akan hangus menjadi Pendapatan Lain-lain."}{" "}
             Unit kembali <strong>Tersedia</strong>.
           </p>
+        </div>
+      </Modal>
+
+      {/* Transfer modal — Item 3: alternatif Batalkan, booking TETAP active,
+          hanya unit_id-nya berpindah. TANPA jurnal baru. */}
+      <Modal
+        open={!!transferTarget}
+        onClose={() => setTransferTarget(null)}
+        title={`Transfer Booking #${transferTarget?.id ?? ""}`}
+        size="sm"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setTransferTarget(null)} disabled={busy}>
+              Tutup
+            </Button>
+            <Button onClick={handleTransfer} loading={busy} disabled={!transferUnitId}>
+              Transfer
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-xs text-text-secondary">
+            Unit saat ini: <strong>{unitMap[transferTarget?.unit_id ?? -1]?.code ?? `#${transferTarget?.unit_id}`}</strong>.
+            Booking fee yang sudah diterima TIDAK dipindah/dijurnal ulang — tetap tercatat
+            di unit asal. Hanya booking dan status kedua unit yang berpindah.
+          </p>
+          <Select
+            label="Unit Tujuan" required
+            value={transferUnitId}
+            onChange={(e) => setTransferUnitId(e.target.value)}
+          >
+            <option value="">— pilih unit tersedia —</option>
+            {availableUnits.map((u) => (
+              <option key={u.id} value={u.id}>{u.code} — {u.projectName}</option>
+            ))}
+          </Select>
+          {availableUnits.length === 0 && (
+            <p className="text-xs text-danger">Tidak ada unit berstatus Tersedia untuk tujuan transfer.</p>
+          )}
+          <Input
+            label="Alasan"
+            value={transferReason}
+            onChange={(e) => setTransferReason(e.target.value)}
+            placeholder="cth: buyer ingin pindah blok"
+          />
         </div>
       </Modal>
     </div>

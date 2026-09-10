@@ -9,7 +9,12 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 const REPORT_PATHS: Record<string, (params: URLSearchParams) => string> = {
   "balance-sheet":    (p) => `/api/v1/reports/balance-sheet?format=csv&${p}`,
   "income-statement": (p) => `/api/v1/reports/income-statement?format=csv&${p}`,
-  "project-pl":       (p) => `/api/v1/reports/project-pl/${p.get("project_id") ?? "0"}?format=csv&as_of=${p.get("as_of") ?? ""}`,
+  "project-pl":       (p) => {
+    const rest = new URLSearchParams(p);
+    rest.delete("project_id");
+    rest.delete("report");
+    return `/api/v1/reports/project-pl/${p.get("project_id") ?? "0"}?format=csv&${rest}`;
+  },
   "cash-flow":        (p) => `/api/v1/reports/cash-flow?format=csv&${p}`,
   "sales-pipeline":   ()  => `/api/v1/reports/sales-pipeline?format=csv`,
   "tax-liability":    (p) => `/api/v1/reports/tax-liability?format=csv&${p}`,

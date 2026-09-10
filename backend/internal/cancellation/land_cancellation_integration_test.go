@@ -47,6 +47,12 @@ func (r lczLandHPPResolver) ResolveLandHPPRate(_ context.Context, _, _ uint64) (
 // ditambah WithLandAkadPreparer (seam Kelebihan Tanah §D3) dan resolver HPP
 // unit yang sengaja nol — fokus test ini adalah pembalikan komponen TANAH,
 // bukan resolusi HPP rumah (sudah diuji terpisah).
+//
+// land.WithPPhResolver dipasang dengan tax.Service yang SAMA (dibangun dari
+// taxRepo dependencies yang identik dengan SetTaxAccruer unit) — bukan tax
+// engine kedua — membuktikan PPh Final Kelebihan Tanah otomatis ter-accrue
+// dan ikut dibalik simetris saat pembatalan pasca-Akad (bukan taxSvc.AccrueTax
+// manual).
 func lcWireSale(db *gorm.DB, landRate domain.Money) *sale.Service {
 	ledgerRepo := ledger.NewGORMRepository(db)
 	posting := ledger.NewPostingService(ledgerRepo, ledgerRepo).WithPeriodChecker(ledgerRepo)
@@ -55,9 +61,14 @@ func lcWireSale(db *gorm.DB, landRate domain.Money) *sale.Service {
 	saleRepo := sale.NewGORMRepository(db, posting, allocSvc)
 	brepo := billing.NewGORMRepository(db)
 	saleRepo.SetReceiptTxGenerator(&cxReceiptAdapter{svc: billing.NewReceiptService(brepo, brepo, brepo)})
-	saleRepo.SetTaxAccruer(tax.NewGORMRepository(db, posting))
+	taxRepo := tax.NewGORMRepository(db, posting)
+	saleRepo.SetTaxAccruer(taxRepo)
 
-	landSvc := land.NewService(land.NewGORMRepository(db), land.WithHPPResolver(lczLandHPPResolver{rate: landRate}))
+	landTaxSvc := tax.NewService(taxRepo, taxRepo, taxRepo, taxRepo,
+		tax.WithRuleResolution(taxRepo, taxRepo), tax.WithUnitProductPolicy(taxRepo))
+	landSvc := land.NewService(land.NewGORMRepository(db),
+		land.WithHPPResolver(lczLandHPPResolver{rate: landRate}),
+		land.WithPPhResolver(landTaxSvc))
 
 	return sale.NewService(saleRepo, saleRepo, saleRepo, saleRepo, saleRepo, saleRepo,
 		sale.WithHPPResolver(lczUnitHPPResolver{}), sale.WithPaymentCommitter(saleRepo),
@@ -153,8 +164,13 @@ func TestIntegration_Cancellation_PostAkad_WithLandComponent(t *testing.T) {
 		Status           string
 		RevenueJournalID *uint64
 		CogsJournalID    *uint64
+		// gorm:"column:..." eksplisit — sama seperti land.LandSale (lihat
+		// internal/land/sale.go): naming strategy GORM menebak "PPh" jadi
+		// "p_ph", bukan "pph", jadi tanpa tag ini field-nya tak pernah
+		// terisi meski kolomnya ada di hasil raw SQL.
+		PPhJournalID *uint64 `gorm:"column:pph_journal_id"`
 	}
-	if err := db.Raw(`SELECT id, status, revenue_journal_id, cogs_journal_id
+	if err := db.Raw(`SELECT id, status, revenue_journal_id, cogs_journal_id, pph_journal_id
 		FROM land_sales WHERE tenant_id = ? AND land_stock_id = ?`, cxTenant, pool.ID).Scan(&landSale).Error; err != nil {
 		t.Fatalf("baca land_sales: %v", err)
 	}
@@ -162,6 +178,20 @@ func TestIntegration_Cancellation_PostAkad_WithLandComponent(t *testing.T) {
 		t.Fatalf("land_sales pasca-Akad = %+v, want akad + kedua jurnal", landSale)
 	}
 	landSaleID := landSale.ID
+
+	// PPh Final Pengalihan tanah: otomatis ter-accrue (land.WithPPhResolver),
+	// bukan taxSvc.AccrueTax manual. DPP=50jt, proyek default tax_category
+	// 'komersial' (migration 000039) → 2,5% x 50jt = 1.250.000.
+	if landSale.PPhJournalID == nil {
+		t.Fatal("land_sales.pph_journal_id nil — PPh Final tanah tidak ter-accrue otomatis")
+	}
+	var landObligation tax.TaxObligation
+	if err := db.Where("tenant_id = ? AND land_sale_id = ?", cxTenant, landSaleID).First(&landObligation).Error; err != nil {
+		t.Fatalf("tax_obligations utk land_sale_id=%d: %v", landSaleID, err)
+	}
+	if !landObligation.TaxAmount.Decimal().Equal(decimal.RequireFromString("1250000")) {
+		t.Errorf("obligation.TaxAmount = %s, want 1250000", landObligation.TaxAmount.Decimal())
+	}
 
 	// Pra-cancel: saldo tanah sudah terbentuk.
 	if bal := cxNet(t, db, "4-1100"); bal != "-50000000.0000" {
@@ -172,6 +202,16 @@ func TestIntegration_Cancellation_PostAkad_WithLandComponent(t *testing.T) {
 	}
 	if bal := cxNet(t, db, "1-3000"); bal != "-20000000.0000" {
 		t.Fatalf("pre-cancel 1-3000 = %s, want -20000000.0000 (persediaan tanah keluar)", bal)
+	}
+	// 5-2000/2-4000 dipakai bersama oleh PPh Final unit (SetTaxAccruer, rumah
+	// 2M x 2,5% = 50jt) DAN PPh Final tanah (WithPPhResolver, 50jt x 2,5% =
+	// 1,25jt) — satu mesin pajak yang sama, akun default yang sama (pola
+	// identik unit/BAST), jadi saldonya terakumulasi: 50jt + 1,25jt = 51,25jt.
+	if bal := cxNet(t, db, "5-2000"); bal != "51250000.0000" {
+		t.Fatalf("pre-cancel 5-2000 (Beban PPh Final) = %s, want 51250000.0000 (unit 50jt + tanah 1,25jt)", bal)
+	}
+	if bal := cxNet(t, db, "2-4000"); bal != "-51250000.0000" {
+		t.Fatalf("pre-cancel 2-4000 (Hutang PPh Final) = %s, want -51250000.0000 (unit 50jt + tanah 1,25jt)", bal)
 	}
 
 	// ── Cancel pasca-Akad (penalti 50jt) ────────────────────────────────────
@@ -237,14 +277,22 @@ func TestIntegration_Cancellation_PostAkad_WithLandComponent(t *testing.T) {
 	if bal := cxNet(t, db, "4-1000"); bal != "0.0000" {
 		t.Errorf("4-1000 = %s, want 0.0000 (pendapatan rumah dibalik)", bal)
 	}
+	// PPh Final Pengalihan tanah dibalik simetris, konsisten dgn pendapatan/HPP.
+	if bal := cxNet(t, db, "5-2000"); bal != "0.0000" {
+		t.Errorf("5-2000 (Beban PPh Final) = %s, want 0.0000 (dibalik penuh)", bal)
+	}
+	if bal := cxNet(t, db, "2-4000"); bal != "0.0000" {
+		t.Errorf("2-4000 (Hutang PPh Final) = %s, want 0.0000 (dibalik penuh)", bal)
+	}
 
 	// ── land_sales berstatus cancelled, jurnal reversal tercatat ────────────
 	var landAfter struct {
 		Status                   string
 		RevenueReversalJournalID *uint64
 		CogsReversalJournalID    *uint64
+		PPhReversalJournalID     *uint64 `gorm:"column:pph_reversal_journal_id"`
 	}
-	if err := db.Raw(`SELECT status, revenue_reversal_journal_id, cogs_reversal_journal_id
+	if err := db.Raw(`SELECT status, revenue_reversal_journal_id, cogs_reversal_journal_id, pph_reversal_journal_id
 		FROM land_sales WHERE id = ?`, landSaleID).Scan(&landAfter).Error; err != nil {
 		t.Fatalf("baca land_sales pasca-cancel: %v", err)
 	}
@@ -253,6 +301,17 @@ func TestIntegration_Cancellation_PostAkad_WithLandComponent(t *testing.T) {
 	}
 	if landAfter.RevenueReversalJournalID == nil || landAfter.CogsReversalJournalID == nil {
 		t.Errorf("land_sales reversal journal ids kosong: %+v", landAfter)
+	}
+	if landAfter.PPhReversalJournalID == nil {
+		t.Errorf("land_sales.pph_reversal_journal_id nil — PPh Final tanah tidak ikut dibalik")
+	}
+
+	var landObligationAfter tax.TaxObligation
+	if err := db.Where("tenant_id = ? AND land_sale_id = ?", cxTenant, landSaleID).First(&landObligationAfter).Error; err != nil {
+		t.Fatalf("tax_obligations pasca-cancel utk land_sale_id=%d: %v", landSaleID, err)
+	}
+	if landObligationAfter.Status != tax.ObligationStatusCancelled {
+		t.Errorf("obligation.Status pasca-cancel = %s, want cancelled", landObligationAfter.Status)
 	}
 
 	// ── Pool: sold_quantity_m2 kembali turun (100m2 dilepas) ────────────────

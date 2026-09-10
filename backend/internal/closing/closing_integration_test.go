@@ -3,11 +3,13 @@
 package closing_test
 
 // P0-4 — integration (real MySQL): siklus penuh Completion & True-Up.
-// Skenario design §10: 2 unit (A 100m² 25%, B 300m² 75%), RAB land 400jt,
-// aktual land 480jt. BAST A budgeted (100jt) → completion → finalize →
-// calculate (A: bud 100, act 120, Δ+20; B: act 360 unsold) → approve → post
-// (Dr 5-1000 20jt / Cr 1-3000 20jt) → TU-1..TU-5 → BAST B pakai finalized
-// act_HPP 360jt (TU-6/D2) → saldo 1-3000 = 0 (TU-4). Plus D1 freeze basis.
+// Skenario design §10: 2 unit (A 100m² sold, B 300m² unsold), RAB land 400jt,
+// aktual land 480jt. Land SELALU rata antar unit properti (rule klien UAT #1)
+// — basis area/nilai jual proyek TIDAK berlaku untuk Land, jadi A dan B masing
+// 50%. BAST A budgeted (200jt) → completion → finalize → calculate (A: bud
+// 200, act 240, Δ+40; B: act 240 unsold) → approve → post (Dr 5-1000 40jt /
+// Cr 1-3000 40jt) → TU-1..TU-5 → BAST B pakai finalized act_HPP 240jt
+// (TU-6/D2) → saldo 1-3000 = 0 (TU-4). Plus D1 freeze basis.
 //
 // Prasyarat: TEST_DB_DSN + migrasi ≥ 000044.
 
@@ -119,16 +121,16 @@ func TestIntegration_P04_FullTrueupCycle(t *testing.T) {
 		// yang dihasilkan fixture ini identik dengan sebelum hardening.
 		db.Exec(`INSERT IGNORE INTO product_types (tenant_id, code, name, category, revenue_account_code, is_active)
 			VALUES (?,?,?,?,?,TRUE)`, ctTenant, "villa", "villa", "property", "4-1000")
-		if err := db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, list_price, status)
-			VALUES (?,?,?,?,?,?,?)`, ctTenant, projectID, code, "villa", domain.FromInt(area), domain.FromInt(0), "reserved").Error; err != nil {
+		if err := db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, land_area, list_price, status)
+			VALUES (?,?,?,?,?,?,?,?)`, ctTenant, projectID, code, "villa", domain.FromInt(area), domain.FromInt(area), domain.FromInt(0), "reserved").Error; err != nil {
 			t.Fatalf("seed unit %s: %v", code, err)
 		}
 		var id uint64
 		db.Raw("SELECT LAST_INSERT_ID()").Scan(&id)
 		return id
 	}
-	unitA := seedUnit("A-01", 100) // 25%
-	unitB := seedUnit("B-01", 300) // 75%
+	unitA := seedUnit("A-01", 100) // area 100/400 = 25% (Item 9, proporsional land_area)
+	unitB := seedUnit("B-01", 300) // area 300/400 = 75% (Item 9, proporsional land_area)
 	accIDs := ctSeedAccounts(t, db)
 
 	// ── Wiring produksi (mirror sale.NewHandler + closing) ────────────────────
@@ -179,7 +181,7 @@ func TestIntegration_P04_FullTrueupCycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// ── BAST A (budgeted 25% × 400jt = 100jt) ────────────────────────────────
+	// ── BAST A (budgeted, Land proporsional area 25% × 400jt = 100jt — Item 9) ─
 	recA, err := saleSvc.RecordAkad(ctx, ctTenant, sale.RecordBASTRequest{
 		UnitID: unitA, SalePrice: domain.FromInt(2_000_000_000),
 		BASTDate: time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC),
@@ -255,7 +257,8 @@ func TestIntegration_P04_FullTrueupCycle(t *testing.T) {
 		run.BudgetHPPTotal.String() != "100000000" || run.ActualCostTotal.String() != "480000000" {
 		t.Fatalf("run: %+v", run)
 	}
-	// Lines: A land sold 100/120/+20; B land unsold act 360.
+	// Lines (Item 9, proporsional land_area): A land sold 100/120/+20 (25%);
+	// B land unsold act 360 (75%).
 	var gotA, gotB bool
 	for _, l := range run.Lines {
 		switch {

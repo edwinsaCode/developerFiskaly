@@ -114,6 +114,10 @@ func invoiceTypeLabel(t InvoiceType) string {
 		return "Pelunasan"
 	case TypeKekurangan:
 		return "Kekurangan Pembayaran"
+	case TypeRealisasi:
+		return "Biaya Realisasi"
+	case TypeKelebihanTanah:
+		return "Kelebihan Tanah"
 	default:
 		return string(t)
 	}

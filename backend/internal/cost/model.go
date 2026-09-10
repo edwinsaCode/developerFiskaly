@@ -48,6 +48,12 @@ type CostEntry struct {
 	UnitID          *uint64             `gorm:"index"                                        json:"unit_id,omitempty"`
 	PhaseID         *uint64             `gorm:"index"                                        json:"phase_id,omitempty"`
 	Category        domain.CostCategory `gorm:"not null;size:20"                             json:"category"`
+	// HardSubcategory (UAT 2026-09-07): WAJIB diisi saat Category=Hard dan
+	// CostTier=Shared (project-wide pool ambigu tanpa ini — lihat
+	// service.validate). Opsional untuk CostTier=Direct (unit-nya sendiri
+	// sudah menentukan Subsidi/Komersial tanpa ambiguitas pool). NULL untuk
+	// semua baris historis pra-fitur ini dan untuk kategori selain Hard.
+	HardSubcategory domain.ConstructionSubcategory `gorm:"size:30"                             json:"hard_subcategory,omitempty"`
 	// ExpenseTypeID (W-10): terisi HANYA untuk pengeluaran operasional, dan
 	// menjadi penanda bahwa akun debit baris ini berasal dari master
 	// expense_types — bukan dari taksonomi Category. NULL = jalur biaya proyek

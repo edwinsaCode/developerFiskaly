@@ -27,12 +27,12 @@ import (
 // ContractPaymentEvent adalah satu kejadian lifecycle scheme pada kontrak.
 // APPEND-ONLY: tidak ada jalur update/delete dari aplikasi.
 type ContractPaymentEvent struct {
-	ID                uint64    `gorm:"primaryKey;autoIncrement" json:"id"`
-	TenantID          uint64    `gorm:"not null;index"           json:"-"`
-	SaleContractID    uint64    `gorm:"not null;index"           json:"sale_contract_id"`
-	Event             string    `gorm:"not null;size:30"         json:"event"`
-	FromState         string    `gorm:"not null;size:30;default:''" json:"from_state"`
-	ToState           string    `gorm:"not null;size:30;default:''" json:"to_state"`
+	ID             uint64 `gorm:"primaryKey;autoIncrement" json:"id"`
+	TenantID       uint64 `gorm:"not null;index"           json:"-"`
+	SaleContractID uint64 `gorm:"not null;index"           json:"sale_contract_id"`
+	Event          string `gorm:"not null;size:30"         json:"event"`
+	FromState      string `gorm:"not null;size:30;default:''" json:"from_state"`
+	ToState        string `gorm:"not null;size:30;default:''" json:"to_state"`
 	// EventDate: tanggal KEJADIAN BISNIS (akad/pencairan/BAST/pembayaran) —
 	// terpisah dari CreatedAt (tanggal input). Audit memakai EventDate.
 	EventDate         time.Time `gorm:"not null"                 json:"event_date"`
@@ -59,6 +59,10 @@ type SchemeFlowStore interface {
 	// RebindContractScheme mengganti scheme kontrak (konversi): scheme_id +
 	// snapshot baru + state baru + financing source (boleh nil = hapus).
 	RebindContractScheme(ctx context.Context, tenantID, contractID, schemeID uint64, snapshot, state string, financingSourceID *uint64) error
+	// UpdateContractLoanAmount menyimpan Nilai Persetujuan KPR Bank (7A, UAT
+	// 2026-09-07) — diisi SAAT AKAD, bukan saat pembuatan kontrak. Dasar
+	// pemisahan Dana Jaminan Bank vs Piutang Usaha di Event 3.
+	UpdateContractLoanAmount(ctx context.Context, tenantID, contractID uint64, amount domain.Money) error
 	// AppendPaymentEvent menulis satu baris event (append-only).
 	AppendPaymentEvent(ctx context.Context, ev *ContractPaymentEvent) error
 	ListPaymentEvents(ctx context.Context, tenantID, contractID uint64) ([]*ContractPaymentEvent, error)
@@ -312,6 +316,11 @@ type ApplySchemeEventRequest struct {
 	FinancingSourceID *uint64   // takeover/ganti bank: bank baru
 	Notes             string
 	CreatedBy         *uint64
+	// BankApprovedAmount (Item 7A, UAT 2026-09-07): Nilai Persetujuan KPR
+	// Bank — WAJIB untuk event `akad` pada kontrak KPR-financed yang BAST-nya
+	// sudah terjadi lebih dulu (Akad pasca-BAST — lihat reclassOnStateChange /
+	// reclassToFinancingIfBAST). Diabaikan untuk event lain.
+	BankApprovedAmount *domain.Money
 }
 
 // ApplySchemeEvent memproses satu financing milestone: validasi transisi via
@@ -369,7 +378,7 @@ func (s *Service) ApplySchemeEvent(ctx context.Context, tenantID uint64, req App
 
 	// Reklas piutang bila akun receivable BERPINDAH karena event ini dan unit
 	// sudah BAST (pra-BAST tidak ada AR di ledger — BS-2).
-	journalID, jerr := s.reclassOnStateChange(ctx, tenantID, c, sctx.state, newState, req.Event, eventDate)
+	journalID, jerr := s.reclassOnStateChange(ctx, tenantID, c, sctx.state, newState, req.Event, eventDate, req.BankApprovedAmount)
 	if jerr != nil {
 		return nil, jerr
 	}
@@ -408,7 +417,20 @@ func stateIn(s scheme.State, list []scheme.State) bool {
 // piutang efektif BERBEDA antara state lama dan state baru. Satu pintu untuk
 // kedua jalur transisi (ApplySchemeEvent eksplisit dan proyeksi milestone
 // pembayaran) supaya tidak ada jalur yang memindah state tanpa memindah saldo.
-func (s *Service) reclassOnStateChange(ctx context.Context, tenantID uint64, c *SaleContract, from, to scheme.State, ev scheme.Event, eventDate time.Time) (*uint64, error) {
+func (s *Service) reclassOnStateChange(ctx context.Context, tenantID uint64, c *SaleContract, from, to scheme.State, ev scheme.Event, eventDate time.Time, bankApprovedAmount *domain.Money) (*uint64, error) {
+	// 7C fix (UAT 2026-09-07): `disbursed` TIDAK LAGI memindahkan seluruh sisa
+	// tagihan sekaligus dari Dana Jaminan Bank ke Piutang Usaha. Sejak 7A,
+	// kedua akun sudah dipisah dan diposting benar SAAT AKAD (Dana Jaminan
+	// Bank = Nilai Persetujuan KPR Bank, Piutang Usaha = sisanya); tiap
+	// pencairan KPR sesudahnya mengurangi Dana Jaminan Bank secara langsung
+	// (schemeCreditAccountForPayment). Reklas lump-sum lama adalah BUG: ia
+	// menghapus seluruh saldo Dana Jaminan Bank pada pencairan PERTAMA
+	// (walau baru cair sebagian), membuat pencairan ke-2/ke-3 salah sasaran
+	// ke Piutang Usaha. Tidak ada aturan bisnis yang meminta reklas otomatis
+	// di titik ini lagi — biarkan kedua akun turun sendiri-sendiri.
+	if ev == scheme.EventDisbursed {
+		return nil, nil
+	}
 	sctx, err := s.schemeContextFor(ctx, c)
 	if err != nil || sctx == nil {
 		return nil, err
@@ -417,6 +439,14 @@ func (s *Service) reclassOnStateChange(ctx context.Context, tenantID uint64, c *
 	toCode := sctx.policy.ResolveReceivableAccount(sctx.params, to)
 	if fromCode == toCode {
 		return nil, nil
+	}
+	// Item 7A (UAT 2026-09-07): Akad yang menaikkan state ke financing (Dana
+	// Jaminan Bank) adalah TITIK KEDUA (selain RecordAkad langsung) di mana
+	// Nilai Persetujuan KPR Bank diperlukan — kasus "Akad terjadi SETELAH
+	// BAST". Reklas di sini DIBATASI ke min(approved, outstanding), bukan
+	// seluruh outstanding (lihat reclassToFinancingIfBAST).
+	if ev == scheme.EventAkad && sctx.params.FinancingReceivableAccount != "" && toCode == sctx.params.FinancingReceivableAccount {
+		return s.reclassToFinancingIfBAST(ctx, tenantID, c, fromCode, toCode, bankApprovedAmount, ev, eventDate)
 	}
 	return s.reclassReceivableIfBAST(ctx, tenantID, c, fromCode, toCode, ev, eventDate)
 }
@@ -714,7 +744,7 @@ func (s *Service) applyPaymentMilestones(ctx context.Context, tenantID uint64, c
 			// state TIDAK dimajukan. Lebih baik milestone tertinggal (bisa
 			// diulang lewat endpoint event) daripada state berkata "piutang
 			// customer" sementara ledger masih menahan sisanya di piutang bank.
-			jid, rerr := s.reclassOnStateChange(ctx, tenantID, contract, sctx.state, tr.To, scheme.EventDisbursed, eventDate)
+			jid, rerr := s.reclassOnStateChange(ctx, tenantID, contract, sctx.state, tr.To, scheme.EventDisbursed, eventDate, nil)
 			if rerr != nil {
 				return // proyeksi dilewati; pembayaran tetap sah (SoT = ledger)
 			}
@@ -768,7 +798,7 @@ func (s *Service) applyPaymentMilestones(ctx context.Context, tenantID uint64, c
 	// Aturan sama dengan pencairan: state hanya boleh maju kalau saldo piutang
 	// ikut pindah. Untuk milestone ini biasanya no-op (akun tidak berubah, atau
 	// outstanding sudah nol pada fully_paid).
-	jid, rerr := s.reclassOnStateChange(ctx, tenantID, contract, sctx.state, newState, ev, eventDate)
+	jid, rerr := s.reclassOnStateChange(ctx, tenantID, contract, sctx.state, newState, ev, eventDate, nil)
 	if rerr != nil {
 		return
 	}
@@ -891,10 +921,135 @@ func (s *Service) schemeAkadGuard(ctx context.Context, tenantID, unitID uint64, 
 
 // schemeCreditAccountForPayment me-resolve akun kredit pembayaran PASCA-BAST
 // dari policy (pra-BAST selalu Uang Muka — routing GAP-1 tidak berubah).
-func (s *Service) schemeCreditAccountForPayment(ctx context.Context, c *SaleContract) (string, bool) {
+//
+// 7C fix (UAT 2026-09-07): source=kpr_disbursement SELALU menuju Dana Jaminan
+// Bank (FinancingReceivableAccount) selama akun itu terkonfigurasi — TIDAK
+// LAGI bergantung pada scheme_state. Sebelumnya akun kredit ditentukan lewat
+// ResolveReceivableAccount(state), yang berpindah ke Piutang Usaha begitu
+// state maju ke `disbursed` (dipicu OTOMATIS oleh pencairan PERTAMA) — akibatnya
+// pencairan ke-2/ke-3 salah mengkredit Piutang Usaha, bukan lagi mengurangi
+// Dana Jaminan Bank. Pembayaran BUKAN pencairan bank (mis. pelunasan langsung
+// oleh customer) tetap memakai resolusi berbasis state seperti semula.
+func (s *Service) schemeCreditAccountForPayment(ctx context.Context, c *SaleContract, source PaymentSource) (string, bool) {
 	sctx, err := s.schemeContextFor(ctx, c)
 	if err != nil || sctx == nil {
 		return "", false
 	}
+	if source == PaymentSourceKPRDisbursement && sctx.params.FinancingReceivableAccount != "" {
+		return sctx.params.FinancingReceivableAccount, true
+	}
 	return sctx.policy.ResolveReceivableAccount(sctx.params, sctx.state), true
+}
+
+// schemeAkadSplitAccounts (Item 7A, UAT 2026-09-07) me-resolve DUA akun yang
+// dibutuhkan untuk memecah baris piutang Event 3 kontrak ber-scheme KPR: kode
+// Dana Jaminan Bank (financingCode, kosong bila kontrak tidak dibiayai bank)
+// dan kode Piutang Usaha default (defaultReceivableCode). Keduanya diambil
+// LANGSUNG dari params scheme, TIDAK bergantung pada scheme_state — Akad
+// adalah SATU-SATUNYA momen kedua akun ini sekaligus diposting; transisi
+// state sesudahnya (mis. `disbursed`) tidak boleh mengubah retroaktif ke
+// mana Akad tadinya memposting (lihat 7C: reclassOnStateChange sudah tidak
+// lagi melakukan reklas lump-sum otomatis).
+func (s *Service) schemeAkadSplitAccounts(ctx context.Context, c *SaleContract) (financingCode, defaultReceivableCode string) {
+	sctx, err := s.schemeContextFor(ctx, c)
+	if err != nil || sctx == nil {
+		return "", ""
+	}
+	return sctx.params.FinancingReceivableAccount, sctx.params.ReceivableOrDefault()
+}
+
+// resolveBankApprovedAmount (Item 7A, UAT 2026-09-07) menentukan DAN menyimpan
+// Nilai Persetujuan KPR Bank — dipanggil dari DUA titik yang sama-sama bisa
+// jadi "momen Akad" kontrak KPR-financed: RecordAkad langsung (Akad
+// terjadi di/sebelum BAST — lihat blok Item 7A di RecordAkad) dan
+// ApplySchemeEvent EventAkad (Akad terjadi SETELAH BAST — lihat
+// reclassToFinancingIfBAST). reqAmount menang atas contract.LoanAmount lama
+// (kontrak legacy pra-7A yang sudah mengisi saat pembuatan kontrak); dipakai
+// sebagai fallback hanya bila reqAmount nil. Hanya reqAmount yang dipersist —
+// fallback dari LoanAmount sudah tersimpan sebelumnya, menulis ulang di sini
+// hanya membuang siklus.
+func (s *Service) resolveBankApprovedAmount(ctx context.Context, tenantID uint64, contract *SaleContract, reqAmount *domain.Money) (domain.Money, error) {
+	var approved *domain.Money
+	if reqAmount != nil {
+		if !reqAmount.IsWholeRupiah() {
+			return domain.Zero, ErrBankApprovedAmountFractional
+		}
+		if reqAmount.IsZero() || reqAmount.IsNeg() {
+			return domain.Zero, ErrBankApprovedAmountZeroOrNeg
+		}
+		approved = reqAmount
+	} else if contract.LoanAmount != nil {
+		approved = contract.LoanAmount
+	}
+	if approved == nil {
+		return domain.Zero, ErrBankApprovedAmountRequired
+	}
+	if reqAmount != nil && s.schemeFlow != nil {
+		if err := s.schemeFlow.UpdateContractLoanAmount(ctx, tenantID, contract.ID, *approved); err != nil {
+			return domain.Zero, fmt.Errorf("simpan Nilai Persetujuan KPR Bank: %w", err)
+		}
+	}
+	return *approved, nil
+}
+
+// reclassToFinancingIfBAST (Item 7A, UAT 2026-09-07) menangani kasus Akad
+// TERJADI SETELAH BAST untuk kontrak KPR-financed: pada saat BAST, seluruh
+// outstanding masih di akun piutang default (belum ada bank yang di-approve).
+// Begitu event Akad membawa Nilai Persetujuan KPR Bank, HANYA sebesar
+// min(approved, outstanding) yang direklas ke Dana Jaminan Bank — sisanya
+// (jika ada) TETAP di Piutang Usaha, bukan direklas penuh seperti perilaku
+// lama (itu bug: menganggap seluruh sisa tagihan otomatis jadi tanggungan
+// bank, padahal Nilai Persetujuan KPR Bank bisa lebih kecil dari harga unit).
+func (s *Service) reclassToFinancingIfBAST(ctx context.Context, tenantID uint64, c *SaleContract, fromCode, toCode string, bankApprovedAmount *domain.Money, ev scheme.Event, eventDate time.Time) (*uint64, error) {
+	saleRec, err := s.store.FindSaleRecord(ctx, tenantID, c.UnitID)
+	if err != nil {
+		if errors.Is(err, ErrSaleRecordNotFound) {
+			return nil, nil // pra-BAST: split sudah ditangani langsung oleh RecordAkad
+		}
+		return nil, fmt.Errorf("cek status BAST: %w", err)
+	}
+	outstanding, err := s.unitOutstanding(ctx, tenantID, saleRec)
+	if err != nil {
+		return nil, err
+	}
+	if outstanding.IsZero() || outstanding.IsNeg() {
+		return nil, nil
+	}
+
+	approved, aerr := s.resolveBankApprovedAmount(ctx, tenantID, c, bankApprovedAmount)
+	if aerr != nil {
+		return nil, aerr
+	}
+	financingAmount := approved
+	if financingAmount.GreaterThan(outstanding) {
+		financingAmount = outstanding
+	}
+	if financingAmount.IsZero() {
+		return nil, nil // Invariant #1: tidak ada baris jurnal nol
+	}
+
+	fromID, err := s.accounts.FindAccountIDByCode(ctx, tenantID, fromCode)
+	if err != nil {
+		return nil, fmt.Errorf("akun piutang asal %s: %w", fromCode, err)
+	}
+	toID, err := s.accounts.FindAccountIDByCode(ctx, tenantID, toCode)
+	if err != nil {
+		return nil, fmt.Errorf("akun piutang tujuan %s: %w", toCode, err)
+	}
+
+	pid := saleRec.ProjectID
+	uid := c.UnitID
+	desc := fmt.Sprintf("Reklas piutang %s → %s (event scheme: %s) — Dana Jaminan Bank = Nilai Persetujuan KPR Bank", fromCode, toCode, ev)
+	lines := []JournalLineInput{
+		{AccountID: toID, Debit: financingAmount, ProjectID: &pid, PhaseID: saleRec.PhaseID, UnitID: &uid, Description: desc},
+		{AccountID: fromID, Credit: financingAmount, ProjectID: &pid, PhaseID: saleRec.PhaseID, UnitID: &uid, Description: desc},
+	}
+	jid, err := s.journals.CreateJournal(ctx, tenantID, eventDate, desc, lines)
+	if err != nil {
+		return nil, fmt.Errorf("buat jurnal reklas: %w", err)
+	}
+	if err := s.journals.PostJournal(ctx, tenantID, jid); err != nil {
+		return nil, fmt.Errorf("posting jurnal reklas: %w", err)
+	}
+	return &jid, nil
 }

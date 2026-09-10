@@ -92,7 +92,7 @@ func TestEngine_SingleUnit_GetsAll(t *testing.T) {
 		Hard: rupiah(500_000_000),
 	}
 	units := []allocation.UnitInput{{
-		UnitID: 1, SaleableArea: decimal.NewFromInt(150),
+		UnitID: 1, SaleableArea: decimal.NewFromInt(150), LandAreaM2: decimal.NewFromInt(150),
 		SalesValue: rupiah(2_000_000_000),
 	}}
 
@@ -118,9 +118,9 @@ func TestEngine_EqualWeights_EvenSplit(t *testing.T) {
 	// 3 units with equal area; 300 cost splits into 100 each
 	projectWide := domain.UnitCostBreakdown{Hard: rupiah(300_000_000)}
 	units := []allocation.UnitInput{
-		{UnitID: 1, SaleableArea: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
-		{UnitID: 2, SaleableArea: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
-		{UnitID: 3, SaleableArea: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
+		{UnitID: 1, SaleableArea: decimal.NewFromInt(100), LandAreaM2: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
+		{UnitID: 2, SaleableArea: decimal.NewFromInt(100), LandAreaM2: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
+		{UnitID: 3, SaleableArea: decimal.NewFromInt(100), LandAreaM2: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
 	}
 	results, err := allocation.Compute(projectWide, units, allocation.BasisSaleableArea)
 	if err != nil {
@@ -139,9 +139,9 @@ func TestEngine_OddAmount_LargestRemainderDeterministic(t *testing.T) {
 	// Expected: floor=333,333,333 each; 1 extra unit → first bucket (by remainder tie-break: stable)
 	projectWide := domain.UnitCostBreakdown{Hard: rupiah(1_000_000_001)}
 	units := []allocation.UnitInput{
-		{UnitID: 1, SaleableArea: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
-		{UnitID: 2, SaleableArea: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
-		{UnitID: 3, SaleableArea: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
+		{UnitID: 1, SaleableArea: decimal.NewFromInt(100), LandAreaM2: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
+		{UnitID: 2, SaleableArea: decimal.NewFromInt(100), LandAreaM2: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
+		{UnitID: 3, SaleableArea: decimal.NewFromInt(100), LandAreaM2: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
 	}
 
 	// Run twice — must be identical (determinism)
@@ -179,8 +179,8 @@ func TestEngine_DirectCosts_PassedThrough_Unchanged(t *testing.T) {
 	projectWide := domain.UnitCostBreakdown{Hard: rupiah(200_000_000)}
 
 	units := []allocation.UnitInput{
-		{UnitID: 1, SaleableArea: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000), Direct: directA},
-		{UnitID: 2, SaleableArea: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000), Direct: directB},
+		{UnitID: 1, SaleableArea: decimal.NewFromInt(100), LandAreaM2: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000), Direct: directA},
+		{UnitID: 2, SaleableArea: decimal.NewFromInt(100), LandAreaM2: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000), Direct: directB},
 	}
 	results, err := allocation.Compute(projectWide, units, allocation.BasisSaleableArea)
 	if err != nil {
@@ -223,9 +223,9 @@ func TestEngine_GrandTotal_ReconcilesWith_DirectPlusProjectWide(t *testing.T) {
 		Financing: rupiah(100_000_000),
 	}
 	units := []allocation.UnitInput{
-		{UnitID: 1, SaleableArea: decimal.NewFromInt(150), SalesValue: rupiah(3_000_000_000), Direct: directA},
-		{UnitID: 2, SaleableArea: decimal.NewFromInt(200), SalesValue: rupiah(3_500_000_000), Direct: directB},
-		{UnitID: 3, SaleableArea: decimal.NewFromInt(250), SalesValue: rupiah(4_000_000_000)},
+		{UnitID: 1, SaleableArea: decimal.NewFromInt(150), LandAreaM2: decimal.NewFromInt(150), SalesValue: rupiah(3_000_000_000), Direct: directA},
+		{UnitID: 2, SaleableArea: decimal.NewFromInt(200), LandAreaM2: decimal.NewFromInt(200), SalesValue: rupiah(3_500_000_000), Direct: directB},
+		{UnitID: 3, SaleableArea: decimal.NewFromInt(250), LandAreaM2: decimal.NewFromInt(250), SalesValue: rupiah(4_000_000_000)},
 	}
 
 	expectedGrand := mustAdd(mustAdd(directA, directB), projectWide)
@@ -257,11 +257,11 @@ func TestEngine_ChangeBasis_BothReconcile(t *testing.T) {
 		Financing: rupiah(1_500_000_000),
 	}
 	units := []allocation.UnitInput{
-		{UnitID: 1, SaleableArea: decimal.NewFromInt(150), SalesValue: rupiah(2_800_000_000)},
-		{UnitID: 2, SaleableArea: decimal.NewFromInt(150), SalesValue: rupiah(2_800_000_000)},
-		{UnitID: 3, SaleableArea: decimal.NewFromInt(200), SalesValue: rupiah(3_500_000_000)},
-		{UnitID: 4, SaleableArea: decimal.NewFromInt(200), SalesValue: rupiah(3_500_000_000)},
-		{UnitID: 5, SaleableArea: decimal.NewFromInt(250), SalesValue: rupiah(4_200_000_000)},
+		{UnitID: 1, SaleableArea: decimal.NewFromInt(150), LandAreaM2: decimal.NewFromInt(150), SalesValue: rupiah(2_800_000_000)},
+		{UnitID: 2, SaleableArea: decimal.NewFromInt(150), LandAreaM2: decimal.NewFromInt(150), SalesValue: rupiah(2_800_000_000)},
+		{UnitID: 3, SaleableArea: decimal.NewFromInt(200), LandAreaM2: decimal.NewFromInt(200), SalesValue: rupiah(3_500_000_000)},
+		{UnitID: 4, SaleableArea: decimal.NewFromInt(200), LandAreaM2: decimal.NewFromInt(200), SalesValue: rupiah(3_500_000_000)},
+		{UnitID: 5, SaleableArea: decimal.NewFromInt(250), LandAreaM2: decimal.NewFromInt(250), SalesValue: rupiah(4_200_000_000)},
 	}
 
 	for _, basis := range []allocation.AllocationBasis{allocation.BasisSaleableArea, allocation.BasisSalesValue} {
@@ -301,6 +301,7 @@ func TestEngine_Randomized_Reconciliation(t *testing.T) {
 			units[i] = allocation.UnitInput{
 				UnitID:       uint64(i + 1),
 				SaleableArea: decimal.NewFromInt(50 + rng.Int63n(351)),
+				LandAreaM2:   decimal.NewFromInt(50 + rng.Int63n(351)),
 				SalesValue:   rupiah(500_000_000 + rng.Int63n(9_500_000_001)),
 			}
 		}
@@ -360,11 +361,11 @@ func TestEngine_Deterministic_SameInputSameOutput(t *testing.T) {
 		Financing: rupiah(999_999_999),
 	}
 	units := []allocation.UnitInput{
-		{UnitID: 1, SaleableArea: decimal.NewFromInt(143), SalesValue: rupiah(2_750_000_000)},
-		{UnitID: 2, SaleableArea: decimal.NewFromInt(167), SalesValue: rupiah(3_200_000_000)},
-		{UnitID: 3, SaleableArea: decimal.NewFromInt(89), SalesValue: rupiah(1_500_000_000)},
-		{UnitID: 4, SaleableArea: decimal.NewFromInt(201), SalesValue: rupiah(4_100_000_000)},
-		{UnitID: 5, SaleableArea: decimal.NewFromInt(312), SalesValue: rupiah(6_000_000_000)},
+		{UnitID: 1, SaleableArea: decimal.NewFromInt(143), LandAreaM2: decimal.NewFromInt(143), SalesValue: rupiah(2_750_000_000)},
+		{UnitID: 2, SaleableArea: decimal.NewFromInt(167), LandAreaM2: decimal.NewFromInt(167), SalesValue: rupiah(3_200_000_000)},
+		{UnitID: 3, SaleableArea: decimal.NewFromInt(89), LandAreaM2: decimal.NewFromInt(89), SalesValue: rupiah(1_500_000_000)},
+		{UnitID: 4, SaleableArea: decimal.NewFromInt(201), LandAreaM2: decimal.NewFromInt(201), SalesValue: rupiah(4_100_000_000)},
+		{UnitID: 5, SaleableArea: decimal.NewFromInt(312), LandAreaM2: decimal.NewFromInt(312), SalesValue: rupiah(6_000_000_000)},
 	}
 
 	for _, basis := range []allocation.AllocationBasis{allocation.BasisSaleableArea, allocation.BasisSalesValue} {
@@ -398,8 +399,8 @@ func TestEngine_Deterministic_SameInputSameOutput(t *testing.T) {
 func TestEngine_ZeroProjectWideCosts_NoAllocation(t *testing.T) {
 	projectWide := domain.UnitCostBreakdown{} // all zero
 	units := []allocation.UnitInput{
-		{UnitID: 1, SaleableArea: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
-		{UnitID: 2, SaleableArea: decimal.NewFromInt(200), SalesValue: rupiah(2_000_000_000)},
+		{UnitID: 1, SaleableArea: decimal.NewFromInt(100), LandAreaM2: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
+		{UnitID: 2, SaleableArea: decimal.NewFromInt(200), LandAreaM2: decimal.NewFromInt(200), SalesValue: rupiah(2_000_000_000)},
 	}
 	results, err := allocation.Compute(projectWide, units, allocation.BasisSaleableArea)
 	if err != nil {
@@ -433,7 +434,7 @@ func TestEngine_ZeroUnits_ReturnsError(t *testing.T) {
 }
 
 func TestEngine_InvalidBasis_ReturnsError(t *testing.T) {
-	units := []allocation.UnitInput{{UnitID: 1, SaleableArea: decimal.NewFromInt(100)}}
+	units := []allocation.UnitInput{{UnitID: 1, SaleableArea: decimal.NewFromInt(100), LandAreaM2: decimal.NewFromInt(100)}}
 	_, err := allocation.Compute(domain.UnitCostBreakdown{}, units, "invalid_basis")
 	if !errors.Is(err, allocation.ErrInvalidBasis) {
 		t.Errorf("expected ErrInvalidBasis, got %v", err)
@@ -470,6 +471,7 @@ func TestEngine_SwitchBasis_BothReconcile_LITHOS(t *testing.T) {
 		units[i] = allocation.UnitInput{
 			UnitID:       uint64(i + 1),
 			SaleableArea: decimal.NewFromInt(s.area),
+			LandAreaM2:   decimal.NewFromInt(s.area),
 			SalesValue:   rupiah(s.price),
 		}
 	}
@@ -504,9 +506,9 @@ func TestEngine_SwitchBasis_BothReconcile_LITHOS(t *testing.T) {
 // category's project-wide cost does not affect other categories' allocations.
 func TestEngine_EachCategory_AllocatedIndependently(t *testing.T) {
 	units := []allocation.UnitInput{
-		{UnitID: 1, SaleableArea: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
-		{UnitID: 2, SaleableArea: decimal.NewFromInt(200), SalesValue: rupiah(2_000_000_000)},
-		{UnitID: 3, SaleableArea: decimal.NewFromInt(300), SalesValue: rupiah(3_000_000_000)},
+		{UnitID: 1, SaleableArea: decimal.NewFromInt(100), LandAreaM2: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000)},
+		{UnitID: 2, SaleableArea: decimal.NewFromInt(200), LandAreaM2: decimal.NewFromInt(200), SalesValue: rupiah(2_000_000_000)},
+		{UnitID: 3, SaleableArea: decimal.NewFromInt(300), LandAreaM2: decimal.NewFromInt(300), SalesValue: rupiah(3_000_000_000)},
 	}
 
 	base := domain.UnitCostBreakdown{
@@ -546,8 +548,8 @@ func TestEngine_SumTotal_EqualsDirect_Plus_ProjectWide(t *testing.T) {
 		Soft: rupiah(300_000_000), Financing: rupiah(100_000_000),
 	}
 	units := []allocation.UnitInput{
-		{UnitID: 1, SaleableArea: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000), Direct: direct1},
-		{UnitID: 2, SaleableArea: decimal.NewFromInt(150), SalesValue: rupiah(1_500_000_000), Direct: direct2},
+		{UnitID: 1, SaleableArea: decimal.NewFromInt(100), LandAreaM2: decimal.NewFromInt(100), SalesValue: rupiah(1_000_000_000), Direct: direct1},
+		{UnitID: 2, SaleableArea: decimal.NewFromInt(150), LandAreaM2: decimal.NewFromInt(150), SalesValue: rupiah(1_500_000_000), Direct: direct2},
 	}
 
 	results, err := allocation.Compute(projectWide, units, allocation.BasisSaleableArea)

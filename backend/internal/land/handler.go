@@ -11,8 +11,6 @@ import (
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 
-	"esaproperti/internal/allocation"
-	"esaproperti/internal/budget"
 	"esaproperti/internal/domain"
 	"esaproperti/internal/platform/auth"
 )
@@ -22,22 +20,30 @@ type Handler struct {
 	svc *Service
 }
 
-// NewHandler membangun production handler yang terhubung ke GORM — wiring
-// alokasi+RAB identik sale.NewHandler (allocSvc dengan WithVersionStore +
-// WithLandPoolSource) supaya BudgetedLandHPPResolver bisa memakai
-// ComputeLandStockShare/ComputeLandStockShareActual (§E.4).
-func NewHandler(db *gorm.DB) *Handler {
+// NewHandler membangun production handler yang terhubung ke GORM. HPP resolver
+// = PurchasePriceLandHPPResolver (koreksi klien 2026-08-31): tarif HPP per m²
+// langsung dari land_stock.purchase_price, bukan lagi alokasi RAB/actual —
+// lihat hpp_resolver.go.
+//
+// pph adalah *tax.Service (satu-satunya tax engine — tidak ada engine kedua),
+// sudah memenuhi LandPPhResolver langsung karena signature ResolveAccrualPlan
+// identik. nil-safe: nil berarti tidak ada akrual PPh Final otomatis saat
+// Akad (mundur-kompatibel dengan land_sales historis). Caller (cmd/api/main.go)
+// mengoper taxHandler.Svc() yang sama dipakai unit/BAST — bukan instance baru.
+func NewHandler(db *gorm.DB, pph LandPPhResolver) *Handler {
 	repo := NewGORMRepository(db)
+	resolver := NewPurchasePriceLandHPPResolver(repo)
+	opts := []ServiceOption{WithHPPResolver(resolver)}
+	if pph != nil {
+		opts = append(opts, WithPPhResolver(pph))
+	}
+	return &Handler{svc: NewService(repo, opts...)}
+}
 
-	allocRepo := allocation.NewGORMRepository(db)
-	allocSvc := allocation.NewService(allocRepo, allocRepo, allocRepo,
-		allocation.WithVersionStore(allocRepo), allocation.WithLandPoolSource(allocRepo))
-	budgetSvc := budget.NewService(budget.NewGORMRepository(db), budget.NewGORMRealisasiProvider(db))
-
-	resolver := NewBudgetedLandHPPResolver(budgetSvc, allocSvc, repo)
-	resolver.SetConfigVersionSource(allocSvc)
-
-	return &Handler{svc: NewService(repo, WithHPPResolver(resolver))}
+// Svc exposes the underlying Service — wiring seams (e.g.
+// reporting.SetLandReceivable) need it without importing HTTP routes.
+func (h *Handler) Svc() *Service {
+	return h.svc
 }
 
 // Mount registers land_stock + land_stock_reservations routes under
@@ -111,7 +117,8 @@ func isDomainLandError(err error) bool {
 		errors.Is(err, ErrInvalidBankAccount) ||
 		errors.Is(err, ErrPaymentAccountInactive) ||
 		errors.Is(err, ErrLandSaleNotAkad) ||
-		errors.Is(err, ErrCancelReasonRequired)
+		errors.Is(err, ErrCancelReasonRequired) ||
+		errors.Is(err, ErrLandSaleHasReceivedPayment)
 }
 
 func isNotFoundLandError(err error) bool {
@@ -126,6 +133,7 @@ func isNotFoundLandError(err error) bool {
 type poolDTO struct {
 	TotalQuantityM2 string `json:"total_quantity_m2"`
 	UnitPrice       string `json:"unit_price"`
+	PurchasePrice   string `json:"purchase_price,omitempty"`
 }
 
 func (h *Handler) getPool(w http.ResponseWriter, r *http.Request) {
@@ -167,13 +175,13 @@ func (h *Handler) createPool(w http.ResponseWriter, r *http.Request) {
 		writeLandError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	qty, price, err := parsePoolDTO(dto)
+	qty, price, purchasePrice, err := parsePoolDTO(dto)
 	if err != nil {
 		writeLandError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	pool, err := h.svc.CreatePool(r.Context(), tenantID, CreatePoolRequest{
-		ProjectID: projectID, TotalQuantityM2: qty, UnitPrice: price,
+		ProjectID: projectID, TotalQuantityM2: qty, UnitPrice: price, PurchasePrice: purchasePrice,
 	})
 	if err != nil {
 		if isNotFoundLandError(err) {
@@ -206,13 +214,13 @@ func (h *Handler) updatePool(w http.ResponseWriter, r *http.Request) {
 		writeLandError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	qty, price, err := parsePoolDTO(dto)
+	qty, price, purchasePrice, err := parsePoolDTO(dto)
 	if err != nil {
 		writeLandError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	pool, err := h.svc.UpdatePool(r.Context(), tenantID, projectID, UpdatePoolRequest{
-		TotalQuantityM2: qty, UnitPrice: price,
+		TotalQuantityM2: qty, UnitPrice: price, PurchasePrice: purchasePrice,
 	})
 	if err != nil {
 		if isNotFoundLandError(err) {
@@ -577,18 +585,24 @@ func (h *Handler) cancelLandSale(w http.ResponseWriter, r *http.Request) {
 	writeLandJSON(w, http.StatusOK, sale)
 }
 
-func parsePoolDTO(dto poolDTO) (qty decimal.Decimal, price domain.Money, err error) {
+func parsePoolDTO(dto poolDTO) (qty decimal.Decimal, price, purchasePrice domain.Money, err error) {
 	if dto.TotalQuantityM2 != "" {
 		qty, err = decimal.NewFromString(dto.TotalQuantityM2)
 		if err != nil {
-			return qty, price, errors.New("total_quantity_m2 harus angka")
+			return qty, price, purchasePrice, errors.New("total_quantity_m2 harus angka")
 		}
 	}
 	if dto.UnitPrice != "" {
 		price, err = domain.NewMoney(dto.UnitPrice)
 		if err != nil {
-			return qty, price, errors.New("unit_price tidak valid: " + err.Error())
+			return qty, price, purchasePrice, errors.New("unit_price tidak valid: " + err.Error())
 		}
 	}
-	return qty, price, nil
+	if dto.PurchasePrice != "" {
+		purchasePrice, err = domain.NewMoney(dto.PurchasePrice)
+		if err != nil {
+			return qty, price, purchasePrice, errors.New("purchase_price tidak valid: " + err.Error())
+		}
+	}
+	return qty, price, purchasePrice, nil
 }

@@ -5,6 +5,15 @@ package land
 // dipakai internal/sale.hpp_resolver.go untuk unit properti dipakai PERSIS
 // SAMA di sini — bedanya hanya angka yang di-resolve adalah tarif per-m²
 // (hpp_rate_per_m2), bukan lump-sum per unit. Bukan resolver kedua.
+//
+// KOREKSI KLIEN (2026-08-31): BudgetedLandHPPResolver di bawah TIDAK LAGI
+// dipasang di produksi. Kelebihan Tanah adalah parsel yang dibeli terpisah
+// dengan harga per-m² yang sudah diketahui pasti (land_stock.purchase_price)
+// — memakainya LANGSUNG sebagai tarif HPP lebih sesuai Invariant #4 (biaya
+// AKUMULASI, bukan estimasi/alokasi) daripada membaginya dari pool RAB/actual
+// project-wide, yang cocok untuk tanah di bawah unit rumah (tak punya harga
+// beli sendiri) tapi tidak untuk tanah lebih yang harga belinya sudah pasti.
+// Lihat PurchasePriceLandHPPResolver di bawah — resolver produksi saat ini.
 
 import (
 	"context"
@@ -17,8 +26,9 @@ import (
 )
 
 const (
-	HPPMethodActual   = "actual"
-	HPPMethodBudgeted = "budgeted"
+	HPPMethodActual        = "actual"
+	HPPMethodBudgeted      = "budgeted"
+	HPPMethodPurchasePrice = "purchase_price"
 )
 
 // ErrLandStockHasNoQuantity is returned when resolving a rate for a
@@ -155,4 +165,35 @@ func (r *BudgetedLandHPPResolver) ResolveLandHPPRate(ctx context.Context, tenant
 		}
 	}
 	return res, nil
+}
+
+// PurchasePriceLandHPPResolver implements LandHPPResolver: HPP per m² =
+// land_stock.purchase_price, langsung, tanpa alokasi RAB/actual — resolver
+// PRODUKSI saat ini (koreksi klien 2026-08-31, lihat komentar header file).
+//
+// Kelebihan Tanah dibeli sebagai parsel terpisah dengan harga per-m² yang
+// sudah pasti diketahui saat setup pool — memakainya langsung sebagai HPP
+// adalah biaya AKUMULASI sungguhan (Invariant #4), bukan estimasi/alokasi.
+type PurchasePriceLandHPPResolver struct {
+	stock LandStockQuantitySource
+}
+
+// NewPurchasePriceLandHPPResolver merangkai resolver produksi.
+func NewPurchasePriceLandHPPResolver(stock LandStockQuantitySource) *PurchasePriceLandHPPResolver {
+	return &PurchasePriceLandHPPResolver{stock: stock}
+}
+
+func (r *PurchasePriceLandHPPResolver) ResolveLandHPPRate(ctx context.Context, tenantID, projectID uint64) (LandHPPResolution, error) {
+	stock, err := r.stock.FindPoolByProject(ctx, tenantID, projectID)
+	if err != nil {
+		return LandHPPResolution{}, fmt.Errorf("ambil land_stock: %w", err)
+	}
+	if !stock.TotalQuantityM2.IsPositive() {
+		return LandHPPResolution{}, ErrLandStockHasNoQuantity
+	}
+	return LandHPPResolution{
+		RatePerM2: stock.PurchasePrice,
+		Method:    HPPMethodPurchasePrice,
+		Basis:     "purchase_price",
+	}, nil
 }

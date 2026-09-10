@@ -13,15 +13,15 @@ var (
 	ErrCostAmountZeroOrNeg = errors.New("amount harus lebih besar dari nol")
 
 	// ErrInvalidCategory is returned when category is not a recognized CostCategory.
-	ErrInvalidCategory = errors.New("kategori tidak valid: gunakan land, hard, soft, financing (kapitalisasi) atau marketing, other (overhead)")
+	ErrInvalidCategory = errors.New("kategori tidak valid: gunakan land, hard (kapitalisasi) atau operational, marketing, other, soft (overhead)")
 
 	// ErrInvalidCostTier is returned when cost_tier is not direct|shared|overhead.
 	ErrInvalidCostTier = errors.New("cost_tier tidak valid: gunakan direct, shared, atau overhead")
 
 	// ErrTierCategoryMismatch is returned when the CostTier × CostCategory matrix is violated:
-	// direct/shared hanya untuk kategori kapitalisasi (land|hard|soft|financing);
-	// overhead hanya untuk kategori beban (marketing|other).
-	ErrTierCategoryMismatch = errors.New("kombinasi cost_tier dan kategori tidak sah: direct/shared hanya untuk land|hard|soft|financing, overhead hanya untuk marketing|other")
+	// direct/shared hanya untuk kategori kapitalisasi (land|hard);
+	// overhead hanya untuk kategori beban (operational|marketing|other|soft).
+	ErrTierCategoryMismatch = errors.New("kombinasi cost_tier dan kategori tidak sah: direct/shared hanya untuk land|hard, overhead hanya untuk operational|marketing|other|soft")
 
 	// ErrUnitRequiredForDirect is returned when tier=direct tanpa unit_id.
 	ErrUnitRequiredForDirect = errors.New("cost_tier direct wajib menyebut unit_id (biaya milik satu unit)")
@@ -126,4 +126,11 @@ var (
 
 	// ErrUnitNotInProject: unit yang di-tag milik proyek lain.
 	ErrUnitNotInProject = errors.New("unit bukan milik proyek yang dipilih")
+
+	// UAT 2026-09-07: klasifikasi Produksi Subsidi/Komersial/Sarana &
+	// Prasarana/Perizinan di dalam CostCategoryHard — wajib untuk pool
+	// project-wide (tier shared) agar HPP Subsidi dan Komersial tidak tercampur.
+	ErrHardSubcategoryRequired   = errors.New("hard_subcategory wajib diisi untuk biaya Konstruksi tanpa unit spesifik (pool project-wide): pilih produksi_subsidi|produksi_komersial|sarana_prasarana|perizinan")
+	ErrInvalidHardSubcategory    = errors.New("hard_subcategory tidak valid: gunakan produksi_subsidi|produksi_komersial|sarana_prasarana|perizinan")
+	ErrHardSubcategoryNotAllowed = errors.New("hard_subcategory hanya berlaku untuk category=hard")
 )

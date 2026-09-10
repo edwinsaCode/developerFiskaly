@@ -216,11 +216,11 @@ func TestConsistency_NonPropertyProduct(t *testing.T) {
 	if err != nil {
 		t.Fatalf("trial balance: %v", err)
 	}
-	pl, err := env.repSvc.GetProjectPL(ctx, eqTenant, env.projectID, asOf)
+	pl, err := env.repSvc.GetProjectPL(ctx, eqTenant, env.projectID, nil, asOf)
 	if err != nil {
 		t.Fatalf("project PL: %v", err)
 	}
-	neraca, err := env.repSvc.GetNeraca(ctx, eqTenant, asOf)
+	neraca, err := env.repSvc.GetNeraca(ctx, eqTenant, nil, asOf)
 	if err != nil {
 		t.Fatalf("neraca: %v", err)
 	}

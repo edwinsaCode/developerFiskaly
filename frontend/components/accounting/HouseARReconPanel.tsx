@@ -24,7 +24,7 @@ function isZero(v: string): boolean {
 const accountName: Record<string, string> = {
   "1-2000": "Piutang Customer",
   "1-2100": "Piutang Lain-lain",
-  "1-2200": "Piutang Bank (KPR)",
+  "1-2200": "Dana Jaminan Bank (KPR)",
 };
 
 export function HouseARReconPanel({

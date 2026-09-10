@@ -20,12 +20,13 @@ interface Props {
   activeTab: string;
   projects: Project[];
   asOf: string;
+  startDate: string;
   periodFrom: string;
   periodTo: string;
   projectId: string;
 }
 
-export function LaporanNavClient({ activeTab, projects, asOf, periodFrom, periodTo, projectId }: Props) {
+export function LaporanNavClient({ activeTab, projects, asOf, startDate, periodFrom, periodTo, projectId }: Props) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -45,7 +46,10 @@ export function LaporanNavClient({ activeTab, projects, asOf, periodFrom, period
   }
 
   const needsDateRange = ["arus-kas", "pajak"].includes(activeTab);
-  const needsAsOf = ["neraca", "laba-rugi", "neraca-saldo"].includes(activeTab);
+  const needsAsOf = ["neraca", "laba-rugi", "laba-rugi-proyek", "neraca-saldo"].includes(activeTab);
+  // Item 5: Start Date opsional — Neraca & L/R saja (Neraca Saldo tetap satu tanggal,
+  // ia bukan bagian dari cakupan Item 5).
+  const needsStartDate = ["neraca", "laba-rugi", "laba-rugi-proyek"].includes(activeTab);
   const needsProject = ["laba-rugi-proyek", "rab-realisasi"].includes(activeTab);
 
   return (
@@ -72,9 +76,21 @@ export function LaporanNavClient({ activeTab, projects, asOf, periodFrom, period
       {/* Filters */}
       {(needsAsOf || needsDateRange || needsProject) && (
         <div className="flex flex-wrap items-center gap-3">
+          {needsStartDate && (
+            <div className="flex items-center gap-2 text-sm">
+              <label className="text-text-secondary whitespace-nowrap">Dari tanggal:</label>
+              <input
+                type="date"
+                value={startDate}
+                onChange={e => navigate({ start_date: e.target.value })}
+                className="border border-border rounded px-2 py-1 text-sm bg-surface text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/40"
+              />
+            </div>
+          )}
+
           {needsAsOf && (
             <div className="flex items-center gap-2 text-sm">
-              <label className="text-text-secondary whitespace-nowrap">Per tanggal:</label>
+              <label className="text-text-secondary whitespace-nowrap">{needsStartDate ? "Sampai tanggal:" : "Per tanggal:"}</label>
               <input
                 type="date"
                 value={asOf}

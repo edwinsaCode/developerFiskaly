@@ -12,6 +12,7 @@ export interface LandStock {
   reserved_quantity_m2: string;
   sold_quantity_m2: string;
   unit_price: string;
+  purchase_price: string;
   created_at: string;
   updated_at: string;
 }
@@ -28,7 +29,7 @@ export async function fetchLandStock(token: string, projectId: number): Promise<
 export async function createLandStock(
   token: string,
   projectId: number,
-  input: { total_quantity_m2: string; unit_price: string },
+  input: { total_quantity_m2: string; unit_price: string; purchase_price: string },
 ): Promise<LandStock> {
   return apiFetch<LandStock>(`/projects/${projectId}/land-stock`, {
     token,
@@ -40,7 +41,7 @@ export async function createLandStock(
 export async function updateLandStock(
   token: string,
   projectId: number,
-  input: { total_quantity_m2: string; unit_price: string },
+  input: { total_quantity_m2: string; unit_price: string; purchase_price: string },
 ): Promise<LandStock> {
   return apiFetch<LandStock>(`/projects/${projectId}/land-stock`, {
     token,

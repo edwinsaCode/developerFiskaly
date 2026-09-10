@@ -39,6 +39,50 @@ func tbRow(code, name string, accType domain.AccountType, debit, credit domain.M
 	}
 }
 
+// TestComputeNeracaRange_PeriodeTerpilihIsInfoOnly_NeracaStaysBalanced (Item 5,
+// dikoreksi setelah live FE verification menemukan bug "Neraca tidak seimbang"
+// palsu): ComputeNeracaRange TIDAK PERNAH mengganti LabaRugiTahunBerjalan/
+// TotalEkuitas/IsBalanced dengan angka jendela [from, asOf] — itu selalu
+// life-to-date dari `rows`, persis seperti ComputeNeraca biasa, sehingga Neraca
+// TETAP balanced. LabaRugiPeriodeTerpilih (dari plRows) hanya field informasi
+// tambahan.
+func TestComputeNeracaRange_PeriodeTerpilihIsInfoOnly_NeracaStaysBalanced(t *testing.T) {
+	from := time.Date(2024, 12, 1, 0, 0, 0, 0, time.UTC)
+	rows := []ledger.TrialBalanceRow{
+		// Skenario balanced end-to-end: Aset 830M == Kewajiban 0 + Ekuitas 500M + LabaRugi(life-to-date) 330M
+		tbRow("1-1300", "Bank — BCA", domain.AccountAsset, domain.FromInt(830_000_000), domain.Zero),
+		tbRow("3-1000", "Modal Disetor", domain.AccountEquity, domain.Zero, domain.FromInt(500_000_000)),
+		tbRow("4-1000", "Pendapatan", domain.AccountRevenue, domain.Zero, domain.FromInt(500_000_000)),
+		tbRow("5-3000", "Beban", domain.AccountExpense, domain.FromInt(170_000_000), domain.Zero),
+	}
+	// plRows: hanya transaksi jendela [from, asOf] — jauh lebih kecil dari life-to-date.
+	plRows := []reporting.PLRawRow{
+		{AccountCode: "4-1000", AccountName: "Pendapatan", TotalCredit: domain.FromInt(50_000_000)},
+		{AccountCode: "5-3000", AccountName: "Beban", TotalDebit: domain.FromInt(20_000_000)},
+	}
+
+	neraca := reporting.ComputeNeracaRange(rows, plRows, from, asOf)
+
+	if neraca.TotalAset != "830000000" {
+		t.Errorf("TotalAset (harus tetap kumulatif): got %s, want 830000000", neraca.TotalAset)
+	}
+	if neraca.LabaRugiTahunBerjalan != "330000000" {
+		t.Errorf("LabaRugiTahunBerjalan (life-to-date, TIDAK boleh berubah oleh from): got %s, want 330000000", neraca.LabaRugiTahunBerjalan)
+	}
+	if neraca.LabaRugiPeriodeTerpilih != "30000000" {
+		t.Errorf("LabaRugiPeriodeTerpilih (dari jendela plRows): got %s, want 30000000", neraca.LabaRugiPeriodeTerpilih)
+	}
+	if neraca.From == nil || !neraca.From.Equal(from) {
+		t.Errorf("From harus tercatat pada report: got %v", neraca.From)
+	}
+	if neraca.TotalKewajibanEkuitas != "830000000" {
+		t.Errorf("TotalKewajibanEkuitas: got %s, want 830000000 (0+500M+330M)", neraca.TotalKewajibanEkuitas)
+	}
+	if !neraca.IsBalanced {
+		t.Errorf("IsBalanced harus tetap true — from tidak boleh merusak identitas neraca")
+	}
+}
+
 // ── TestComputeNeraca_IsBalanced ──────────────────────────────────────────────
 
 func TestComputeNeraca_IsBalanced(t *testing.T) {
@@ -331,10 +375,10 @@ func (m *mockLedgerQuerier) ListAccounts(_ context.Context, _ uint64) ([]*ledger
 
 type mockPLReader struct{}
 
-func (m *mockPLReader) GetProjectPLRows(_ context.Context, _, _ uint64, _ time.Time) ([]reporting.PLRawRow, error) {
+func (m *mockPLReader) GetProjectPLRows(_ context.Context, _, _ uint64, _ *time.Time, _ time.Time) ([]reporting.PLRawRow, error) {
 	return nil, nil
 }
-func (m *mockPLReader) GetConsolidatedPLRows(_ context.Context, _ uint64, _ time.Time) ([]reporting.PLRawRow, error) {
+func (m *mockPLReader) GetConsolidatedPLRows(_ context.Context, _ uint64, _ *time.Time, _ time.Time) ([]reporting.PLRawRow, error) {
 	return nil, nil
 }
 func (m *mockPLReader) GetTaxLiabilityReport(_ context.Context, _ uint64, _, _ time.Time) (*reporting.TaxLiabilityReport, error) {
@@ -377,7 +421,7 @@ func TestGetNeraca_DelegatesToLedgerAndComputesCorrectly(t *testing.T) {
 		&mockCashFlowReader{},
 	)
 
-	neraca, err := svc.GetNeraca(context.Background(), 1, asOf)
+	neraca, err := svc.GetNeraca(context.Background(), 1, nil, asOf)
 	if err != nil {
 		t.Fatalf("GetNeraca: %v", err)
 	}

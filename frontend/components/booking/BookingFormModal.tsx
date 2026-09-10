@@ -10,8 +10,6 @@ import { CashBankSelect } from "@/components/accounting/CashBankSelect";
 import { useToast } from "@/components/ui/Toast";
 import { ApiError } from "@/lib/api/client";
 import { createBooking } from "@/lib/api/booking";
-import { fetchLandStock, type LandStock } from "@/lib/api/land";
-import { formatRupiah } from "@/components/format/Rupiah";
 import { dateToLocalStr, todayLocalStr } from "@/lib/date";
 import {
   fetchCustomers,
@@ -31,19 +29,13 @@ interface Props {
   onSuccess?: () => void;
 }
 
-// availableM2 — kuantitas Kelebihan Tanah yang belum direservasi/terjual.
-// Murni display; pool.reserved/sold_quantity_m2 sudah dijaga backend row-lock.
-function availableM2(pool: LandStock): number {
-  return Number(pool.total_quantity_m2) - Number(pool.reserved_quantity_m2) - Number(pool.sold_quantity_m2);
-}
-
 function plusDays(days: number): string {
   const d = new Date();
   d.setDate(d.getDate() + days);
   return dateToLocalStr(d);
 }
 
-export function BookingFormModal({ open, onClose, token, unitId, unitCode, projectId, onSuccess }: Props) {
+export function BookingFormModal({ open, onClose, token, unitId, unitCode, onSuccess }: Props) {
   const { toast } = useToast();
   const [loading, setLoading] = useState(false);
 
@@ -57,53 +49,30 @@ export function BookingFormModal({ open, onClose, token, unitId, unitCode, proje
   const [newName, setNewName] = useState("");
 
   const [fee, setFee] = useState("");
-  const feeErr = validateRupiah(fee);
+  // Client final note 2026-09-10: booking fee boleh Rp0 (murni reservasi unit,
+  // tanpa uang diterima) — allowZero=true melonggarkan validasi dari >0 ke >=0.
+  const feeErr = validateRupiah(fee, true);
+  const feeZero = fee !== "" && parseInt(fee, 10) === 0;
+  const [refundable, setRefundable] = useState(false);
   const [bank, setBank] = useState("");
   const [bookingDate, setBookingDate] = useState(todayLocalStr());
   const [expiryDate, setExpiryDate] = useState(plusDays(14));
   const [notes, setNotes] = useState("");
 
-  // Produk Tambahan: Kelebihan Tanah (kelebihan-tanah-booking-integration-2026-08)
-  // — opsional. Salesperson HANYA mengisi kuantitas; harga & total di bawah
-  // murni PREVIEW (dari LandStock.unit_price, dibaca dari server, tidak pernah
-  // diedit) — tidak pernah dikirim ke backend, yang menyelesaikan reservasi +
-  // snapshot harga sendiri secara atomik (land.ReserveTx).
-  const [landPool, setLandPool] = useState<LandStock | null>(null);
-  const [wantsLand, setWantsLand] = useState(false);
-  const [landQty, setLandQty] = useState("");
-
   useEffect(() => {
     if (!open) return;
     fetchCustomers(token).then(setCustomers).catch(() => {});
     fetchSalesPersons(token).then(setSalesPersons).catch(() => {});
-    fetchLandStock(token, projectId).then(setLandPool).catch(() => setLandPool(null));
-  }, [open, token, projectId]);
-
-  useEffect(() => {
-    if (!open) {
-      setWantsLand(false);
-      setLandQty("");
-    }
-  }, [open]);
+  }, [open, token]);
 
   const custErr = !newCustomer && !customerId ? "Pilih customer" : null;
   const newCustErr = newCustomer && newName.trim().length === 0 ? "Nama customer wajib" : null;
   const expiryErr = expiryDate <= bookingDate ? "Berlaku s/d harus setelah tanggal booking" : null;
 
-  const landAvailable = landPool ? availableM2(landPool) : 0;
-  const landQtyNum = Number(landQty.replace(",", "."));
-  const landQtyErr = !wantsLand
-    ? null
-    : !landQty || isNaN(landQtyNum) || landQtyNum <= 0
-      ? "Kuantitas harus angka positif"
-      : landQtyNum > landAvailable
-        ? `Melebihi tersedia (${landAvailable.toLocaleString("id-ID")} m²)`
-        : null;
-  const landTotalPreview =
-    wantsLand && landPool && !landQtyErr ? landQtyNum * Number(landPool.unit_price) : null;
-
   function isValid() {
-    return !custErr && !newCustErr && !feeErr && !!bank && !expiryErr && !landQtyErr;
+    // Fee Rp0: tidak ada uang diterima → sumber dana (bank) tidak relevan dan
+    // tidak wajib diisi (backend juga tidak memvalidasi/memakainya di jalur ini).
+    return !custErr && !newCustErr && !feeErr && (feeZero || !!bank) && !expiryErr;
   }
 
   async function handleSubmit() {
@@ -122,24 +91,27 @@ export function BookingFormModal({ open, onClose, token, unitId, unitCode, proje
         customer_id: cid,
         sales_person_id: salesPersonId ? parseInt(salesPersonId, 10) : undefined,
         booking_fee: fee,
-        refundable: false, // rule klien: tidak ada refund (backend juga mengabaikan)
-        bank_account_code: bank,
+        // Fee Rp0: disposisi backend SELALU recognized (tidak ada apa pun
+        // untuk dipegang/direfund) — kirim apa adanya, backend yang menentukan.
+        refundable,
+        bank_account_code: feeZero ? "" : bank,
         booking_date: bookingDate,
         expiry_date: expiryDate,
         notes: notes || undefined,
-        land_quantity_m2: wantsLand && landQty ? landQty : undefined,
       });
       // Nomor kwitansi disebut apa adanya — "terbit otomatis" tanpa nomor
       // tidak bisa dicek siapa pun.
-      const landNote = b.land_quantity_m2
-        ? ` + Kelebihan Tanah ${Number(b.land_quantity_m2).toLocaleString("id-ID")} m² direservasi`
-        : "";
-      toast(
-        (b.receipt_number
-          ? `Booking #${b.id} dibuat — kwitansi ${b.receipt_number} terbit, fee diakui sebagai Pendapatan Booking`
-          : `Booking #${b.id} dibuat — fee diakui sebagai Pendapatan Booking, kwitansi terbit otomatis`) + landNote,
-        "success",
-      );
+      if (feeZero) {
+        toast(`Booking #${b.id} dibuat — Rp0, tanpa jurnal atau kwitansi`, "success");
+      } else {
+        const creditLabel = refundable ? "Titipan Booking (refundable)" : "Pendapatan Booking";
+        toast(
+          b.receipt_number
+            ? `Booking #${b.id} dibuat — kwitansi ${b.receipt_number} terbit, fee dicatat sebagai ${creditLabel}`
+            : `Booking #${b.id} dibuat — fee dicatat sebagai ${creditLabel}, kwitansi terbit otomatis`,
+          "success",
+        );
+      }
       onClose();
       onSuccess?.();
     } catch (err) {
@@ -220,10 +192,13 @@ export function BookingFormModal({ open, onClose, token, unitId, unitCode, proje
           value={fee}
           onChange={setFee}
           error={feeErr ?? undefined}
+          hint="Boleh Rp0 — murni reservasi unit tanpa uang diterima."
           placeholder="5.000.000"
         />
 
-        <CashBankSelect token={token} value={bank} onChange={setBank} label="Diterima di" required />
+        {!feeZero && (
+          <CashBankSelect token={token} value={bank} onChange={setBank} label="Diterima di" required />
+        )}
 
         <Input
           label="Tanggal Booking"
@@ -248,64 +223,52 @@ export function BookingFormModal({ open, onClose, token, unitId, unitCode, proje
           />
         </FormFull>
 
-        {/* Produk Tambahan: Kelebihan Tanah — hanya tampil bila proyek punya
-            pool. Sales HANYA mengisi kuantitas; harga & total di bawah murni
-            preview dari harga pool (tidak pernah bisa diedit di sini). */}
-        {landPool && landAvailable > 0 && (
+        {/* Item 3 (2026-09), keputusan klien: refund hanya utk booking yang
+            ditandai Refundable SAAT DIBUAT. Rule klien 2026-07-29 (fee =
+            Pendapatan final, tanpa refund) tetap default/mayoritas —
+            checkbox ini hanya membuka jalur legacy held→refund yang sudah
+            ada, tidak mengubah default. Client final note 2026-09-10: fee
+            Rp0 tidak ada apa pun untuk dipegang/direfund — checkbox & jalur
+            held disembunyikan, disposisi backend SELALU recognized. */}
+        {!feeZero && (
           <FormFull>
-            {!wantsLand ? (
-              <button
-                type="button"
-                className="text-xs text-accent hover:underline"
-                onClick={() => setWantsLand(true)}
-              >
-                + Tambahkan Produk Tambahan: Kelebihan Tanah
-              </button>
-            ) : (
-              <div className="rounded-lg border border-border-subtle p-3 space-y-2">
-                <div className="flex items-center justify-between">
-                  <p className="text-xs font-medium text-text-secondary">
-                    Produk Tambahan: Kelebihan Tanah
-                  </p>
-                  <button
-                    type="button"
-                    className="text-xs text-text-tertiary hover:underline"
-                    onClick={() => { setWantsLand(false); setLandQty(""); }}
-                  >
-                    Hapus
-                  </button>
-                </div>
-                <Input
-                  label="Kuantitas (m²)" required
-                  value={landQty}
-                  onChange={(e) => setLandQty(e.target.value)}
-                  suffix="m²"
-                  error={landQtyErr ?? undefined}
-                  hint={!landQtyErr ? `Tersedia ${landAvailable.toLocaleString("id-ID")} m² · Rp ${Number(landPool.unit_price).toLocaleString("id-ID")}/m²` : undefined}
-                  placeholder="10"
-                />
-                {landTotalPreview !== null && (
-                  <p className="text-xs text-text-secondary">
-                    Total: <strong>{formatRupiah(landTotalPreview)}</strong> (otomatis, harga dari pool proyek)
-                  </p>
-                )}
-              </div>
-            )}
+            <label className="flex items-start gap-2 text-sm text-text-primary">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={refundable}
+                onChange={(e) => setRefundable(e.target.checked)}
+              />
+              <span>
+                Refundable — fee bisa dikembalikan bila booking dibatalkan
+              </span>
+            </label>
           </FormFull>
         )}
 
-        {/* Rule klien 2026-07-29: booking fee = Pendapatan Booking saat
-            diterima — final, tidak ada refund. Checkbox refundable dihapus.
-            Catatan lama yang menyebut fee sebagai "Titipan Booking (kewajiban)"
-            dihapus: ia bertentangan dengan aturan yang berlaku dan membuat
-            admin membaca dua perlakuan akuntansi berbeda di satu layar. */}
         <FormFull>
-          <p className="rounded-lg border border-border-subtle bg-border-subtle/60 px-3.5 py-2.5 text-xs text-text-secondary">
-            Booking fee langsung diakui sebagai <strong>Pendapatan Booking</strong> saat
-            diterima — bila customer batal, pendapatan tetap dan tidak ada refund.
-            Unit menjadi <strong>Dibooking</strong> sampai dikonversi ke kontrak,
-            dibatalkan, atau lewat masa berlaku.
-          </p>
+          {feeZero ? (
+            <p className="rounded-lg border border-border-subtle bg-border-subtle/60 px-3.5 py-2.5 text-xs text-text-secondary">
+              Booking fee <strong>Rp0</strong> — tidak ada uang diterima, jadi tidak ada
+              jurnal kas maupun kwitansi yang dibuat. Ini murni reservasi unit; harga
+              jual tetap nilai kontrak normal. Unit menjadi <strong>Dibooking</strong>{" "}
+              sampai dikonversi ke kontrak, dibatalkan, atau lewat masa berlaku.
+            </p>
+          ) : refundable ? (
+            <p className="rounded-lg border border-border-subtle bg-border-subtle/60 px-3.5 py-2.5 text-xs text-text-secondary">
+              Fee dicatat sebagai <strong>Titipan Booking</strong> (kewajiban) — belum
+              diakui pendapatan. Bila customer batal, fee dapat diproses refund lewat
+              menu Refund. Unit menjadi <strong>Dibooking</strong> sampai dikonversi
+              ke kontrak, dibatalkan, atau lewat masa berlaku.
+            </p>
+          ) : (
+            <p className="rounded-lg border border-border-subtle bg-border-subtle/60 px-3.5 py-2.5 text-xs text-text-secondary">
+              Booking fee langsung diakui sebagai <strong>Pendapatan Booking</strong> saat
+              diterima — bila customer batal, pendapatan tetap dan tidak ada refund.
+              Unit menjadi <strong>Dibooking</strong> sampai dikonversi ke kontrak,
+              dibatalkan, atau lewat masa berlaku.
+            </p>
+          )}
         </FormFull>
       </FormGrid>
     </Modal>

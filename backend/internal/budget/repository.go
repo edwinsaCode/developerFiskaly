@@ -103,9 +103,9 @@ func (r *GORMRepository) ApproveAndSupersede(ctx context.Context, tenantID, plan
 				tenantID, target.ProjectID, planID)
 		q = applyPhaseFilter(q, target.PhaseID)
 		if err := q.Updates(map[string]interface{}{
-			"status":      BudgetPlanStatusSuperseded,
-			"active_key":  nil,
-			"updated_at":  now,
+			"status":     BudgetPlanStatusSuperseded,
+			"active_key": nil,
+			"updated_at": now,
 		}).Error; err != nil {
 			return fmt.Errorf("budget: ApproveAndSupersede supersede: %w", err)
 		}
@@ -294,6 +294,14 @@ func NewGORMRealisasiProvider(db *gorm.DB) *GORMRealisasiProvider {
 // Kategori kapitalisasi via akun Persediaan (1-3xxx); kategori beban
 // (marketing/other) via akun beban (5-3000/5-4000) — pemetaan taxonomy domain.
 // phaseID=nil: semua baris project; phaseID!=nil: hanya baris ber-tag fase itu.
+//
+// Item 8 (UAT 2026-09-07): RAB TIDAK LAGI mengkapitalisasi Construction/Hard
+// di muka saat approval (RULE KLIEN 2026-09-04 DICABUT). Setiap cost entry
+// Hard selalu mendebit Persediaan langsung, sama seperti kategori lain — jadi
+// saldo akun sudah = realisasi aktual, tanpa perlu redirect add-back.
+// ExcludeSource tetap dipertahankan untuk mengecualikan jurnal
+// "rab_capitalization" historis dari data lama (lihat accounts.go), supaya
+// tenant yang sempat memakai rule lama tidak melaporkan realisasi ganda.
 func (r *GORMRealisasiProvider) GetRealisasiByProject(ctx context.Context, tenantID, projectID uint64, phaseID *uint64) (map[domain.CostCategory]domain.Money, error) {
 	codeToCat := map[string]domain.CostCategory{}
 	var codes []string
@@ -307,7 +315,7 @@ func (r *GORMRealisasiProvider) GetRealisasiByProject(ctx context.Context, tenan
 	}
 
 	byCode, err := ledger.NewQueryService(r.db).ActualCostByCode(ctx, tenantID, codes,
-		ledger.ActualCostScope{ProjectID: projectID, PhaseID: phaseID})
+		ledger.ActualCostScope{ProjectID: projectID, PhaseID: phaseID, ExcludeSource: capitalizationJournalSource})
 	if err != nil {
 		return nil, fmt.Errorf("budget: GetRealisasiByProject: %w", err)
 	}

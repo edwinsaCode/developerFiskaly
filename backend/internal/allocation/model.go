@@ -63,6 +63,7 @@ type UnitInput struct {
 	UnitID       uint64
 	SaleableArea decimal.Decimal          // sqm; used when basis = BasisSaleableArea
 	SalesValue   domain.Money             // list_price; used when basis = BasisSalesValue
+	LandAreaM2   decimal.Decimal          // sqm (units.land_area); basis KHUSUS kategori Land (Item 9, UAT 2026-09-07)
 	Direct       domain.UnitCostBreakdown // biaya yang sudah ber-tag unit_id di jurnal
 }
 
@@ -80,5 +81,15 @@ type AllocationResult struct {
 	// Weight adalah bobot unit ini pada basis yang dipakai (sqm untuk
 	// saleable_area, rupiah list_price untuk sales_value). Bukti alokasi:
 	// porsi unit = Weight / Σ(Weight semua unit). Lihat snapshot basis evidence.
+	// Basis ini HANYA berlaku untuk Hard/Soft/Financing — Land tidak pernah
+	// memakainya (lihat LandWeight).
 	Weight decimal.Decimal
+	// LandWeight adalah bobot unit ini KHUSUS untuk kategori Land = LandAreaM2
+	// unit itu (Item 9, UAT 2026-09-07: porsi HPP Tanah per unit = luas tanah
+	// unit ÷ Σ luas tanah semua unit properti × pool biaya Land — BUKAN lagi
+	// dibagi rata seperti rule klien UAT #1 sebelumnya), terlepas dari basis
+	// yang dipakai Hard/Soft/Financing. Dicatat terpisah dari Weight supaya
+	// audit trail snapshot (basis_type/basis_value/allocation_percentage per
+	// baris land) benar-benar mencerminkan cara Land dialokasikan.
+	LandWeight decimal.Decimal
 }

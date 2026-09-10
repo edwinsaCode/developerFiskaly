@@ -74,18 +74,18 @@ func sumDebitByAccount(lines []sale.JournalLineInput, accountID uint64) domain.M
 
 // Standard account ID map (matches COA codes → fake DB IDs for tests).
 const (
-	accBank1300  uint64 = 200 // 1-1300 Bank BCA
-	accBank1400  uint64 = 201 // 1-1400 Bank Mandiri
-	accBank1500  uint64 = 202 // 1-1500 Bank BRI
-	accPiutang   uint64 = 301 // 1-2000 Piutang Usaha
-	accUMP       uint64 = 302 // 2-2000 Uang Muka Penjualan
-	accPPNKeluar uint64 = 303 // 2-3000 PPN Keluaran
+	accBank1300   uint64 = 200 // 1-1300 Bank BCA
+	accBank1400   uint64 = 201 // 1-1400 Bank Mandiri
+	accBank1500   uint64 = 202 // 1-1500 Bank BRI
+	accPiutang    uint64 = 301 // 1-2000 Piutang Usaha
+	accUMP        uint64 = 302 // 2-2000 Uang Muka Penjualan
+	accPPNKeluar  uint64 = 303 // 2-3000 PPN Keluaran
 	accPendapatan uint64 = 401 // 4-1000 Pendapatan Penjualan Unit
-	accHPP       uint64 = 501 // 5-1000 HPP
-	accLand      uint64 = 100 // 1-3000 Persediaan Tanah
-	accHard      uint64 = 101 // 1-3100 Persediaan Hard Cost
-	accSoft      uint64 = 102 // 1-3200 Persediaan Soft Cost
-	accFinancing uint64 = 103 // 1-3300 Persediaan Financing
+	accHPP        uint64 = 501 // 5-1000 HPP
+	accLand       uint64 = 100 // 1-3000 Persediaan Tanah
+	accHard       uint64 = 101 // 1-3100 Persediaan Hard Cost
+	accSoft       uint64 = 102 // 1-3200 Persediaan Soft Cost
+	accFinancing  uint64 = 103 // 1-3300 Persediaan Financing
 )
 
 var standardAccounts = map[string]uint64{
@@ -194,6 +194,16 @@ func (m *mockTerminStore) SumTerminsByUnit(_ context.Context, _ uint64, unitID u
 	return sum, nil
 }
 
+func (m *mockTerminStore) SumTerminsByUnitAndCreditAccount(_ context.Context, _ uint64, unitID uint64, creditAccountCode string) (domain.Money, error) {
+	var sum domain.Money
+	for _, t := range m.termins {
+		if t.UnitID == unitID && t.CreditAccountCode == creditAccountCode {
+			sum = sum.Add(t.Amount)
+		}
+	}
+	return sum, nil
+}
+
 func (m *mockTerminStore) ListTerminsByUnit(_ context.Context, tenantID, unitID uint64) ([]*sale.TerminPayment, error) {
 	var out []*sale.TerminPayment
 	for _, t := range m.termins {
@@ -248,7 +258,7 @@ func (m *mockBASTWriter) Execute(_ context.Context, p sale.BASTAtomicParams) (*s
 		ID: 1, TenantID: p.TenantID, UnitID: p.UnitID, ProjectID: p.ProjectID,
 		SalePrice: p.SalePrice, IsVAT: p.IsVAT, VATRate: p.VATRate,
 		TotalAdvanceAtBAST: p.TotalAdvance,
-		HPPLand: p.HPPLand, HPPHard: p.HPPHard, HPPSoft: p.HPPSoft, HPPFinancing: p.HPPFinancing,
+		HPPLand:            p.HPPLand, HPPHard: p.HPPHard, HPPSoft: p.HPPSoft, HPPFinancing: p.HPPFinancing,
 		BuyerRef: p.BuyerRef, RecognitionDate: p.BASTDate,
 	}, nil
 }
@@ -377,6 +387,169 @@ func TestService_RecordTermin_UnitRequired_ReturnsError(t *testing.T) {
 	}
 }
 
+// ── Tests: BankFee (UAT 2026-09-03, Rule #5 — biaya realisasi/pengajuan KPR
+// yang DITANGGUNG DEVELOPER, bukan titipan customer) ─────────────────────────
+
+const accBankFeeExpense uint64 = 550 // 5-3200 Beban Provisi & Administrasi Bank KPR
+
+var accountsWithBankFee = func() map[string]uint64 {
+	m := make(map[string]uint64, len(standardAccounts)+1)
+	for k, v := range standardAccounts {
+		m[k] = v
+	}
+	m["5-3200"] = accBankFeeExpense
+	return m
+}()
+
+func TestService_ReceivePayment_BankFee_SplitsDebit_StaysBalanced(t *testing.T) {
+	svc, _, ts := buildService(accountsWithBankFee, map[uint64]*sale.UnitSaleInfo{
+		5: defaultUnit(5, "reserved"),
+	}, nil, nil, nil)
+
+	uid := uint64(5)
+	_, err := svc.ReceivePayment(context.Background(), 1, sale.ReceivePaymentRequest{
+		Source:          sale.PaymentSourceUnitTermin,
+		UnitID:          &uid,
+		BankAccountCode: "1-1300",
+		Amount:          rupiah(100_000_000), // nilai piutang yang diselesaikan (bruto)
+		BankFee:         rupiah(1_500_000),   // provisi bank dipotong dari pencairan
+		Date:            time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(ts.termins) != 1 || ts.termins[0].JournalEntryID == 0 {
+		t.Fatalf("termin/journal not created")
+	}
+	// termin_payments.amount tetap NILAI BRUTO — waterfall/AR/statement/receipt
+	// tidak boleh terpengaruh oleh bank_fee (hanya sisi debit jurnal yang pecah).
+	if !ts.termins[0].Amount.Equal(rupiah(100_000_000)) {
+		t.Errorf("termin amount = %s, want 100,000,000 (gross, unaffected by bank_fee)", ts.termins[0].Amount)
+	}
+}
+
+func TestService_RecordTermin_BankFee_JournalBalancedAndRouted(t *testing.T) {
+	svc, _, ts := buildService(accountsWithBankFee, map[uint64]*sale.UnitSaleInfo{
+		5: defaultUnit(5, "reserved"),
+	}, nil, nil, nil)
+	// buildService tidak mengembalikan mockJournalWriter secara langsung; ambil
+	// baris jurnal lewat termin yang tersimpan + akses ke jw via closure tidak
+	// tersedia, jadi verifikasi melalui service kedua yang expose jw.
+	_ = svc
+	_ = ts
+
+	af := &mockAccountFinder{accounts: accountsWithBankFee}
+	jw := &mockJournalWriter{}
+	ur := &mockUnitReader{units: map[uint64]*sale.UnitSaleInfo{5: defaultUnit(5, "reserved")}}
+	tsr := &mockTerminStore{}
+	svc2 := sale.NewService(af, jw, ur, tsr, &mockUnitCostProvider{}, &mockBASTWriter{}, sale.WithContractStore(newMockContractStore()))
+
+	uid := uint64(5)
+	_, err := svc2.ReceivePayment(context.Background(), 1, sale.ReceivePaymentRequest{
+		Source:          sale.PaymentSourceUnitTermin,
+		UnitID:          &uid,
+		BankAccountCode: "1-1300",
+		Amount:          rupiah(100_000_000),
+		BankFee:         rupiah(1_500_000),
+		Date:            time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	lines := jw.lastLines
+	assertBalanced(t, "BankFee split", lines)
+	assertWholeRupiah(t, "BankFee split", lines)
+
+	if got := sumDebitByAccount(lines, accBank1300); !got.Equal(rupiah(98_500_000)) {
+		t.Errorf("Dr kas bersih = %s, want 98,500,000 (100,000,000 - 1,500,000)", got)
+	}
+	if got := sumDebitByAccount(lines, accBankFeeExpense); !got.Equal(rupiah(1_500_000)) {
+		t.Errorf("Dr Beban Provisi Bank (5-3200) = %s, want 1,500,000", got)
+	}
+	if got := sumCreditByAccount(lines, accUMP); !got.Equal(rupiah(100_000_000)) {
+		t.Errorf("Cr Uang Muka Penjualan = %s, want 100,000,000 penuh (nilai piutang tidak berkurang oleh bank_fee)", got)
+	}
+}
+
+func TestService_RecordTermin_BankFee_Zero_ProducesIdenticalTwoLineJournal(t *testing.T) {
+	af := &mockAccountFinder{accounts: accountsWithBankFee}
+	jw := &mockJournalWriter{}
+	ur := &mockUnitReader{units: map[uint64]*sale.UnitSaleInfo{5: defaultUnit(5, "reserved")}}
+	tsr := &mockTerminStore{}
+	svc := sale.NewService(af, jw, ur, tsr, &mockUnitCostProvider{}, &mockBASTWriter{}, sale.WithContractStore(newMockContractStore()))
+
+	uid := uint64(5)
+	_, err := svc.ReceivePayment(context.Background(), 1, sale.ReceivePaymentRequest{
+		Source:          sale.PaymentSourceUnitTermin,
+		UnitID:          &uid,
+		BankAccountCode: "1-1300",
+		Amount:          rupiah(200_000_000),
+		Date:            time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(jw.lastLines) != 2 {
+		t.Fatalf("BankFee=0 harus menghasilkan jurnal 2 baris seperti sebelumnya, got %d baris", len(jw.lastLines))
+	}
+}
+
+func TestService_ReceivePayment_BankFee_EqualsAmount_ReturnsError(t *testing.T) {
+	uid := uint64(5)
+	svc, _, _ := buildService(accountsWithBankFee, map[uint64]*sale.UnitSaleInfo{
+		5: defaultUnit(5, "reserved"),
+	}, nil, nil, nil)
+	_, err := svc.ReceivePayment(context.Background(), 1, sale.ReceivePaymentRequest{
+		Source:          sale.PaymentSourceUnitTermin,
+		UnitID:          &uid,
+		BankAccountCode: "1-1300",
+		Amount:          rupiah(100_000_000),
+		BankFee:         rupiah(100_000_000), // 100% dipotong — kas bersih nol, bukan kasus nyata
+		Date:            time.Now(),
+	})
+	if !errors.Is(err, sale.ErrBankFeeInvalid) {
+		t.Errorf("expected ErrBankFeeInvalid, got %v", err)
+	}
+}
+
+func TestService_ReceivePayment_BankFee_ExceedsAmount_ReturnsError(t *testing.T) {
+	uid := uint64(5)
+	svc, _, _ := buildService(accountsWithBankFee, map[uint64]*sale.UnitSaleInfo{
+		5: defaultUnit(5, "reserved"),
+	}, nil, nil, nil)
+	_, err := svc.ReceivePayment(context.Background(), 1, sale.ReceivePaymentRequest{
+		Source:          sale.PaymentSourceUnitTermin,
+		UnitID:          &uid,
+		BankAccountCode: "1-1300",
+		Amount:          rupiah(100_000_000),
+		BankFee:         rupiah(150_000_000),
+		Date:            time.Now(),
+	})
+	if !errors.Is(err, sale.ErrBankFeeInvalid) {
+		t.Errorf("expected ErrBankFeeInvalid, got %v", err)
+	}
+}
+
+func TestService_ReceivePayment_BankFee_Negative_ReturnsError(t *testing.T) {
+	uid := uint64(5)
+	svc, _, _ := buildService(accountsWithBankFee, map[uint64]*sale.UnitSaleInfo{
+		5: defaultUnit(5, "reserved"),
+	}, nil, nil, nil)
+	neg, _ := domain.NewMoney("-100")
+	_, err := svc.ReceivePayment(context.Background(), 1, sale.ReceivePaymentRequest{
+		Source:          sale.PaymentSourceUnitTermin,
+		UnitID:          &uid,
+		BankAccountCode: "1-1300",
+		Amount:          rupiah(100_000_000),
+		BankFee:         neg,
+		Date:            time.Now(),
+	})
+	if !errors.Is(err, sale.ErrBankFeeInvalid) {
+		t.Errorf("expected ErrBankFeeInvalid, got %v", err)
+	}
+}
+
 // ── Tests: RecordBAST — Event 3 Non-PKP ──────────────────────────────────────
 
 func TestService_RecordBAST_NonPKP_Event3_Balanced(t *testing.T) {
@@ -440,7 +613,7 @@ func TestService_RecordBAST_PKP_Event3_Balanced_PiutangBruto(t *testing.T) {
 
 	req := sale.RecordBASTRequest{
 		UnitID: 5, SalePrice: rupiah(1_000_000_000), IsVAT: true,
-		VATRate:  decimal.NewFromFloat(0.11), BuyerRef: "BUYER-01", BASTDate: time.Now(),
+		VATRate: decimal.NewFromFloat(0.11), BuyerRef: "BUYER-01", BASTDate: time.Now(),
 	}
 	_, err := svc.RecordAkad(context.Background(), 1, req)
 	if err != nil {
@@ -501,7 +674,10 @@ func TestService_RecordBAST_Event4_HPP_PerKategori_Balanced(t *testing.T) {
 	}
 
 	// Cr Land = 100M, Cr Hard = 300M, Cr Soft = 50M, Cr Financing = 25M
-	cases := []struct{ code uint64; want domain.Money }{
+	cases := []struct {
+		code uint64
+		want domain.Money
+	}{
 		{accLand, rupiah(100_000_000)},
 		{accHard, rupiah(300_000_000)},
 		{accSoft, rupiah(50_000_000)},

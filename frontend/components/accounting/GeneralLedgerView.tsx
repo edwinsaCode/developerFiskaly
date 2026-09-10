@@ -13,6 +13,7 @@ import { Tanggal } from "@/components/format/Tanggal";
 import { fetchAccounts } from "@/lib/api/ledger";
 import { fetchGeneralLedger } from "@/lib/api/reports";
 import { ExportPdfButton } from "@/components/laporan/ExportPdfButton";
+import { LinkifiedText } from "@/components/documents/LinkifiedText";
 import type { Account, LedgerEntry } from "@/lib/types/api";
 import { dateToLocalStr, todayLocalStr } from "@/lib/date";
 
@@ -156,7 +157,9 @@ export function GeneralLedgerView({ token, initialAccountId }: { token: string; 
               {visible.map((e, i) => (
                 <tr key={`${e.entry_id}-${i}`} className="border-b border-border last:border-0 hover:bg-border-subtle/40">
                   <td className="py-2 pr-3 whitespace-nowrap"><Tanggal value={String(e.date)} /></td>
-                  <td className="py-2 pr-3">{e.description}</td>
+                  <td className="py-2 pr-3">
+                    <LinkifiedText token={token} text={e.description} />
+                  </td>
                   <td className="py-2 pr-3 text-xs text-text-secondary">{e.reference || "—"}</td>
                   <td className="py-2 pr-3 text-right tabular-nums">
                     {e.debit !== "0" && <Rupiah value={e.debit} colorSign={false} />}

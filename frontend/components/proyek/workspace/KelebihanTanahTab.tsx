@@ -2,8 +2,11 @@
 
 // LT-3 (kelebihan-tanah-final-architecture §B.1) — admin CRUD minimal untuk
 // pool inventory Kelebihan Tanah per proyek. reserved/sold murni counter,
-// baru bergerak di LT-4 (reservasi) & LT-5 (penjualan) — di sini hanya
-// total_quantity_m2 dan unit_price yang bisa dikoreksi admin.
+// baru bergerak di LT-4 (reservasi) & LT-5 (penjualan) — di sini
+// total_quantity_m2 dan DUA harga bisa dikoreksi admin: unit_price (Harga
+// Jual — dipakai di reservasi/Akad/DPP, menentukan pendapatan) dan
+// purchase_price (Harga Beli — tarif HPP per m² langsung dipakai saat Akad,
+// koreksi klien 2026-08-31; lihat backend/internal/land/hpp_resolver.go).
 //
 // LT-4 (§B.2, §D) — reservasi: soft-lock kuantitas untuk customer. Keputusan
 // klien 2026-08-20: TANPA booking fee — murni soft-lock, tidak ada transaksi
@@ -126,6 +129,7 @@ export function KelebihanTanahTab({ token, projectId }: Props) {
   const [open, setOpen] = useState(false);
   const [totalQty, setTotalQty] = useState("");
   const [unitPrice, setUnitPrice] = useState("");
+  const [purchasePrice, setPurchasePrice] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   const [reservations, setReservations] = useState<LandStockReservation[]>([]);
@@ -216,11 +220,13 @@ export function KelebihanTanahTab({ token, projectId }: Props) {
   const qtyErr = totalQty !== "" && (isNaN(Number(totalQty)) || Number(totalQty) < 0)
     ? "Kuantitas harus angka, tidak boleh negatif" : "";
   const priceErr = unitPrice !== "" ? validateRupiah(unitPrice) : "";
-  const canSubmit = totalQty !== "" && !qtyErr && !priceErr;
+  const purchasePriceErr = purchasePrice !== "" ? validateRupiah(purchasePrice) : "";
+  const canSubmit = totalQty !== "" && !qtyErr && !priceErr && !purchasePriceErr;
 
   function openModal() {
     setTotalQty(pool?.total_quantity_m2 ?? "");
     setUnitPrice(pool?.unit_price ?? "");
+    setPurchasePrice(pool?.purchase_price ?? "");
     setOpen(true);
   }
 
@@ -228,7 +234,11 @@ export function KelebihanTanahTab({ token, projectId }: Props) {
     if (!canSubmit) return;
     setSubmitting(true);
     try {
-      const input = { total_quantity_m2: totalQty, unit_price: unitPrice || "0" };
+      const input = {
+        total_quantity_m2: totalQty,
+        unit_price: unitPrice || "0",
+        purchase_price: purchasePrice || "0",
+      };
       const saved = pool
         ? await updateLandStock(token, projectId, input)
         : await createLandStock(token, projectId, input);
@@ -468,9 +478,15 @@ export function KelebihanTanahTab({ token, projectId }: Props) {
               <StatCell label="Terjual (m²)" value={Number(pool.sold_quantity_m2).toLocaleString("id-ID")} />
               <StatCell label="Tersedia (m²)" value={availableM2(pool).toLocaleString("id-ID")} />
             </div>
-            <div className="mt-4 pt-4 border-t border-border-subtle">
-              <p className="text-xs text-text-tertiary uppercase tracking-wide">Harga per m²</p>
-              <p className="text-lg font-semibold text-text-primary tabular"><Rupiah value={pool.unit_price} /></p>
+            <div className="mt-4 pt-4 border-t border-border-subtle grid grid-cols-2 gap-4">
+              <div>
+                <p className="text-xs text-text-tertiary uppercase tracking-wide">Harga Jual per m²</p>
+                <p className="text-lg font-semibold text-text-primary tabular"><Rupiah value={pool.unit_price} /></p>
+              </div>
+              <div>
+                <p className="text-xs text-text-tertiary uppercase tracking-wide">Harga Beli per m² (basis HPP)</p>
+                <p className="text-lg font-semibold text-text-secondary tabular"><Rupiah value={pool.purchase_price} /></p>
+              </div>
             </div>
           </Card>
 
@@ -649,11 +665,18 @@ export function KelebihanTanahTab({ token, projectId }: Props) {
             autoFocus
           />
           <RupiahInput
-            label="Harga per m²"
+            label="Harga Jual per m²"
             value={unitPrice}
             onChange={setUnitPrice}
             error={priceErr || undefined}
-            hint="opsional, default reservasi baru"
+            hint="dipakai di reservasi, Akad, dan DPP — menentukan pendapatan"
+          />
+          <RupiahInput
+            label="Harga Beli per m²"
+            value={purchasePrice}
+            onChange={setPurchasePrice}
+            error={purchasePriceErr || undefined}
+            hint="dipakai langsung sebagai tarif HPP per m² saat Akad"
           />
         </FormGrid>
       </Modal>

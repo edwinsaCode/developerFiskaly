@@ -28,6 +28,7 @@ import { Card, CardHeader, CardTitle } from "@/components/ui/Card";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import { CashBankSelect } from "@/components/accounting/CashBankSelect";
 import { useToast } from "@/components/ui/Toast";
+import { CONSTRUCTION_SUBCATEGORIES } from "@/lib/constants/constructionSubcategory";
 import {
   previewExpenseAction,
   createExpenseAction,
@@ -36,14 +37,20 @@ import {
 
 type PurchaseType = "expense" | "fixed_asset";
 
-// Kategori biaya proyek — 4 kategori yang dikapitalisasi. Nilai ini adalah
-// taksonomi domain backend; label saja yang milik UI.
+// Kategori biaya proyek. Nilai ini adalah taksonomi domain backend; label
+// saja yang milik UI. RULE KLIEN FREEZE (2026-09-04): hanya land + hard yang
+// dikapitalisasi ke Persediaan/HPP — soft dan operational (dahulu "financing")
+// tetap bisa ditautkan ke proyek/RAB di sini, tapi selalu diposting sebagai
+// beban periode (lihat EXPENSE_PROJECT_CATEGORIES di buildBody, yang memaksa
+// cost_tier="overhead" dan melepas unit_id untuk keduanya).
 const PROJECT_CATEGORIES = [
   { value: "land", label: "Tanah" },
-  { value: "hard", label: "Hard Cost (Konstruksi)" },
-  { value: "soft", label: "Soft Cost (Perizinan, Desain)" },
-  { value: "financing", label: "Biaya Pendanaan" },
+  { value: "hard", label: "Hard Cost (Produksi Subsidi/Komersial, Sarana & Prasarana, Perizinan)" },
+  { value: "soft", label: "Soft Cost (Desain, Legal) — Beban, bukan HPP" },
+  { value: "operational", label: "Operasional — Beban, bukan HPP" },
 ] as const;
+
+const EXPENSE_PROJECT_CATEGORIES: readonly string[] = ["soft", "operational"];
 
 interface Props {
   token: string;
@@ -66,6 +73,12 @@ interface FormState {
   unit_id: string;
   budget_item_id: string;
   category: string;
+  // UAT 2026-09-07: produksi_subsidi|produksi_komersial|sarana_prasarana|
+  // perizinan — hanya berlaku saat category="hard". Wajib saat biaya ini
+  // tidak ditautkan ke satu unit (pool bersama proyek), karena itulah
+  // satu-satunya sinyal yang menentukan unit Subsidi/Komersial mana yang
+  // menerima alokasi HPP-nya.
+  hard_subcategory: string;
   // Jenis Pembelian = Aset Tetap
   fixed_asset_category_id: string;
   asset_name: string;
@@ -87,6 +100,7 @@ function initialForm(purchaseType: PurchaseType = "expense"): FormState {
     unit_id: "",
     budget_item_id: "",
     category: "",
+    hard_subcategory: "",
     fixed_asset_category_id: "",
     asset_name: "",
     residual_value: "0",
@@ -174,6 +188,7 @@ export function ExpenseForm({ token, canWrite, projects, expenseTypes, fixedAsse
       // sambil tetap ikut terkirim.
       expense_type_id: scope === "proyek" ? "" : f.expense_type_id,
       category: scope === "operasional" ? "" : f.category,
+      hard_subcategory: "",
       unit_id: "",
       budget_item_id: "",
       project_id: scope === "proyek" ? f.project_id : "",
@@ -238,6 +253,12 @@ export function ExpenseForm({ token, canWrite, projects, expenseTypes, fixedAsse
     } else {
       if (!form.project_id) e.project_id = "Pilih proyek";
       if (!form.category) e.category = "Pilih kategori biaya proyek";
+      // UAT 2026-09-07: Hard Cost tanpa unit (pool bersama proyek) wajib
+      // menyatakan subkategori — "Produksi" saja tidak cukup untuk menentukan
+      // unit Subsidi/Komersial mana yang berhak menerima HPP-nya.
+      if (form.category === "hard" && !form.unit_id && !form.hard_subcategory) {
+        e.hard_subcategory = "Pilih subkategori — wajib diisi karena biaya ini tidak ditautkan ke unit";
+      }
     }
     setErrors(e);
     return Object.keys(e).length === 0;
@@ -268,12 +289,23 @@ export function ExpenseForm({ token, canWrite, projects, expenseTypes, fixedAsse
       // Tag proyek opsional — cost center, BUKAN realisasi RAB.
       body.project_id = num(form.project_id);
     } else {
+      const isExpenseCategory = EXPENSE_PROJECT_CATEGORIES.includes(form.category);
       body.project_id = num(form.project_id);
       body.category = form.category;
-      body.unit_id = num(form.unit_id);
       body.budget_item_id = num(form.budget_item_id);
-      // Memilih unit menjadikan biaya ini biaya langsung unit tersebut.
-      body.cost_tier = form.unit_id ? "direct" : "shared";
+      if (isExpenseCategory) {
+        // RULE KLIEN FREEZE (2026-09-04): soft/operational selalu beban
+        // periode — tidak pernah per-unit, tidak pernah dikapitalisasi.
+        body.unit_id = undefined;
+        body.cost_tier = "overhead";
+      } else {
+        // Memilih unit menjadikan biaya ini biaya langsung unit tersebut.
+        body.unit_id = num(form.unit_id);
+        body.cost_tier = form.unit_id ? "direct" : "shared";
+        if (form.category === "hard" && form.hard_subcategory) {
+          body.hard_subcategory = form.hard_subcategory;
+        }
+      }
     }
     return body;
   }
@@ -371,7 +403,7 @@ export function ExpenseForm({ token, canWrite, projects, expenseTypes, fixedAsse
                 active={isProjectScope}
                 onClick={() => switchScope("proyek")}
                 title="Biaya Proyek"
-                desc="Material, vendor, perizinan. Dikapitalisasi ke persediaan dan menjadi HPP saat unit diserahterimakan."
+                desc="Material, vendor, perizinan (Tanah/Hard Cost dikapitalisasi ke HPP). Soft Cost & Operasional tetap tercatat di sini tapi selalu jadi beban periode."
               />
             </div>
           </div>
@@ -493,7 +525,15 @@ export function ExpenseForm({ token, canWrite, projects, expenseTypes, fixedAsse
                 label="Kategori Biaya"
                 required
                 value={form.category}
-                onChange={(e) => set("category", e.target.value)}
+                onChange={(e) => {
+                  const category = e.target.value;
+                  setForm((f) => ({
+                    ...f,
+                    category,
+                    unit_id: EXPENSE_PROJECT_CATEGORIES.includes(category) ? "" : f.unit_id,
+                    hard_subcategory: category === "hard" ? f.hard_subcategory : "",
+                  }));
+                }}
                 error={errors.category}
               >
                 <option value="">Pilih kategori...</option>
@@ -501,6 +541,26 @@ export function ExpenseForm({ token, canWrite, projects, expenseTypes, fixedAsse
                   <option key={c.value} value={c.value}>{c.label}</option>
                 ))}
               </Select>
+
+              {form.category === "hard" && (
+                <Select
+                  label="Subkategori Konstruksi"
+                  required={!form.unit_id}
+                  value={form.hard_subcategory}
+                  onChange={(e) => set("hard_subcategory", e.target.value)}
+                  error={errors.hard_subcategory}
+                  hint={
+                    form.unit_id
+                      ? "Opsional — biaya langsung sudah tahu Subsidi/Komersial lewat unitnya"
+                      : "Wajib — biaya bersama tidak ditautkan unit, subkategori inilah yang menentukan pool HPP-nya"
+                  }
+                >
+                  <option value="">Pilih subkategori...</option>
+                  {CONSTRUCTION_SUBCATEGORIES.map((s) => (
+                    <option key={s.value} value={s.value}>{s.label}</option>
+                  ))}
+                </Select>
+              )}
             </>
           )}
 
@@ -571,24 +631,33 @@ export function ExpenseForm({ token, canWrite, projects, expenseTypes, fixedAsse
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <Select
-                  label="Unit (opsional)"
-                  value={form.unit_id}
-                  onChange={(e) => set("unit_id", e.target.value)}
-                  disabled={units.length === 0}
-                >
-                  <option value="">— Biaya bersama proyek —</option>
-                  {units.map((u) => (
-                    <option key={u.id} value={String(u.id)}>{u.code} ({u.unit_type})</option>
-                  ))}
-                </Select>
-                <p className="mt-1 text-[11px] text-text-tertiary">
-                  {units.length === 0
-                    ? "Proyek ini belum punya unit. Biaya dicatat sebagai biaya bersama."
-                    : "Memilih unit menjadikannya biaya langsung unit tersebut. Dikosongkan = biaya bersama yang dialokasikan ke semua unit."}
-                </p>
-              </div>
+              {EXPENSE_PROJECT_CATEGORIES.includes(form.category) ? (
+                <div>
+                  <p className="text-[11px] text-text-tertiary">
+                    Soft Cost dan Operasional selalu jadi beban periode berjalan — tidak
+                    bisa ditautkan ke unit tertentu.
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <Select
+                    label="Unit (opsional)"
+                    value={form.unit_id}
+                    onChange={(e) => set("unit_id", e.target.value)}
+                    disabled={units.length === 0}
+                  >
+                    <option value="">— Biaya bersama proyek —</option>
+                    {units.map((u) => (
+                      <option key={u.id} value={String(u.id)}>{u.code} ({u.unit_type})</option>
+                    ))}
+                  </Select>
+                  <p className="mt-1 text-[11px] text-text-tertiary">
+                    {units.length === 0
+                      ? "Proyek ini belum punya unit. Biaya dicatat sebagai biaya bersama."
+                      : "Memilih unit menjadikannya biaya langsung unit tersebut. Dikosongkan = biaya bersama yang dialokasikan ke semua unit."}
+                  </p>
+                </div>
+              )}
 
               <div>
                 <Select

@@ -7,6 +7,9 @@ export async function fetchCostEntries(token: string, projectId: number): Promis
 
 export interface CreateCostEntryBody {
   category: CostCategory;
+  // UAT 2026-09-07: produksi_subsidi|produksi_komersial|sarana_prasarana|
+  // perizinan — wajib saat category="hard" dan tidak ditautkan ke unit_id.
+  hard_subcategory?: string;
   amount: string;
   payment_method: PaymentMethod;
   bank_account_code?: string;

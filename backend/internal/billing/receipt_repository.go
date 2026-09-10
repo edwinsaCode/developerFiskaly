@@ -217,6 +217,8 @@ func (r *GORMRepository) LoadReceiptPrintData(ctx context.Context, tenantID, rec
 		UnitType        string       `gorm:"column:unit_type"`
 		ReceiptType     string       `gorm:"column:receipt_type"`
 		BankName        string       `gorm:"column:disbursing_bank_name"`
+		TerminKind      string       `gorm:"column:termin_kind"`
+		InstallmentNo   *int         `gorm:"column:installment_no"`
 	}
 	var res row
 	// Pembayar kwitansi diambil dari KONTRAK bila ada. Untuk KWB tidak ada
@@ -243,7 +245,8 @@ func (r *GORMRepository) LoadReceiptPrintData(ctx context.Context, tenantID, rec
 			COALESCE(NULLIF(fst.name, ''), NULLIF(fsc.name, ''), NULLIF(c.bank_kpr, ''), '')
 			              AS disbursing_bank_name,
 			p.name        AS project_name,
-			u.code        AS unit_code, u.unit_type
+			u.code        AS unit_code, u.unit_type,
+			COALESCE(tp.kind, '') AS termin_kind, tp.installment_no
 		FROM receipts r
 		JOIN units u    ON u.id = r.unit_id AND u.tenant_id = r.tenant_id
 		JOIN projects p ON p.id = u.project_id
@@ -269,6 +272,7 @@ func (r *GORMRepository) LoadReceiptPrintData(ctx context.Context, tenantID, rec
 		ReceivedAt:      res.ReceivedAt,
 		BankAccountCode: res.BankAccountCode,
 		Notes:           res.Notes,
+		KindLabel:       terminKindLabel(res.TerminKind, res.InstallmentNo),
 		CompanyName:     res.CompanyName,
 		BuyerName:          res.BuyerName,
 		BuyerID:            res.BuyerID,

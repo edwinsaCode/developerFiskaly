@@ -45,20 +45,24 @@ func TestProductCategory_Valid(t *testing.T) {
 // kapitalisasi, non_property tidak ikut pool mana pun. Matriks ini adalah
 // dasar allocation engine per-pool (LT-5) — dites di sini dulu sebagai
 // kontrak domain, sebelum ada pemanggil nyata.
+//
+// RULE KLIEN FREEZE (2026-09-04): Soft Cost bukan lagi pool kapitalisasi —
+// property TIDAK ikut pool Soft sekalipun produknya property (pool.IsCapitalizable()
+// == false untuk Soft, lihat ParticipatesInCostPool).
 func TestProductCategory_ParticipatesInCostPool(t *testing.T) {
-	pools := []CostCategory{CostCategoryLand, CostCategoryHard, CostCategorySoft, CostCategoryFinancing}
+	pools := []CostCategory{CostCategoryLand, CostCategoryHard, CostCategorySoft}
 	cases := []struct {
 		cat  ProductCategory
 		want map[CostCategory]bool
 	}{
 		{ProductCategoryProperty, map[CostCategory]bool{
-			CostCategoryLand: true, CostCategoryHard: true, CostCategorySoft: true, CostCategoryFinancing: true,
+			CostCategoryLand: true, CostCategoryHard: true, CostCategorySoft: false,
 		}},
 		{ProductCategoryLand, map[CostCategory]bool{
-			CostCategoryLand: true, CostCategoryHard: false, CostCategorySoft: false, CostCategoryFinancing: false,
+			CostCategoryLand: true, CostCategoryHard: false, CostCategorySoft: false,
 		}},
 		{ProductCategoryNonProperty, map[CostCategory]bool{
-			CostCategoryLand: false, CostCategoryHard: false, CostCategorySoft: false, CostCategoryFinancing: false,
+			CostCategoryLand: false, CostCategoryHard: false, CostCategorySoft: false,
 		}},
 	}
 	for _, c := range cases {

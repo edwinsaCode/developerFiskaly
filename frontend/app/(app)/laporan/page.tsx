@@ -37,6 +37,9 @@ export default async function LaporanPage({ searchParams }: PageProps) {
   const sp = await searchParams;
   const tab = sp.tab ?? "neraca";
   const asOf = sp.as_of ?? today();
+  // Item 5: Start Date opsional (Neraca & L/R) — kosong bila user tak mengisi,
+  // BUKAN default ke awal bulan (tanpa Start Date = perilaku lama, life-to-date).
+  const startDate = sp.start_date ?? "";
   const periodFrom = sp.from ?? monthStart();
   const periodTo = sp.to ?? today();
   const projectIdStr = sp.project_id ?? "";
@@ -77,13 +80,13 @@ export default async function LaporanPage({ searchParams }: PageProps) {
   let rabRealisasiError = false;
 
   if (tab === "neraca") {
-    [neracaData, neracaError] = await safe(fetchNeraca(token, asOf));
+    [neracaData, neracaError] = await safe(fetchNeraca(token, asOf, startDate || undefined));
   } else if (tab === "laba-rugi") {
-    [plData, plError] = await safe(fetchPL(token, asOf));
+    [plData, plError] = await safe(fetchPL(token, asOf, startDate || undefined));
   } else if (tab === "laba-rugi-proyek") {
     plTitle = "Laba Rugi per Proyek";
     if (projectId) {
-      [plData, plError] = await safe(fetchProjectPL(token, projectId, asOf));
+      [plData, plError] = await safe(fetchProjectPL(token, projectId, asOf, startDate || undefined));
     }
   } else if (tab === "arus-kas") {
     [arusKasData, arusKasError] = await safe(fetchCashFlow(token, periodFrom, periodTo));
@@ -107,7 +110,7 @@ export default async function LaporanPage({ searchParams }: PageProps) {
   }
 
   // Export params per tab
-  const exportParams = buildExportParams(tab, { asOf, periodFrom, periodTo, projectId: projectIdStr });
+  const exportParams = buildExportParams(tab, { asOf, startDate, periodFrom, periodTo, projectId: projectIdStr });
 
   return (
     <div className="space-y-6">
@@ -137,6 +140,7 @@ export default async function LaporanPage({ searchParams }: PageProps) {
         activeTab={tab}
         projects={projects}
         asOf={asOf}
+        startDate={startDate}
         periodFrom={periodFrom}
         periodTo={periodTo}
         projectId={projectIdStr}
@@ -219,16 +223,18 @@ async function safe<T>(promise: Promise<T>): Promise<[T | null, boolean]> {
 
 function buildExportParams(
   tab: string,
-  { asOf, periodFrom, periodTo, projectId }: { asOf: string; periodFrom: string; periodTo: string; projectId: string },
+  { asOf, startDate, periodFrom, periodTo, projectId }: { asOf: string; startDate: string; periodFrom: string; periodTo: string; projectId: string },
 ): { report: string; params: Record<string, string> } | null {
+  const dateParams: Record<string, string> = { as_of: asOf };
+  if (startDate) dateParams.start_date = startDate;
   switch (tab) {
     case "neraca":
-      return { report: "balance-sheet", params: { as_of: asOf } };
+      return { report: "balance-sheet", params: dateParams };
     case "laba-rugi":
-      return { report: "income-statement", params: { as_of: asOf } };
+      return { report: "income-statement", params: dateParams };
     case "laba-rugi-proyek":
       return projectId
-        ? { report: "project-pl", params: { project_id: projectId, as_of: asOf } }
+        ? { report: "project-pl", params: { project_id: projectId, ...dateParams } }
         : null;
     case "arus-kas":
       return { report: "cash-flow", params: { from: periodFrom, to: periodTo } };

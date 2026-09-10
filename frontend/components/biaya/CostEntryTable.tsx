@@ -12,18 +12,21 @@ import {
   NoSearchResult,
   useTableView,
 } from "@/components/ui/TableView";
+import { PrintExpenseReceiptLink } from "./PrintExpenseReceiptLink";
+import { LinkifiedText } from "@/components/documents/LinkifiedText";
 import type { CostEntry, ExpenseListItem, PaymentMethod } from "@/lib/types/api";
+import { constructionSubcategoryLabel } from "@/lib/constants/constructionSubcategory";
 
 // Termasuk kategori beban (marketing/other) karena pengeluaran operasional yang
 // di-tag ke proyek ikut muncul di daftar ini — tanpa label, ia tampil sebagai
 // kode mentah.
 const CATEGORY_LABELS: Record<string, string> = {
-  land:      "Tanah",
-  hard:      "Hard Cost",
-  soft:      "Soft Cost",
-  financing: "Pendanaan",
-  marketing: "Pemasaran",
-  other:     "Operasional",
+  land:        "Tanah",
+  hard:        "Hard Cost",
+  soft:        "Soft Cost",
+  operational: "Operasional", // dahulu "financing"/Pendanaan
+  marketing:   "Pemasaran",
+  other:       "Biaya Lain-lain",
 };
 
 const PAYMENT_LABELS: Record<PaymentMethod, string> = {
@@ -43,11 +46,14 @@ export function CostEntryTable({
   entries,
   expenses,
   canWrite,
+  token,
 }: {
   entries: CostEntry[];
   /** Metadata dari modul Pengeluaran (nama jenis, nomor dokumen, penanda RAB). */
   expenses: ExpenseListItem[];
   canWrite: boolean;
+  /** Dipakai untuk cetak Bukti Kas Keluar per baris (lihat PrintExpenseReceiptLink). */
+  token: string;
 }) {
   const expenseMeta = useMemo(
     () => new Map<number, ExpenseListItem>(expenses.map((e) => [e.id, e])),
@@ -130,14 +136,26 @@ export function CostEntryTable({
                           RAB
                         </span>
                       )}
+                      {/* UAT 2026-09-07: Produksi Subsidi vs Komersial harus
+                          terlihat langsung di riwayat, bukan hanya di RAB —
+                          di sinilah pool mana yang menerima biaya ini terlihat. */}
+                      {entry.hard_subcategory && (
+                        <div className="mt-0.5 text-[10px] text-text-tertiary">
+                          {constructionSubcategoryLabel(entry.hard_subcategory)}
+                        </div>
+                      )}
                     </Td>
                     <Td>{entry.vendor}</Td>
                     <Td>
-                      <span className="text-text-secondary">{entry.description}</span>
+                      <span className="text-text-secondary">
+                        <LinkifiedText token={token} text={entry.description} />
+                      </span>
                       {meta?.document_number && (
-                        <span className="block font-mono text-[10px] text-text-tertiary mt-0.5">
-                          {meta.document_number}
-                        </span>
+                        <PrintExpenseReceiptLink
+                          token={token}
+                          expenseId={entry.id}
+                          documentNumber={meta.document_number}
+                        />
                       )}
                     </Td>
                     <Td>

@@ -76,6 +76,10 @@ export interface APInvoiceLineBody {
   phase_id?: number;
   category: string;
   cost_tier: string;
+  // UAT 2026-09-07: produksi_subsidi|produksi_komersial|sarana_prasarana|
+  // perizinan — hanya bermakna saat category="hard", wajib saat cost_tier
+  // "shared" (tidak ditautkan ke unit_id).
+  hard_subcategory?: string;
   amount: string; // rupiah bulat, string (jangan pernah number)
   budget_item_id?: number;
   description: string;

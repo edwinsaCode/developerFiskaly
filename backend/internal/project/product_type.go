@@ -65,9 +65,15 @@ type ProductType struct {
 	Name               string          `gorm:"not null;size:200"                        json:"name"`
 	Category           ProductCategory `gorm:"not null;size:20;default:'property'"      json:"category"`
 	RevenueAccountCode string          `gorm:"not null;size:20;default:'4-1000'"        json:"revenue_account_code"`
-	IsActive           bool            `gorm:"not null;default:true"                    json:"is_active"`
-	CreatedAt          time.Time       `                                                json:"created_at"`
-	UpdatedAt          time.Time       `                                                json:"updated_at"`
+	// TaxCategory (rule klien UAT #3, migration 000092): NULL = produk ini
+	// tidak menentukan sendiri tarif PPh Final — proyek (projects.tax_category)
+	// tetap sumber penentu (jalur legacy, kode "rumah"). Diisi hanya oleh
+	// produk yang MEMANG membedakan subsidi/komersial sebagai jenisnya sendiri
+	// (rumah_subsidi/rumah_komersial) — satu proyek boleh menjual keduanya.
+	TaxCategory *domain.TaxCategory `gorm:"size:20"                                   json:"tax_category,omitempty"`
+	IsActive    bool                `gorm:"not null;default:true"                    json:"is_active"`
+	CreatedAt   time.Time           `                                                json:"created_at"`
+	UpdatedAt   time.Time           `                                                json:"updated_at"`
 }
 
 func (ProductType) TableName() string { return "product_types" }
@@ -204,11 +210,15 @@ func productPolicyOf(pt *ProductType) (domain.ProductPolicy, error) {
 	if strings.TrimSpace(pt.RevenueAccountCode) == "" {
 		return domain.ProductPolicy{}, fmt.Errorf("%w: produk %q belum punya akun pendapatan", ErrRevenueAccountInvalid, pt.Code)
 	}
+	if pt.TaxCategory != nil && !pt.TaxCategory.Valid() {
+		return domain.ProductPolicy{}, fmt.Errorf("%w: %q tax_category %q", ErrProductTypeInvalid, pt.Code, *pt.TaxCategory)
+	}
 	return domain.ProductPolicy{
 		Code:               pt.Code,
 		Name:               pt.Name,
 		Category:           pt.Category,
 		RevenueAccountCode: strings.TrimSpace(pt.RevenueAccountCode),
+		TaxCategory:        pt.TaxCategory,
 	}, nil
 }
 
@@ -278,8 +288,19 @@ func (r *GORMRepository) ValidateRevenueAccount(ctx context.Context, tenantID ui
 // 000083 langsung mendapat baris yang sudah benar; tidak ada lagi jalur addon
 // aktif untuk produk ini sejak awal.
 // TODO(tax-advisor): akun & perlakuan PPN utk kelebihan tanah.
+//
+// rumah_subsidi/rumah_komersial (migration 000092, rule klien UAT #3): SUBSIDI
+// dan KOMERSIAL adalah klasifikasi PRODUK, bukan sekadar skema KPR — HPP/akun
+// pendapatan bisa sama, tapi tarif PPh Final (1% vs 2,5%) mengikuti PRODUK unit
+// tsb, bukan hanya proyeknya (satu proyek boleh menjual keduanya). Kode legacy
+// "rumah" (TaxCategory nil) TETAP ada dan TIDAK berubah perilaku — unit lama
+// yang masih memakainya terus mengikuti tax_category PROYEK seperti sebelumnya.
+func taxCategoryPtr(c domain.TaxCategory) *domain.TaxCategory { return &c }
+
 var defaultProductTypes = []ProductType{
 	{Code: "rumah", Name: "Rumah", Category: ProductCategoryProperty, RevenueAccountCode: DefaultPropertyRevenueAccount},
+	{Code: "rumah_subsidi", Name: "Rumah Subsidi", Category: ProductCategoryProperty, RevenueAccountCode: DefaultPropertyRevenueAccount, TaxCategory: taxCategoryPtr(domain.TaxCategorySubsidi)},
+	{Code: "rumah_komersial", Name: "Rumah Komersial", Category: ProductCategoryProperty, RevenueAccountCode: DefaultPropertyRevenueAccount, TaxCategory: taxCategoryPtr(domain.TaxCategoryKomersial)},
 	{Code: "ruko", Name: "Ruko", Category: ProductCategoryProperty, RevenueAccountCode: DefaultPropertyRevenueAccount},
 	{Code: "kelebihan_tanah", Name: "Kelebihan Tanah", Category: ProductCategoryLand, RevenueAccountCode: DefaultLandRevenueAccount},
 }
@@ -347,7 +368,7 @@ func (s *Service) CreateProductType(ctx context.Context, tenantID uint64, pt *Pr
 	return pt, nil
 }
 
-func (s *Service) UpdateProductType(ctx context.Context, tenantID, id uint64, name, revenueAccountCode *string, isActive *bool) (*ProductType, error) {
+func (s *Service) UpdateProductType(ctx context.Context, tenantID, id uint64, name, revenueAccountCode *string, isActive *bool, taxCategory *string) (*ProductType, error) {
 	if s.productTypes == nil {
 		return nil, errors.New("product type store belum dikonfigurasi")
 	}
@@ -365,6 +386,20 @@ func (s *Service) UpdateProductType(ctx context.Context, tenantID, id uint64, na
 	}
 	if isActive != nil {
 		updates["is_active"] = *isActive
+	}
+	// TaxCategory (rule klien UAT #3): "" mengosongkan (kembali ke jalur legacy
+	// projects.tax_category), nilai lain harus subsidi|komersial.
+	if taxCategory != nil {
+		trimmed := strings.TrimSpace(*taxCategory)
+		if trimmed == "" {
+			updates["tax_category"] = nil
+		} else {
+			tc := domain.TaxCategory(trimmed)
+			if !tc.Valid() {
+				return nil, ErrProductTypeInvalid
+			}
+			updates["tax_category"] = string(tc)
+		}
 	}
 	if len(updates) == 0 {
 		return nil, ErrProductTypeInvalid

@@ -164,9 +164,9 @@ func (e *psEnv) seedUnit(t *testing.T, code string) uint64 {
 	// yang dihasilkan fixture ini identik dengan sebelum hardening.
 	e.db.Exec(`INSERT IGNORE INTO product_types (tenant_id, code, name, category, revenue_account_code, is_active)
 		VALUES (?,?,?,?,?,TRUE)`, psTenant, "rumah", "rumah", "property", "4-1000")
-	res := e.db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, list_price, status)
-		VALUES (?,?,?,?,?,?,?)`,
-		psTenant, e.projectID, code, "rumah", domain.FromInt(100), domain.FromInt(0), "reserved")
+	res := e.db.Exec(`INSERT INTO units (tenant_id, project_id, code, unit_type, saleable_area, land_area, list_price, status)
+		VALUES (?,?,?,?,?,?,?,?)`,
+		psTenant, e.projectID, code, "rumah", domain.FromInt(100), domain.FromInt(100), domain.FromInt(0), "reserved")
 	if res.Error != nil {
 		t.Fatalf("seed unit: %v", res.Error)
 	}
@@ -226,8 +226,16 @@ func (e *psEnv) pay(t *testing.T, contractID uint64, amount int64, src sale.Paym
 
 func (e *psEnv) event(t *testing.T, contractID uint64, ev scheme.Event, finSource *uint64) *sale.ContractPaymentEvent {
 	t.Helper()
+	return e.eventWithAmount(t, contractID, ev, finSource, nil)
+}
+
+// eventWithAmount (Item 7A, UAT 2026-09-07): variant yang membawa
+// BankApprovedAmount — dibutuhkan untuk event `akad` pada kontrak KPR yang
+// BAST-nya sudah terjadi lebih dulu (lihat reclassToFinancingIfBAST).
+func (e *psEnv) eventWithAmount(t *testing.T, contractID uint64, ev scheme.Event, finSource *uint64, bankApproved *domain.Money) *sale.ContractPaymentEvent {
+	t.Helper()
 	out, err := e.svc.ApplySchemeEvent(context.Background(), psTenant, sale.ApplySchemeEventRequest{
-		ContractID: contractID, Event: ev, FinancingSourceID: finSource,
+		ContractID: contractID, Event: ev, FinancingSourceID: finSource, BankApprovedAmount: bankApproved,
 	})
 	if err != nil {
 		t.Fatalf("ApplySchemeEvent %s: %v", ev, err)
@@ -318,10 +326,13 @@ func TestIntegration_Scheme_KPR_FullJourney(t *testing.T) {
 		t.Errorf("state = %s, want akad", st)
 	}
 
-	// BAST setelah akad: sisa 900jt didebit ke PIUTANG BANK 1-2200 (bukan 1-2000).
+	// BAST setelah akad: Nilai Persetujuan KPR Bank 900jt (== sisa) → seluruhnya
+	// ke Dana Jaminan Bank 1-2200 (bukan 1-2000).
+	approved900 := domain.FromInt(900_000_000)
 	if _, err := env.svc.RecordAkad(ctx, psTenant, sale.RecordBASTRequest{
 		UnitID: unitID, SalePrice: domain.FromInt(1_000_000_000), BuyerRef: "Budi",
-		BASTDate: time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC),
+		BASTDate:           time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC),
+		BankApprovedAmount: &approved900,
 	}); err != nil {
 		t.Fatalf("BAST pasca-akad: %v", err)
 	}
@@ -443,10 +454,12 @@ func TestIntegration_Scheme_AkadAfterBAST_Reclass(t *testing.T) {
 		t.Fatalf("saldo 1-2000 pasca-BAST = %s, want 900000000 (buyer, pra-akad)", got)
 	}
 
-	// Akad SETELAH BAST → REKLAS Dr 1-2200 / Cr 1-2000 sebesar outstanding.
+	// Akad SETELAH BAST, Nilai Persetujuan KPR Bank 900jt (== outstanding) →
+	// REKLAS Dr 1-2200 / Cr 1-2000 sebesar min(approved, outstanding) = 900jt.
 	env.event(t, c.ID, scheme.EventSubmittedToBank, nil)
 	env.event(t, c.ID, scheme.EventBankApproved, nil)
-	akadEv := env.event(t, c.ID, scheme.EventAkad, nil)
+	approved900 := domain.FromInt(900_000_000)
+	akadEv := env.eventWithAmount(t, c.ID, scheme.EventAkad, nil, &approved900)
 	if akadEv.JournalEntryID == nil {
 		t.Fatal("akad pasca-BAST harus memposting jurnal reklas")
 	}
@@ -585,28 +598,38 @@ func TestIntegration_R1_Disbursement_GuardAndAutoState(t *testing.T) {
 	}
 }
 
-// ── T-3 — kekurangan pasca-pencairan adalah PIUTANG CUSTOMER ─────────────────
+// ── Item 7C — pencairan parsial TETAP di Dana Jaminan Bank (T-3 SUPERSEDED) ──
 
-// Keputusan klien final 2026-08-05, angka persis dari contoh klien:
-//
-//	Harga rumah 500jt, DP customer 50jt, bank cair 430jt
-//	→ Piutang Customer 20jt, Piutang Bank 0 ("bank selesai pada nilai
-//	  pencairan aktualnya").
-//
-// Test ini mengunci SELURUH rantainya di ledger nyata: jendela akad→pencairan
-// tetap piutang bank, pencairan memicu jurnal reklas, dan pelunasan kekurangan
-// mengkredit piutang customer — bukan piutang bank.
+// T-3 (2026-08-05) dulu menganggap "bank selesai pada nilai cair": pencairan
+// PERTAMA yang lebih kecil dari komitmen otomatis memindahkan sisanya ke
+// Piutang Customer via reklas lump-sum. UAT 2026-09-07 (Item 7C) MEMBATALKAN
+// itu — persis "bug lama" yang wajib direproduksi & diperbaiki: sisa komitmen
+// bank harus TETAP di Dana Jaminan Bank (1-2200) sampai bank benar-benar
+// mencairkannya (pencairan ke-2/ke-3), TIDAK PERNAH diam-diam pindah jadi
+// tanggungan customer. Angka dari contoh klien (T-3, tetap dipakai sebagai
+// fixture): harga rumah 500jt, DP customer 50jt, Nilai Persetujuan KPR Bank
+// 450jt, pencairan pertama 430jt (kurang dari approved) lalu pencairan kedua
+// 20jt (melunasi Dana Jaminan Bank persis).
 func TestIntegration_T3_ShortfallIsCustomerReceivable(t *testing.T) {
 	env := psSetup(t)
 	ctx := context.Background()
 	unitID := env.seedUnit(t, "KPR-T3")
 
+	// Fixture = contoh baku acceptance criteria Item 7C: Harga Unit 185jt,
+	// Nilai Persetujuan KPR Bank 150jt → Dana Jaminan Bank 150jt, Piutang
+	// Usaha 35jt (SELISIH persetujuan vs harga, bukan hasil reklas). Tanpa DP
+	// customer — 150jt (approved) < 185jt (harga) memastikan total termin
+	// TIDAK PERNAH mencapai harga penuh hanya lewat pencairan bank, sehingga
+	// state tetap `disbursed` (bukan otomatis maju ke `fully_paid`) sampai
+	// akhir test — itulah yang membuat percobaan pencairan ke-4 (kelebihan)
+	// benar-benar diuji oleh guard NOMINAL (ErrDisbursementExceedsFinancing),
+	// bukan keburu ditolak oleh guard STATE (ErrDisbursementRequiresAkad).
 	c, err := env.svc.CreateContract(ctx, psTenant, sale.CreateContractRequest{
 		UnitID:            unitID,
 		BuyerName:         "Budi",
 		BuyerID:           "3201...",
 		ContractDate:      time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
-		TotalPrice:        domain.FromInt(500_000_000),
+		TotalPrice:        domain.FromInt(185_000_000),
 		PaymentSchemeID:   &env.schemes["KPR-KOM"].ID,
 		FinancingSourceID: &env.finSourceID,
 		CustomerID:        &env.customerID,
@@ -616,45 +639,42 @@ func TestIntegration_T3_ShortfallIsCustomerReceivable(t *testing.T) {
 		t.Fatalf("CreateContract: %v", err)
 	}
 
-	// DP customer 50jt (pra-BAST → Uang Muka, kewajiban) lalu akad.
-	env.pay(t, c.ID, 50_000_000, sale.PaymentSourceCollection, nil)
 	env.event(t, c.ID, scheme.EventSubmittedToBank, nil)
 	env.event(t, c.ID, scheme.EventBankApproved, nil)
 	env.event(t, c.ID, scheme.EventAkad, nil)
 
-	// BAST pasca-akad: sisa 450jt adalah KOMITMEN BANK selama belum cair.
+	// BAST pasca-akad: Nilai Persetujuan KPR Bank 150jt → Dana Jaminan Bank;
+	// sisa (185jt - 150jt = 35jt) ke Piutang Usaha — sesuai contoh klien.
+	approved150 := domain.FromInt(150_000_000)
 	if _, err := env.svc.RecordAkad(ctx, psTenant, sale.RecordBASTRequest{
-		UnitID: unitID, SalePrice: domain.FromInt(500_000_000), BuyerRef: "Budi",
-		BASTDate: time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC),
+		UnitID: unitID, SalePrice: domain.FromInt(185_000_000), BuyerRef: "Budi",
+		BASTDate:           time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC),
+		BankApprovedAmount: &approved150,
 	}); err != nil {
 		t.Fatalf("BAST: %v", err)
 	}
-	if got := env.unitAccountBalance(t, unitID, "1-2200"); got != "450000000" {
-		t.Fatalf("saldo 1-2200 pasca-BAST = %s, want 450000000 (komitmen bank)", got)
+	if got := env.unitAccountBalance(t, unitID, "1-2200"); got != "150000000" {
+		t.Fatalf("saldo 1-2200 pasca-BAST = %s, want 150000000 (Dana Jaminan Bank)", got)
 	}
-	if got := env.unitAccountBalance(t, unitID, "1-2000"); got != "0" {
-		t.Fatalf("saldo 1-2000 pasca-BAST = %s, want 0 (bank belum cair)", got)
+	if got := env.unitAccountBalance(t, unitID, "1-2000"); got != "35000000" {
+		t.Fatalf("saldo 1-2000 pasca-BAST = %s, want 35000000 (selisih approved vs harga)", got)
 	}
 
-	// Pencairan bank 430jt — LEBIH KECIL dari sisa tagihan.
-	res := env.pay(t, c.ID, 430_000_000, sale.PaymentSourceKPRDisbursement, &env.finSourceID)
+	// Pencairan bank #1: 50jt.
+	res := env.pay(t, c.ID, 50_000_000, sale.PaymentSourceKPRDisbursement, &env.finSourceID)
 	if res.CreditAccount != "1-2200" {
-		t.Errorf("pencairan bank harus mengkredit 1-2200, got %s", res.CreditAccount)
+		t.Errorf("pencairan bank #1 harus mengkredit 1-2200, got %s", res.CreditAccount)
+	}
+	if got := env.unitAccountBalance(t, unitID, "1-2200"); got != "100000000" {
+		t.Errorf("Dana Jaminan Bank pasca-pencairan #1 = %s, want 100000000", got)
+	}
+	if got := env.unitAccountBalance(t, unitID, "1-2000"); got != "35000000" {
+		t.Errorf("Piutang Usaha pasca-pencairan #1 = %s, want 35000000 (tidak tersentuh)", got)
 	}
 
-	// INTI T-3: bank selesai pada nilai pencairan aktualnya; selisih 20jt
-	// berpindah menjadi piutang CUSTOMER.
-	if got := env.unitAccountBalance(t, unitID, "1-2200"); got != "0" {
-		t.Errorf("saldo Piutang Bank pasca-pencairan = %s, want 0 (bank selesai)", got)
-	}
-	if got := env.unitAccountBalance(t, unitID, "1-2000"); got != "20000000" {
-		t.Errorf("saldo Piutang Customer = %s, want 20000000 (kekurangan customer)", got)
-	}
-	if st := env.contractState(t, c.ID); st != "disbursed" {
-		t.Errorf("state = %s, want disbursed", st)
-	}
-
-	// Reklas WAJIB berjurnal — perpindahan counterparty tidak boleh tanpa jejak.
+	// Milestone `disbursed` tercatat, tapi TANPA jurnal reklas (7C: reklas
+	// lump-sum lama dicabut — satu-satunya jurnal adalah penerimaan kas itu
+	// sendiri, dikreditkan langsung ke 1-2200).
 	events, err := env.svc.ListPaymentEvents(ctx, psTenant, c.ID)
 	if err != nil {
 		t.Fatalf("ListPaymentEvents: %v", err)
@@ -668,37 +688,46 @@ func TestIntegration_T3_ShortfallIsCustomerReceivable(t *testing.T) {
 	if disbursedEv == nil {
 		t.Fatalf("event disbursed tidak tercatat: %v", eventNames(events))
 	}
-	if disbursedEv.JournalEntryID == nil {
-		t.Error("event disbursed harus membawa jurnal reklas Piutang Bank → Piutang Customer")
+	if disbursedEv.JournalEntryID != nil {
+		t.Error("milestone disbursed TIDAK boleh lagi membawa jurnal reklas (7C: dicabut)")
 	}
 
-	// Outstanding kanonik = angka yang sama dengan yang ditagihkan ke customer.
-	sum, err := env.svc.ContractFinancialSummaryByID(ctx, psTenant, c.ID)
-	if err != nil {
-		t.Fatalf("summary: %v", err)
+	// Pencairan bank #2: 60jt — INTI Item 7C: pencairan KEDUA tetap mengurangi
+	// Dana Jaminan Bank, bukan diam-diam dialihkan ke Piutang Usaha (bug T-3
+	// lama yang wajib direproduksi & diperbaiki).
+	res2 := env.pay(t, c.ID, 60_000_000, sale.PaymentSourceKPRDisbursement, &env.finSourceID)
+	if res2.CreditAccount != "1-2200" {
+		t.Errorf("pencairan bank #2 harus mengkredit 1-2200, got %s", res2.CreditAccount)
 	}
-	if sum.Outstanding.String() != "20000000" {
-		t.Errorf("Outstanding = %s, want 20000000", sum.Outstanding)
+	if got := env.unitAccountBalance(t, unitID, "1-2200"); got != "40000000" {
+		t.Errorf("Dana Jaminan Bank pasca-pencairan #2 = %s, want 40000000", got)
 	}
-
-	// Pratinjau collection HARUS menunjuk akun yang sama dengan jurnal nyata.
-	prev, err := env.svc.PreviewCollectionPayment(ctx, psTenant, c.ID, domain.FromInt(20_000_000), "1-1300")
-	if err != nil {
-		t.Fatalf("preview: %v", err)
-	}
-	if len(prev.Lines) != 2 || prev.Lines[1].AccountCode != "1-2000" {
-		t.Errorf("pratinjau harus mengkredit 1-2000, got %+v", prev.Lines)
+	if got := env.unitAccountBalance(t, unitID, "1-2000"); got != "35000000" {
+		t.Errorf("Piutang Usaha pasca-pencairan #2 = %s, want 35000000 (tidak tersentuh)", got)
 	}
 
-	// Pelunasan kekurangan oleh CUSTOMER → mengkredit piutang customer.
-	res2 := env.pay(t, c.ID, 20_000_000, sale.PaymentSourceCollection, nil)
-	if res2.CreditAccount != "1-2000" {
-		t.Errorf("pelunasan kekurangan harus mengkredit 1-2000, got %s", res2.CreditAccount)
-	}
-	if got := env.unitAccountBalance(t, unitID, "1-2000"); got != "0" {
-		t.Errorf("Piutang Customer akhir = %s, want 0", got)
+	// Pencairan bank #3: 40jt — MELUNASI Dana Jaminan Bank persis; Piutang
+	// Usaha (35jt) tidak pernah tersentuh oleh pencairan bank sama sekali.
+	res3 := env.pay(t, c.ID, 40_000_000, sale.PaymentSourceKPRDisbursement, &env.finSourceID)
+	if res3.CreditAccount != "1-2200" {
+		t.Errorf("pencairan bank #3 harus mengkredit 1-2200, got %s", res3.CreditAccount)
 	}
 	if got := env.unitAccountBalance(t, unitID, "1-2200"); got != "0" {
-		t.Errorf("Piutang Bank akhir = %s, want 0", got)
+		t.Errorf("Dana Jaminan Bank akhir = %s, want 0 (lunas)", got)
+	}
+	if got := env.unitAccountBalance(t, unitID, "1-2000"); got != "35000000" {
+		t.Errorf("Piutang Usaha akhir = %s, want 35000000 (utuh — bukan tanggungan bank)", got)
+	}
+
+	// Pencairan bank #4 (kelebihan, 1jt) setelah Dana Jaminan Bank lunas HARUS
+	// ditolak berbasis NOMINAL — Dana Jaminan Bank tidak boleh dicairkan
+	// melebihi sisa (7C: batas keras), state tetap `disbursed` di titik ini
+	// sehingga guard urutan-flow tidak lebih dulu memblokir percobaan ini.
+	if _, err := env.svc.ReceivePayment(ctx, psTenant, sale.ReceivePaymentRequest{
+		Source: sale.PaymentSourceKPRDisbursement, ContractID: &c.ID,
+		Amount: domain.FromInt(1_000_000), Date: time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC),
+		BankAccountCode: "1-1300", FinancingSourceID: &env.finSourceID,
+	}); !errors.Is(err, sale.ErrDisbursementExceedsFinancing) {
+		t.Errorf("pencairan melebihi sisa Dana Jaminan Bank harus ErrDisbursementExceedsFinancing, got %v", err)
 	}
 }

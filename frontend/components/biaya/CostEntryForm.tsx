@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { CostCategory, PaymentMethod, ProjectPhase, Unit, BudgetItem, JournalPreviewLine } from "@/lib/types/api";
 import type { CreateCostEntryBody } from "@/lib/api/cost";
+import { CONSTRUCTION_SUBCATEGORIES } from "@/lib/constants/constructionSubcategory";
 import { Input, Select } from "@/components/ui/Input";
 import { CashBankSelect } from "@/components/accounting/CashBankSelect";
 import { RupiahInput, validateRupiah } from "@/components/ui/RupiahInput";
@@ -17,14 +18,29 @@ import {
   createAndPostCostEntryAction,
 } from "@/app/(app)/proyek/[id]/biaya/actions";
 
-// ── Kategori (4 valid untuk CostEntry — backend menolak marketing/other) ──────
-
+// ── Kategori (6 valid untuk CostEntry) ─────────────────────────────────────────
+// RULE KLIEN FREEZE (2026-09-04): hanya Tanah + Hard Cost yang dikapitalisasi
+// ke Persediaan/HPP. Soft Cost, Operasional (dahulu "Pendanaan"), Pemasaran,
+// dan Lain-lain tetap bisa dicatat lewat form ini untuk proyek — tapi selalu
+// diposting sebagai beban periode (backend infer tier overhead, lihat
+// resolveTier), tidak pernah masuk Persediaan. Karena itu semuanya TIDAK BOLEH
+// ditautkan ke unit — lihat EXPENSE_CATEGORIES di bawah, yang menyembunyikan
+// pemilih Unit untuknya. CLIENT FINAL NOTE (2026-09-10): Pemasaran + Lain-lain
+// ditambahkan agar RAB berkategori sama bisa direalisasikan lewat form ini
+// (backend sudah mendukung penuh — lihat domain.CostCategoryMarketing/Other,
+// akun 5-3000/5-4000).
 const COST_CATEGORIES: { value: CostCategory; label: string }[] = [
-  { value: "land",      label: "Tanah" },
-  { value: "hard",      label: "Hard Cost (Konstruksi)" },
-  { value: "soft",      label: "Soft Cost" },
-  { value: "financing", label: "Pendanaan" },
+  { value: "land",        label: "Tanah" },
+  { value: "hard",        label: "Hard Cost (Produksi, Sarana & Prasarana, Perizinan)" },
+  { value: "soft",        label: "Soft Cost (Desain, Legal) — Beban, bukan HPP" },
+  { value: "operational", label: "Operasional — Beban, bukan HPP" },
+  { value: "marketing",   label: "Pemasaran — Beban, bukan HPP" },
+  { value: "other",       label: "Lain-lain — Beban, bukan HPP" },
 ];
+
+// Kategori yang selalu diposting sebagai beban (tier overhead) — tidak pernah
+// boleh ditautkan ke unit (backend menolak UnitID != nil untuk tier overhead).
+const EXPENSE_CATEGORIES: CostCategory[] = ["soft", "operational", "marketing", "other"];
 
 // ── Props ─────────────────────────────────────────────────────────────────────
 
@@ -40,6 +56,13 @@ interface CostEntryFormProps {
 
 interface FormState {
   category: CostCategory | "";
+  // UAT 2026-09-07: produksi_subsidi|produksi_komersial|sarana_prasarana|
+  // perizinan — hanya berlaku untuk category="hard". Wajib diisi saat biaya
+  // TIDAK ditautkan ke unit (pool project-wide, backend tier=shared), karena
+  // itulah satu-satunya sinyal yang menentukan unit mana yang berhak menerima
+  // alokasi HPP-nya. Opsional saat sudah ditautkan ke unit (tier=direct) —
+  // unit itu sendiri sudah menentukan Subsidi/Komersial tanpa ambigu.
+  hard_subcategory: string;
   amount: string;
   payment_method: PaymentMethod | "";
   bank_account_code: string;
@@ -53,6 +76,7 @@ interface FormState {
 
 const INITIAL_FORM: FormState = {
   category: "",
+  hard_subcategory: "",
   amount: "",
   payment_method: "",
   bank_account_code: "",
@@ -78,11 +102,35 @@ export function CostEntryForm({ token, projectId, phases, units, budgetItems }: 
 
   const set = (k: keyof FormState, v: string) => setForm(f => ({ ...f, [k]: v }));
 
+  const isExpenseCategory = EXPENSE_CATEGORIES.includes(form.category as CostCategory);
+  const isHardCategory = form.category === "hard";
+  // Tanpa unit dipilih, biaya Hard Cost masuk pool project-wide (tier=shared
+  // di backend) — di situlah hard_subcategory WAJIB diisi supaya alokasi tahu
+  // unit Subsidi atau Komersial mana yang berhak menerimanya.
+  const hardSubcategoryRequired = isHardCategory && !form.unit_id;
+
+  // Ganti ke kategori beban (soft/operational) mengosongkan unit yang
+  // terlanjur dipilih — biaya ini tidak pernah boleh jadi biaya langsung unit.
+  // Ganti kategori juga mengosongkan hard_subcategory — nilai lama tidak
+  // relevan begitu kategori bukan lagi "hard".
+  function setCategory(v: string) {
+    setForm(f => ({
+      ...f,
+      category: v as CostCategory | "",
+      unit_id: EXPENSE_CATEGORIES.includes(v as CostCategory) ? "" : f.unit_id,
+      hard_subcategory: v === "hard" ? f.hard_subcategory : "",
+    }));
+  }
+
   // ── Validasi (sisi klien — backend tetap penjaga utama) ───────────────────
 
   function validate(): boolean {
     const e: Partial<Record<keyof FormState, string>> = {};
     if (!form.category)        e.category       = "Pilih kategori";
+    if (hardSubcategoryRequired && !CONSTRUCTION_SUBCATEGORIES.some(s => s.value === form.hard_subcategory)) {
+      // UAT 2026-09-07: tanpa unit, pool-nya ambigu tanpa subkategori ini.
+      e.hard_subcategory = "Pilih subkategori — wajib diisi karena biaya ini tidak ditautkan ke unit";
+    }
     const amtErr = validateRupiah(form.amount);
     if (amtErr)                e.amount         = amtErr;
     if (!form.payment_method)  e.payment_method = "Pilih metode pembayaran";
@@ -132,6 +180,7 @@ export function CostEntryForm({ token, projectId, phases, units, budgetItems }: 
   function buildBody(): CreateCostEntryBody {
     return {
       category:          form.category as CostCategory,
+      hard_subcategory:  isHardCategory && form.hard_subcategory ? form.hard_subcategory : undefined,
       amount:            form.amount,
       payment_method:    form.payment_method as PaymentMethod,
       bank_account_code: form.payment_method === "bank" ? form.bank_account_code.trim() : undefined,
@@ -157,9 +206,11 @@ export function CostEntryForm({ token, projectId, phases, units, budgetItems }: 
         {/* Catatan kategori — sejak W-10 beban operasional punya halamannya
             sendiri, jadi tidak ada lagi alasan mengarahkan user ke Jurnal Umum. */}
         <div className="mb-5 px-4 py-3 rounded-lg bg-accent-light/50 border border-accent/25 text-xs text-text-secondary">
-          Form ini untuk biaya yang <strong>dikapitalisasi</strong> ke proyek (tanah,
-          konstruksi, soft cost, pendanaan). Beban operasional seperti gaji, sewa, dan
-          listrik dicatat di{" "}
+          Tanah dan Hard Cost <strong>dikapitalisasi</strong> ke Persediaan proyek dan
+          menjadi HPP saat unit terjual. Soft Cost dan Operasional tetap dicatat di
+          sini untuk pelacakan RAB, tapi selalu langsung menjadi <strong>beban periode</strong>{" "}
+          — tidak pernah masuk Persediaan/HPP. Beban operasional kantor (gaji, sewa,
+          listrik) yang tidak terkait proyek dicatat di{" "}
           <a href="/accounting/pengeluaran" className="font-medium text-accent hover:underline">
             Keuangan → Pengeluaran
           </a>
@@ -171,7 +222,7 @@ export function CostEntryForm({ token, projectId, phases, units, budgetItems }: 
             label="Kategori"
             required
             value={form.category}
-            onChange={e => set("category", e.target.value)}
+            onChange={e => setCategory(e.target.value)}
             error={errors.category}
           >
             <option value="">Pilih kategori biaya...</option>
@@ -179,6 +230,26 @@ export function CostEntryForm({ token, projectId, phases, units, budgetItems }: 
               <option key={c.value} value={c.value}>{c.label}</option>
             ))}
           </Select>
+
+          {isHardCategory && (
+            <Select
+              label="Subkategori Konstruksi"
+              required={hardSubcategoryRequired}
+              value={form.hard_subcategory}
+              onChange={e => set("hard_subcategory", e.target.value)}
+              error={errors.hard_subcategory}
+              hint={
+                hardSubcategoryRequired
+                  ? "Wajib — biaya ini tidak ditautkan ke unit, jadi subkategori inilah yang menentukan unit Subsidi/Komersial mana yang menerima HPP-nya"
+                  : "Opsional — unit yang dipilih di bawah sudah menentukan Subsidi/Komersial dengan sendirinya"
+              }
+            >
+              <option value="">Pilih...</option>
+              {CONSTRUCTION_SUBCATEGORIES.map(s => (
+                <option key={s.value} value={s.value}>{s.label}</option>
+              ))}
+            </Select>
+          )}
 
           <RupiahInput
             label="Jumlah"
@@ -271,7 +342,7 @@ export function CostEntryForm({ token, projectId, phases, units, budgetItems }: 
             </Select>
           )}
 
-          {units.length > 0 && (
+          {units.length > 0 && !isExpenseCategory && (
             <Select
               label="Unit (opsional)"
               value={form.unit_id}
@@ -283,10 +354,16 @@ export function CostEntryForm({ token, projectId, phases, units, budgetItems }: 
               ))}
             </Select>
           )}
-          {units.length > 0 && (
+          {units.length > 0 && !isExpenseCategory && (
             <p className="-mt-2 text-[11px] text-text-tertiary">
               Memilih unit menjadikan biaya ini <strong>biaya langsung</strong> unit tersebut
               (masuk HPP saat serah terima). Hanya unit produk properti yang bisa dipilih.
+            </p>
+          )}
+          {isExpenseCategory && (
+            <p className="-mt-2 text-[11px] text-text-tertiary md:col-span-2">
+              Soft Cost, Operasional, Pemasaran, dan Lain-lain selalu jadi beban periode
+              berjalan — tidak bisa ditautkan ke unit tertentu.
             </p>
           )}
 

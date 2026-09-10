@@ -85,4 +85,14 @@ var (
 	// beralasan untuk jejak audit (berbeda dari CloseReservation yang bukan
 	// aksi finansial).
 	ErrCancelReasonRequired = errors.New("alasan pembatalan wajib diisi")
+
+	// ErrLandSaleHasReceivedPayment is returned when CancelLandSale (jalur
+	// standalone/langsung, dipanggil dari endpoint DELETE land-sale) dipakai
+	// pada land_sale yang piutangnya (payment_schedules.land_sale_id) sudah
+	// menerima pembayaran — jalur ini tidak punya mekanisme refund/settlement
+	// (lihat komentar CancelLandSale), sehingga uang yang sudah diterima akan
+	// jadi kas tak bertuan bila dibiarkan lanjut. Pembatalan atas land_sale
+	// yang sudah dibayar HARUS lewat internal/cancellation (pembatalan unit
+	// bundled), yang menghitung refund/settlement secara utuh.
+	ErrLandSaleHasReceivedPayment = errors.New("land_sale sudah menerima pembayaran — batalkan lewat pembatalan unit (bukan endpoint ini) agar dana buyer ikut diselesaikan")
 )

@@ -32,4 +32,7 @@ var (
 	ErrJournalNotLinkable = errors.New("jurnal tidak bisa ditautkan ke dokumen")
 	// ErrJournalRequired — penerbitan dokumen kas tanpa id jurnal.
 	ErrJournalRequired = errors.New("id jurnal wajib diisi untuk dokumen kas")
+
+	// ErrDocumentNotFound — tidak ada dokumen dengan nomor persis ini di registry.
+	ErrDocumentNotFound = errors.New("dokumen tidak ditemukan")
 )
