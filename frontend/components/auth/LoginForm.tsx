@@ -114,12 +114,12 @@ export function LoginForm({ expired }: { expired: boolean }) {
         Masuk
       </Button>
 
-      <p className="text-center text-sm text-text-secondary">
+      {/* <p className="text-center text-sm text-text-secondary">
         Belum punya akun?{" "}
         <Link href="/register" className="text-accent hover:underline font-medium">
           Daftar
         </Link>
-      </p>
+      </p> */}
     </form>
   );
 }
