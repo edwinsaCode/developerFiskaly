@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     type           VARCHAR(20)     NOT NULL COMMENT 'asset|liability|equity|revenue|expense',
     normal_balance VARCHAR(10)     NOT NULL COMMENT 'debit|credit',
     is_system      TINYINT(1)      NOT NULL DEFAULT 0,
-    description    TEXT            NOT NULL DEFAULT '',
+    description    TEXT            NOT NULL DEFAULT (''),
     created_at     DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at     DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
 
