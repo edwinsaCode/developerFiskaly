@@ -408,6 +408,105 @@ func TestIntegration_Scheme_KPR_FullJourney(t *testing.T) {
 	}
 }
 
+// ── Skenario D — 7D fix: pembayaran CUSTOMER pasca-Akad tidak boleh mengkredit
+// Dana Jaminan Bank ────────────────────────────────────────────────────────
+//
+// Bug (dilaporkan klien, UAT 2026-09-11): schemeCreditAccountForPayment jatuh
+// ke ResolveReceivableAccount(scheme_state) untuk source≠kpr_disbursement, dan
+// KPRPolicy.ResolveReceivableAccount mengembalikan FinancingReceivableAccount
+// (1-2200) selama state masih `akad` (yaitu SEBELUM pencairan bank pertama).
+// Akibatnya Penerimaan DP/Kelebihan Tanah PERTAMA setelah Akad — walau
+// sumbernya jelas dari CUSTOMER, bukan bank — salah mengkredit 1-2200.
+// Fix: source≠kpr_disbursement SELALU mengkredit akun piutang buyer sendiri
+// (ReceivableOrDefault), tidak pernah lewat resolusi berbasis state.
+func TestIntegration_Scheme_KPR_PostAkad_CustomerPayment_CreditsCustomerReceivable(t *testing.T) {
+	env := psSetup(t)
+	ctx := context.Background()
+	unitID := env.seedUnit(t, "KPR-D1")
+
+	c := env.kprContract(t, unitID)
+	plan, err := env.svc.GetSchedulePlan(ctx, psTenant, c.ID)
+	if err != nil {
+		t.Fatalf("GetSchedulePlan: %v", err)
+	}
+	if _, err := env.svc.CreatePaymentSchedule(ctx, psTenant, c.ID, plan); err != nil {
+		t.Fatalf("CreatePaymentSchedule: %v", err)
+	}
+
+	// DP 100jt pra-akad/pra-BAST → Uang Muka (perilaku lama, bukan yang diuji).
+	env.pay(t, c.ID, 100_000_000, sale.PaymentSourceCollection, nil)
+
+	env.event(t, c.ID, scheme.EventSubmittedToBank, nil)
+	env.event(t, c.ID, scheme.EventBankApproved, nil)
+	env.event(t, c.ID, scheme.EventAkad, nil)
+
+	// BAST dengan bank approved 700jt (< sisa 900jt) → split Akad: 1-2200 =
+	// min(approved, sisa) = 700jt; 1-2000 = sisa − 700jt = 200jt milik customer
+	// sendiri (persis contoh T-3 di kode: harga − DP − bank cair = piutang customer).
+	approved700 := domain.FromInt(700_000_000)
+	if _, err := env.svc.RecordAkad(ctx, psTenant, sale.RecordBASTRequest{
+		UnitID: unitID, SalePrice: domain.FromInt(1_000_000_000), BuyerRef: "Budi",
+		BASTDate:           time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC),
+		BankApprovedAmount: &approved700,
+	}); err != nil {
+		t.Fatalf("BAST pasca-akad: %v", err)
+	}
+	if got := env.unitAccountBalance(t, unitID, "1-2200"); got != "700000000" {
+		t.Fatalf("saldo 1-2200 pasca-BAST = %s, want 700000000", got)
+	}
+	if got := env.unitAccountBalance(t, unitID, "1-2000"); got != "200000000" {
+		t.Fatalf("saldo 1-2000 pasca-BAST = %s, want 200000000", got)
+	}
+
+	// BUG SCENARIO #1 (DP/Uang Muka): customer bayar langsung pasca-Akad,
+	// source=collection (bukan kpr_disbursement), scheme_state masih `akad`
+	// (belum ada pencairan bank sama sekali). Harus mengkredit 1-2000.
+	res := env.pay(t, c.ID, 50_000_000, sale.PaymentSourceCollection, nil)
+	if res.CreditAccount != accountCodePiutangForTest {
+		t.Fatalf("penerimaan DP customer pasca-akad harus kredit %s (Piutang Usaha), got %s", accountCodePiutangForTest, res.CreditAccount)
+	}
+	if got := env.unitAccountBalance(t, unitID, "1-2200"); got != "700000000" {
+		t.Errorf("Dana Jaminan Bank TIDAK BOLEH berkurang oleh pembayaran DP customer, got %s (want tetap 700000000)", got)
+	}
+	if got := env.unitAccountBalance(t, unitID, "1-2000"); got != "150000000" {
+		t.Errorf("saldo 1-2000 setelah DP customer = %s, want 150000000 (200jt - 50jt)", got)
+	}
+
+	// BUG SCENARIO #2 (Kelebihan Tanah): kategori kedua yang dilaporkan klien.
+	// Routing per `source`, bukan per `Kind`, jadi Kind boleh apa saja — yang
+	// diverifikasi adalah source=collection tetap kredit 1-2000, dan Dana
+	// Jaminan Bank tetap tidak tersentuh.
+	res2 := env.pay(t, c.ID, 30_000_000, sale.PaymentSourceCollection, nil)
+	if res2.CreditAccount != accountCodePiutangForTest {
+		t.Fatalf("penerimaan Kelebihan Tanah pasca-akad harus kredit %s, got %s", accountCodePiutangForTest, res2.CreditAccount)
+	}
+	if got := env.unitAccountBalance(t, unitID, "1-2200"); got != "700000000" {
+		t.Errorf("Dana Jaminan Bank tetap harus 700000000 setelah penerimaan Kelebihan Tanah, got %s", got)
+	}
+	if got := env.unitAccountBalance(t, unitID, "1-2000"); got != "120000000" {
+		t.Errorf("saldo 1-2000 setelah Kelebihan Tanah = %s, want 120000000 (150jt - 30jt)", got)
+	}
+
+	// KONTROL REGRESI (KPR Disbursement): pencairan bank SUNGGUHAN
+	// (source=kpr_disbursement) tetap harus mengkredit 1-2200, bukan 1-2000 —
+	// memastikan fix tidak menyapu bersih semua source ke Piutang Usaha.
+	res3 := env.pay(t, c.ID, 700_000_000, sale.PaymentSourceKPRDisbursement, &env.finSourceID)
+	if res3.CreditAccount != "1-2200" {
+		t.Fatalf("pencairan bank harus tetap kredit 1-2200, got %s", res3.CreditAccount)
+	}
+	if got := env.unitAccountBalance(t, unitID, "1-2200"); got != "0" {
+		t.Errorf("saldo 1-2200 setelah pencairan penuh = %s, want 0", got)
+	}
+	if got := env.unitAccountBalance(t, unitID, "1-2000"); got != "120000000" {
+		t.Errorf("pencairan bank TIDAK BOLEH mengubah saldo 1-2000, got %s, want tetap 120000000", got)
+	}
+}
+
+// accountCodePiutangForTest — Piutang Usaha, disalin sebagai literal di sini
+// (bukan import package internal) karena accountCodePiutang adalah const
+// tak-diekspor package sale; test ini ada di package sale_test.
+const accountCodePiutangForTest = "1-2000"
+
 func eventNames(evs []*sale.ContractPaymentEvent) []string {
 	out := make([]string, len(evs))
 	for i, e := range evs {

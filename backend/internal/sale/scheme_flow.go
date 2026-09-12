@@ -928,8 +928,20 @@ func (s *Service) schemeAkadGuard(ctx context.Context, tenantID, unitID uint64, 
 // ResolveReceivableAccount(state), yang berpindah ke Piutang Usaha begitu
 // state maju ke `disbursed` (dipicu OTOMATIS oleh pencairan PERTAMA) — akibatnya
 // pencairan ke-2/ke-3 salah mengkredit Piutang Usaha, bukan lagi mengurangi
-// Dana Jaminan Bank. Pembayaran BUKAN pencairan bank (mis. pelunasan langsung
-// oleh customer) tetap memakai resolusi berbasis state seperti semula.
+// Dana Jaminan Bank.
+//
+// 7D fix (UAT 2026-09-11): pembayaran BUKAN pencairan bank (DP/Uang Muka,
+// Kelebihan Tanah, cicilan langsung customer, dst.) SELALU mengkredit akun
+// piutang buyer sendiri (ReceivableOrDefault, mis. 1-2000) — TIDAK PERNAH
+// lewat ResolveReceivableAccount(state). ResolveReceivableAccount(state)
+// menjawab pertanyaan berbeda: "siapa yang berutang atas SISA KONTRAK
+// SECARA KESELURUHAN pada state ini" (dipakai schemeAkadGuard/reclass untuk
+// posting Akad & transisi state) — bukan "akun mana yang dikurangi OLEH
+// PEMBAYARAN INI". Bug lama: KPRPolicy.ResolveReceivableAccount mengembalikan
+// FinancingReceivableAccount selama StateAkad, jadi Penerimaan DP/Kelebihan
+// Tanah pertama setelah Akad (source≠kpr_disbursement) ikut mengkredit Dana
+// Jaminan Bank — padahal bank itu HANYA berkurang oleh pencairan bank
+// sungguhan. Uang dari customer tidak pernah boleh mengurangi kewajiban bank.
 func (s *Service) schemeCreditAccountForPayment(ctx context.Context, c *SaleContract, source PaymentSource) (string, bool) {
 	sctx, err := s.schemeContextFor(ctx, c)
 	if err != nil || sctx == nil {
@@ -938,7 +950,7 @@ func (s *Service) schemeCreditAccountForPayment(ctx context.Context, c *SaleCont
 	if source == PaymentSourceKPRDisbursement && sctx.params.FinancingReceivableAccount != "" {
 		return sctx.params.FinancingReceivableAccount, true
 	}
-	return sctx.policy.ResolveReceivableAccount(sctx.params, sctx.state), true
+	return sctx.params.ReceivableOrDefault(), true
 }
 
 // schemeAkadSplitAccounts (Item 7A, UAT 2026-09-07) me-resolve DUA akun yang
