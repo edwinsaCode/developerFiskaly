@@ -1,5 +1,5 @@
 import { apiFetch } from "./client";
-import type { Account, JournalEntry, JournalSummary, AccountingPeriod, ClosingPreview, ClosingResult } from "@/lib/types/api";
+import type { Account, AccountCategory, JournalEntry, JournalSummary, AccountingPeriod, ClosingPreview, ClosingResult } from "@/lib/types/api";
 
 // Ledger routes are mounted at /api/v1/ledger/* in the backend router.
 
@@ -23,7 +23,7 @@ export async function fetchAccount(token: string, id: number): Promise<Account> 
 
 export async function createAccount(
   token: string,
-  data: { code: string; name: string; type: string; description?: string },
+  data: { code: string; name: string; type: string; description?: string; account_category?: AccountCategory },
 ): Promise<Account> {
   return apiFetch<Account>("/ledger/accounts", { token, method: "POST", body: data });
 }
@@ -31,7 +31,7 @@ export async function createAccount(
 export async function updateAccount(
   token: string,
   id: number,
-  data: { name: string; description?: string; is_active: boolean },
+  data: { name: string; description?: string; is_active: boolean; account_category?: AccountCategory },
 ): Promise<Account> {
   return apiFetch<Account>(`/ledger/accounts/${id}`, { token, method: "PUT", body: data });
 }

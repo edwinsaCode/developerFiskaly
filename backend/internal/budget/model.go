@@ -244,6 +244,34 @@ type ItemRealisasiRow struct {
 	PersenRealisasi string         `json:"persen_realisasi"`
 }
 
+// SubcategoryRealisasiGroup adalah satu subkategori Konstruksi berikut item RAB
+// di dalamnya. Budgeted/Realisasi/Selisih/PersenRealisasi adalah TOTAL dari
+// Items (SUM, bukan rata-rata) — lihat Service.GetConstructionRealisasiTree.
+type SubcategoryRealisasiGroup struct {
+	Subcategory     domain.ConstructionSubcategory `json:"subcategory"`
+	Label           string                         `json:"label"`
+	Items           []*ItemRealisasiRow            `json:"items"`
+	Budgeted        string                         `json:"budgeted"`
+	Realisasi       string                         `json:"realisasi"`
+	Selisih         string                         `json:"selisih"`
+	PersenRealisasi string                         `json:"persen_realisasi"`
+}
+
+// ConstructionRealisasiTree adalah RAB vs Realisasi Konstruksi dalam hierarki
+// Subkategori → Item, untuk plan active di (project, phase). Groups hanya
+// memuat subkategori yang benar-benar dipakai di RAB ini (tidak ada baris
+// kosong untuk subkategori yang belum digunakan).
+type ConstructionRealisasiTree struct {
+	PlanID          uint64                       `json:"plan_id"`
+	ProjectID       uint64                       `json:"project_id"`
+	PhaseID         *uint64                      `json:"phase_id,omitempty"`
+	Groups          []*SubcategoryRealisasiGroup `json:"groups"`
+	Budgeted        string                       `json:"budgeted"`
+	Realisasi       string                       `json:"realisasi"`
+	Selisih         string                       `json:"selisih"`
+	PersenRealisasi string                       `json:"persen_realisasi"`
+}
+
 // RABvsRealisasiReport adalah laporan perbandingan RAB vs Realisasi untuk plan active.
 type RABvsRealisasiReport struct {
 	PlanID         uint64              `json:"plan_id"`

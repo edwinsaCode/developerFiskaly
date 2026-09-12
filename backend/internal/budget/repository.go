@@ -328,10 +328,72 @@ func (r *GORMRealisasiProvider) GetRealisasiByProject(ctx context.Context, tenan
 	return result, nil
 }
 
+type categoryRealisasiRow struct {
+	Category domain.CostCategory `gorm:"column:category"`
+	Total    domain.Money        `gorm:"column:total"`
+}
+
+// GetRealisasiByProjectCash: total realisasi KAS per kategori, dari cost_entries
+// (bukan saldo ledger). Lihat apPaidFractionSubquery untuk alasannya. Dipakai
+// KHUSUS laporan RAB vs Realisasi — HPP/closing/alokasi tetap pakai
+// GetRealisasiByProject (akrual, ledger SSOT), tidak berubah.
+func (r *GORMRealisasiProvider) GetRealisasiByProjectCash(ctx context.Context, tenantID, projectID uint64, phaseID *uint64) (map[domain.CostCategory]domain.Money, error) {
+	q := r.db.WithContext(ctx).
+		Table("cost_entries ce").
+		Select("ce.category, "+cashRealisasiExpr+" as total").
+		Joins("JOIN journal_entries je ON je.id = ce.journal_entry_id AND je.tenant_id = ce.tenant_id").
+		Joins("LEFT JOIN ("+apPaidFractionSubquery+") AS paid ON paid.invoice_id = ce.ap_invoice_id", tenantID, tenantID).
+		Where("ce.tenant_id = ? AND ce.project_id = ? AND je.posted_at IS NOT NULL", tenantID, projectID)
+	q = applyPhaseFilter(q, phaseID)
+
+	var rows []categoryRealisasiRow
+	if err := q.Group("ce.category").Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("budget: GetRealisasiByProjectCash: %w", err)
+	}
+	result := make(map[domain.CostCategory]domain.Money, len(rows))
+	for _, row := range rows {
+		result[row.Category] = row.Total
+	}
+	return result, nil
+}
+
 type itemRealisasiRow struct {
 	BudgetItemID uint64       `gorm:"column:budget_item_id"`
 	Total        domain.Money `gorm:"column:total"`
 }
+
+// apPaidFraction adalah subquery: fraksi tagihan vendor yang SUDAH DIBAYAR
+// (Σ alokasi aktif / payable_amount, dibatasi maksimum 1) per tagihan.
+//
+// KENAPA ADA QUERY KEDUA INI, BUKAN CUKUP ledger.ActualCostByCode: PostInvoice
+// mengakui KEWAJIBAN PENUH begitu tagihan diposting (akrual — benar secara
+// akuntansi: Dr Persediaan / Cr Hutang Usaha untuk nilai penuh). Itu membuat
+// "actual posted cost" versi ledger sudah 100% sejak tagihan terbit, walau
+// baru sebagian dibayar. *Cash di bawah menjawab pertanyaan yang berbeda —
+// khusus laporan RAB vs Realisasi — "seberapa jauh KAS sudah benar-benar
+// keluar", dengan memprorata cost entry yang lahir dari tagihan vendor
+// (ce.ap_invoice_id NOT NULL) sebesar fraksi yang sudah dibayar. Cost entry
+// langsung kas (ap_invoice_id NULL) sudah 100% kas saat diposting — tidak
+// diprorata. Ledger SSOT (ActualCostByCode, dipakai HPP/closing/alokasi/
+// dashboard) TIDAK disentuh oleh query ini sama sekali.
+const apPaidFractionSubquery = `
+	SELECT ai.id AS invoice_id,
+	       CASE WHEN ai.payable_amount = 0 THEN 0
+	            ELSE LEAST(1, COALESCE(paid.total, 0) / ai.payable_amount)
+	       END AS fraction
+	FROM ap_invoices ai
+	LEFT JOIN (
+		SELECT invoice_id, SUM(amount) AS total
+		FROM ap_payment_allocations
+		WHERE tenant_id = ? AND reversed_at IS NULL
+		GROUP BY invoice_id
+	) paid ON paid.invoice_id = ai.id
+	WHERE ai.tenant_id = ?
+`
+
+// cashRealisasiExpr adalah ekspresi SQL Σ yang dipakai *Cash di bawah: penuh
+// untuk cost entry langsung kas, diprorata untuk cost entry dari tagihan vendor.
+const cashRealisasiExpr = `SUM(CASE WHEN ce.ap_invoice_id IS NULL THEN ce.amount ELSE ce.amount * COALESCE(paid.fraction, 0) END)`
 
 // GetRealisasiPerItem mengembalikan Σ amount per budget_item_id dari cost_entries.
 // Hanya baris yang budget_item_id-nya cocok dengan item di plan ini yang dihitung.
@@ -350,6 +412,31 @@ func (r *GORMRealisasiProvider) GetRealisasiPerItem(ctx context.Context, tenantI
 		Scan(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("budget: GetRealisasiPerItem: %w", err)
+	}
+	result := make(map[uint64]domain.Money, len(rows))
+	for _, row := range rows {
+		result[row.BudgetItemID] = row.Total
+	}
+	return result, nil
+}
+
+// GetRealisasiPerItemCash: sama seperti GetRealisasiPerItem, tapi cost entry
+// yang lahir dari tagihan vendor (ce.ap_invoice_id NOT NULL) diprorata sebesar
+// fraksi tagihan yang sudah dibayar. Lihat apPaidFractionSubquery.
+func (r *GORMRealisasiProvider) GetRealisasiPerItemCash(ctx context.Context, tenantID, planID uint64) (map[uint64]domain.Money, error) {
+	var rows []itemRealisasiRow
+	err := r.db.WithContext(ctx).
+		Table("cost_entries ce").
+		Select("ce.budget_item_id, "+cashRealisasiExpr+" as total").
+		Joins("JOIN budget_items bi ON bi.id = ce.budget_item_id AND bi.tenant_id = ce.tenant_id").
+		Joins("JOIN journal_entries je ON je.id = ce.journal_entry_id AND je.tenant_id = ce.tenant_id").
+		Joins("LEFT JOIN ("+apPaidFractionSubquery+") AS paid ON paid.invoice_id = ce.ap_invoice_id", tenantID, tenantID).
+		Where("ce.tenant_id = ? AND bi.budget_plan_id = ? AND ce.budget_item_id IS NOT NULL AND je.posted_at IS NOT NULL",
+			tenantID, planID).
+		Group("ce.budget_item_id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("budget: GetRealisasiPerItemCash: %w", err)
 	}
 	result := make(map[uint64]domain.Money, len(rows))
 	for _, row := range rows {

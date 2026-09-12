@@ -61,15 +61,16 @@ func (r *GORMRepository) CreateAccount(ctx context.Context, a *Account) error {
 	return nil
 }
 
-// UpdateAccount updates a mutable account fields (name, description, is_active).
-// Code and type are immutable after creation. Returns ErrAccountNotFound if not found.
-func (r *GORMRepository) UpdateAccount(ctx context.Context, tenantID, id uint64, name, description string, isActive bool) error {
+// UpdateAccount updates a mutable account fields (name, description, is_active,
+// category). Code and type are immutable after creation. Returns ErrAccountNotFound if not found.
+func (r *GORMRepository) UpdateAccount(ctx context.Context, tenantID, id uint64, name, description string, isActive bool, category AccountCategory) error {
 	res := r.db.WithContext(ctx).Model(&Account{}).
 		Where("id = ? AND tenant_id = ?", id, tenantID).
 		Updates(map[string]interface{}{
 			"name":        name,
 			"description": description,
 			"is_active":   isActive,
+			"category":    category,
 		})
 	if res.Error != nil {
 		return fmt.Errorf("UpdateAccount: %w", res.Error)

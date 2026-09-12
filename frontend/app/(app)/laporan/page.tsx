@@ -12,7 +12,7 @@ import {
   fetchTrialBalance,
   fetchGeneralLedger,
 } from "@/lib/api/reports";
-import { fetchRABvsRealisasi } from "@/lib/api/budget";
+import { fetchRABvsRealisasi, fetchConstructionRealisasi } from "@/lib/api/budget";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { LaporanNavClient } from "@/components/laporan/LaporanNavClient";
 import { ExportCsvButton } from "@/components/laporan/ExportCsvButton";
@@ -24,7 +24,7 @@ import { PipelineSection } from "@/components/laporan/PipelineSection";
 import { TaxSection } from "@/components/laporan/TaxSection";
 import { TrialBalanceSection } from "@/components/laporan/TrialBalanceSection";
 import { RABvsRealisasiSection } from "@/components/rab/RABvsRealisasiSection";
-import type { NeracaReport, PLReport, ArusKasReport, PipelineReport, TaxLiabilityReport, TrialBalance, LedgerEntry, RABvsRealisasiReport } from "@/lib/types/api";
+import type { NeracaReport, PLReport, ArusKasReport, PipelineReport, TaxLiabilityReport, TrialBalance, LedgerEntry, RABvsRealisasiReport, ConstructionRealisasiTree } from "@/lib/types/api";
 
 const today = () => todayLocalStr();
 const monthStart = () => monthStartLocalStr();
@@ -78,6 +78,7 @@ export default async function LaporanPage({ searchParams }: PageProps) {
 
   let rabRealisasiData: RABvsRealisasiReport | null = null;
   let rabRealisasiError = false;
+  let constructionTreeData: ConstructionRealisasiTree | null = null;
 
   if (tab === "neraca") {
     [neracaData, neracaError] = await safe(fetchNeraca(token, asOf, startDate || undefined));
@@ -106,6 +107,7 @@ export default async function LaporanPage({ searchParams }: PageProps) {
   } else if (tab === "rab-realisasi") {
     if (projectId) {
       [rabRealisasiData, rabRealisasiError] = await safe(fetchRABvsRealisasi(token, projectId));
+      [constructionTreeData] = await safe(fetchConstructionRealisasi(token, projectId));
     }
   }
 
@@ -187,7 +189,7 @@ export default async function LaporanPage({ searchParams }: PageProps) {
               />
             </div>
           ) : (
-            <RABvsRealisasiSection report={rabRealisasiData} error={rabRealisasiError} />
+            <RABvsRealisasiSection report={rabRealisasiData} error={rabRealisasiError} constructionTree={constructionTreeData} />
           )
         )}
         {tab === "pipeline" && (

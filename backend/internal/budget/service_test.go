@@ -256,6 +256,14 @@ func (m *mockRealisasiProvider) GetRealisasiPerItem(_ context.Context, _, _ uint
 	return make(map[uint64]domain.Money), nil
 }
 
+func (m *mockRealisasiProvider) GetRealisasiByProjectCash(ctx context.Context, tenantID, projectID uint64, phaseID *uint64) (map[domain.CostCategory]domain.Money, error) {
+	return m.GetRealisasiByProject(ctx, tenantID, projectID, phaseID)
+}
+
+func (m *mockRealisasiProvider) GetRealisasiPerItemCash(ctx context.Context, tenantID, planID uint64) (map[uint64]domain.Money, error) {
+	return m.GetRealisasiPerItem(ctx, tenantID, planID)
+}
+
 // ── builder ───────────────────────────────────────────────────────────────────
 
 func buildService(store *mockBudgetStore, r *mockRealisasiProvider) *budget.Service {

@@ -73,6 +73,7 @@ func (h *Handler) Mount(r chi.Router) {
 	// RAB vs Realisasi: per-kategori dan per-item
 	r.Get("/projects/{projectID}/budget/rab-vs-realisasi", h.rabVsRealisasi)
 	r.Get("/projects/{projectID}/budget/realisasi-per-item", h.realisasiPerItem)
+	r.Get("/projects/{projectID}/budget/realisasi-konstruksi", h.realisasiKonstruksi)
 }
 
 // ── Plan handlers ─────────────────────────────────────────────────────────────
@@ -359,6 +360,31 @@ func (h *Handler) realisasiPerItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeBudgetJSON(w, http.StatusOK, rows)
+}
+
+func (h *Handler) realisasiKonstruksi(w http.ResponseWriter, r *http.Request) {
+	tenantID, err := budgetTenantID(r)
+	if err != nil {
+		writeBudgetError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	projectID, err := parseBudgetUint(r, "projectID")
+	if err != nil {
+		writeBudgetError(w, http.StatusBadRequest, "projectID tidak valid")
+		return
+	}
+	phaseID := parseOptionalQueryUint(r, "phase_id")
+
+	tree, err := h.svc.GetConstructionRealisasiTree(r.Context(), tenantID, projectID, phaseID)
+	if err != nil {
+		if errors.Is(err, ErrNoActivePlan) {
+			writeBudgetError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeBudgetError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeBudgetJSON(w, http.StatusOK, tree)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

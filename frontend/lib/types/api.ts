@@ -286,6 +286,43 @@ export interface RABvsRealisasiReport {
   status: "sehat" | "waspada" | "over";
 }
 
+// ── RAB vs Realisasi Konstruksi (hierarki) ──────────────────────────────────
+// Beda dari RABvsRealisasiRow: field persen_realisasi di sini SUDAH string
+// berformat "27.78%" (bukan fraksi mentah) — jangan dilewatkan ke <Persen>,
+// tampilkan langsung sebagai teks.
+
+export interface ItemRealisasiRow {
+  item_id: number;
+  category: BudgetCategory;
+  subcategory?: string;
+  description?: string;
+  budgeted: string;
+  realisasi: string;
+  selisih: string;
+  persen_realisasi: string;
+}
+
+export interface SubcategoryRealisasiGroup {
+  subcategory: string;
+  label: string;
+  items: ItemRealisasiRow[];
+  budgeted: string;
+  realisasi: string;
+  selisih: string;
+  persen_realisasi: string;
+}
+
+export interface ConstructionRealisasiTree {
+  plan_id: number;
+  project_id: number;
+  phase_id?: number;
+  groups: SubcategoryRealisasiGroup[];
+  budgeted: string;
+  realisasi: string;
+  selisih: string;
+  persen_realisasi: string;
+}
+
 // ── Biaya (Cost Entry) ────────────────────────────────────────────────────────
 // 6 kategori valid untuk CostEntry (client final note 2026-09-10: Pemasaran +
 // Lain-lain kini tersedia di Form Biaya, sama seperti RAB — lihat BudgetCategory).

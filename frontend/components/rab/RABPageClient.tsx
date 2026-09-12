@@ -1,7 +1,7 @@
 "use client";
 
 import { Tabs, TabList, TabTrigger, TabPanel } from "@/components/ui/Tabs";
-import type { BudgetPlan, BudgetItem, ProjectPhase, RABvsRealisasiReport } from "@/lib/types/api";
+import type { BudgetPlan, BudgetItem, ProjectPhase, RABvsRealisasiReport, ConstructionRealisasiTree } from "@/lib/types/api";
 import { RABManager } from "./RABManager";
 import { RABvsRealisasiSection } from "./RABvsRealisasiSection";
 
@@ -15,6 +15,7 @@ interface RABPageClientProps {
   canWrite: boolean;
   rabVsRealisasi: RABvsRealisasiReport | null;
   rabVsRealisasiError: boolean;
+  constructionTree?: ConstructionRealisasiTree | null;
 }
 
 export function RABPageClient({
@@ -25,6 +26,7 @@ export function RABPageClient({
   canWrite,
   rabVsRealisasi,
   rabVsRealisasiError,
+  constructionTree,
 }: RABPageClientProps) {
   return (
     <Tabs defaultTab="versi">
@@ -45,6 +47,7 @@ export function RABPageClient({
         <RABvsRealisasiSection
           report={rabVsRealisasi}
           error={rabVsRealisasiError}
+          constructionTree={constructionTree}
         />
       </TabPanel>
     </Tabs>

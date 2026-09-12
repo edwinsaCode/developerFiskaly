@@ -840,7 +840,7 @@ func TestConsistency_FinancialNumbers(t *testing.T) {
 
 	// ═════ #13 ACTUAL COST — S5 DONE (keputusan PO #2): SATU definisi ═════
 	// Kanonik = ledger, netting debit − kredit-reversal (relief BAST TIDAK
-	// mengurangi). Dashboard == cost repo == budget realisasi — permanen.
+	// mengurangi). Dashboard == cost repo — permanen.
 	t.Run("EQ_ActualCost_Dashboard_vs_CostRepo", func(t *testing.T) {
 		costRepo := cost.NewGORMRepository(env.db)
 		bd, err := costRepo.AccumulatedByProject(ctx, eqTenant, env.projectID)
@@ -855,14 +855,23 @@ func TestConsistency_FinancialNumbers(t *testing.T) {
 		moneyEq(t, "actual cost: relief BAST tidak mengurangi (PO #2)",
 			dp.ActualCost, domain.FromInt(300_000_000).String())
 
-		// Budget realisasi (RAB vs Realisasi) membaca sumber yang SAMA.
+		// Budget realisasi (RAB vs Realisasi) SENGAJA MENYIMPANG di sini —
+		// keputusan klien: laporan RAB vs Realisasi memakai basis KAS
+		// (GetRABvsRealisasi → GetRealisasiByProjectCash), bukan akrual, KHUSUS
+		// laporan ini. Dashboard/cost-repo/HPP/closing/alokasi tetap akrual
+		// (ledger, tidak berubah). Skenario ini memposting 300jt LANGSUNG ke
+		// ledger (Dr 1-3100 / Cr 2-1000 — liability, BUKAN kas/bank) via
+		// postCost, tanpa lewat cost_entries/AP invoice sama sekali — jadi
+		// dari sudut pandang kas, belum ada rupiah yang benar-benar dibayar:
+		// realisasi kas = 0, meskipun akrualnya sudah 300jt. Ini BUKAN bug;
+		// ini justru bukti cash-basis bekerja benar (biaya yang baru diaKUI,
+		// belum dibayar tunai, tidak dihitung sebagai "sudah terealisasi kas").
 		rr, err := env.budgetSvc.GetRABvsRealisasi(ctx, eqTenant, env.projectID, nil)
 		if err != nil {
 			t.Fatalf("GetRABvsRealisasi: %v", err)
 		}
-		// Skenario tanpa biaya expense (marketing/other) → total realisasi ==
-		// kapitalisasi == dashboard actual_cost.
-		moneyEq(t, "actual cost: budget TotalRealisasi vs dashboard", rr.TotalRealisasi, dp.ActualCost)
+		moneyEq(t, "actual cost: budget TotalRealisasi (kas, sengaja 0 — biaya belum dibayar tunai)",
+			rr.TotalRealisasi, domain.Zero.String())
 	})
 
 	// ═════ Rule #6 (UAT 2026-09-03) PERSEDIAAN — Neraca vs kapitalisasi dikurangi HPP relieved ═════

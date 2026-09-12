@@ -38,6 +38,18 @@ func (m *mockRealisasiProviderFull) GetRealisasiPerItem(
 	return m.byItemID, nil
 }
 
+func (m *mockRealisasiProviderFull) GetRealisasiByProjectCash(
+	ctx context.Context, tenantID, projectID uint64, phaseID *uint64,
+) (map[domain.CostCategory]domain.Money, error) {
+	return m.GetRealisasiByProject(ctx, tenantID, projectID, phaseID)
+}
+
+func (m *mockRealisasiProviderFull) GetRealisasiPerItemCash(
+	ctx context.Context, tenantID, planID uint64,
+) (map[uint64]domain.Money, error) {
+	return m.GetRealisasiPerItem(ctx, tenantID, planID)
+}
+
 func buildServiceFull(store *mockBudgetStore, r *mockRealisasiProviderFull) *budget.Service {
 	return budget.NewService(store, r)
 }

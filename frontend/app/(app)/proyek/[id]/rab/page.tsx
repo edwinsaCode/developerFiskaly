@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import { getTokenAndRole } from "@/lib/auth";
 import { fetchProject, fetchPhases } from "@/lib/api/projects";
-import { fetchBudgetPlans, fetchBudgetItems, fetchRABvsRealisasi } from "@/lib/api/budget";
+import { fetchBudgetPlans, fetchBudgetItems, fetchRABvsRealisasi, fetchConstructionRealisasi } from "@/lib/api/budget";
 import { ApiError } from "@/lib/api/client";
 import type { BudgetItem } from "@/lib/types/api";
 import { Card } from "@/components/ui/Card";
@@ -50,11 +50,17 @@ export default async function RABPage({ params }: PageProps) {
   // RAB vs Realisasi — hanya jika ada plan aktif
   let rabVsRealisasi = null;
   let rabVsRealisasiError = false;
+  let constructionTree = null;
   if (plans.some(p => p.status === "active")) {
     try {
       rabVsRealisasi = await fetchRABvsRealisasi(token, projectId);
     } catch {
       rabVsRealisasiError = true;
+    }
+    try {
+      constructionTree = await fetchConstructionRealisasi(token, projectId);
+    } catch {
+      // Non-blocking: baris Konstruksi tetap tampil tanpa detail hierarki.
     }
   }
 
@@ -95,6 +101,7 @@ export default async function RABPage({ params }: PageProps) {
         canWrite={canWrite}
         rabVsRealisasi={rabVsRealisasi}
         rabVsRealisasiError={rabVsRealisasiError}
+        constructionTree={constructionTree}
       />
     </div>
   );

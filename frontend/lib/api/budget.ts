@@ -1,5 +1,5 @@
 import { apiFetch } from "./client";
-import type { BudgetPlan, BudgetItem, BudgetCategory, RABvsRealisasiReport } from "@/lib/types/api";
+import type { BudgetPlan, BudgetItem, BudgetCategory, RABvsRealisasiReport, ConstructionRealisasiTree } from "@/lib/types/api";
 
 export async function fetchBudgetPlans(token: string, projectId: number): Promise<BudgetPlan[]> {
   return apiFetch<BudgetPlan[]>(`/projects/${projectId}/budget-plans`, { token });
@@ -62,6 +62,19 @@ export async function fetchRABvsRealisasi(
 ): Promise<RABvsRealisasiReport> {
   return apiFetch<RABvsRealisasiReport>(
     `/projects/${projectId}/budget/rab-vs-realisasi`,
+    { token },
+  );
+}
+
+// Detail RAB Konstruksi (Produksi Subsidi/Komersial, Sarana & Prasarana,
+// Perizinan) sampai ke item RAB individual — dipakai untuk pecah baris
+// "Konstruksi" pada RAB vs Realisasi menjadi hierarki penuh.
+export async function fetchConstructionRealisasi(
+  token: string,
+  projectId: number,
+): Promise<ConstructionRealisasiTree> {
+  return apiFetch<ConstructionRealisasiTree>(
+    `/projects/${projectId}/budget/realisasi-konstruksi`,
     { token },
   );
 }

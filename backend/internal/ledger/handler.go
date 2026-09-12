@@ -40,7 +40,7 @@ type AccountWriter interface {
 
 // AccountUpdater handles account mutation (subset of GORMRepository).
 type AccountUpdater interface {
-	UpdateAccount(ctx context.Context, tenantID, id uint64, name, description string, isActive bool) error
+	UpdateAccount(ctx context.Context, tenantID, id uint64, name, description string, isActive bool, category AccountCategory) error
 }
 
 // DraftStore manages draft (unposted) journals (subset of JournalStore).
@@ -308,9 +308,10 @@ func (h *Handler) getAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateAccountRequest struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	IsActive    bool   `json:"is_active"`
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	IsActive        bool   `json:"is_active"`
+	AccountCategory string `json:"account_category"` // cash|bank|other_asset (opsional; kosong = pertahankan nilai lama)
 }
 
 func (h *Handler) updateAccount(w http.ResponseWriter, r *http.Request) {
@@ -333,7 +334,20 @@ func (h *Handler) updateAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name required")
 		return
 	}
-	if err := h.updater.UpdateAccount(r.Context(), tenantID, id, req.Name, req.Description, req.IsActive); err != nil {
+	existing, err := h.query.GetAccount(r.Context(), tenantID, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "akun tidak ditemukan")
+		return
+	}
+	category := existing.Category
+	if req.AccountCategory != "" {
+		category = AccountCategory(req.AccountCategory)
+		if !category.IsValid() {
+			writeError(w, http.StatusBadRequest, ErrInvalidCategory.Error())
+			return
+		}
+	}
+	if err := h.updater.UpdateAccount(r.Context(), tenantID, id, req.Name, req.Description, req.IsActive, category); err != nil {
 		if errors.Is(err, ErrAccountNotFound) {
 			writeError(w, http.StatusNotFound, "akun tidak ditemukan")
 			return

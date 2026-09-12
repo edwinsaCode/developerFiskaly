@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import type { Account, AccountType } from "@/lib/types/api";
+import type { Account, AccountType, AccountCategory } from "@/lib/types/api";
 import { fetchAccounts, createAccount, updateAccount } from "@/lib/api/ledger";
 import { Button } from "@/components/ui/Button";
 import { Input, Select } from "@/components/ui/Input";
@@ -29,6 +29,15 @@ const NB_LABELS: Record<string, string> = {
   credit: "K",
 };
 
+// Kategori kas/bank hanya bermakna untuk akun bertipe Aset — inilah yang
+// dipakai dropdown "Sumber Dana" (ledger.ListCashBankAccounts) untuk memutuskan
+// apakah sebuah akun aset boleh dipilih sebagai tujuan pembayaran.
+const CATEGORY_LABELS: Record<Exclude<AccountCategory, "">, string> = {
+  cash: "Kas",
+  bank: "Bank",
+  other_asset: "Aset Lain (bukan sumber dana)",
+};
+
 // Palet token "Warm Ledger" — kategori akun tetap dapat dibedakan tanpa
 // tabrakan warna; revenue/expense pakai semantik konvensional (hijau/merah).
 const TYPE_COLOR: Record<AccountType, string> = {
@@ -47,6 +56,7 @@ interface FormState {
   type: AccountType;
   description: string;
   is_active: boolean;
+  account_category: Exclude<AccountCategory, "">;
 }
 
 const EMPTY_FORM: FormState = {
@@ -55,6 +65,7 @@ const EMPTY_FORM: FormState = {
   type: "asset",
   description: "",
   is_active: true,
+  account_category: "other_asset",
 };
 
 // ── Auto-numbering ────────────────────────────────────────────────────────────
@@ -124,11 +135,12 @@ export function COAManager({ token }: Props) {
 
   function openEdit(account: Account) {
     setForm({
-      code:        account.code,
-      name:        account.name,
-      type:        account.type,
-      description: account.description ?? "",
-      is_active:   account.is_active,
+      code:             account.code,
+      name:             account.name,
+      type:             account.type,
+      description:      account.description ?? "",
+      is_active:        account.is_active,
+      account_category: (account.account_category || "other_asset") as Exclude<AccountCategory, "">,
     });
     setFormError(null);
     setModal({ mode: "edit", account });
@@ -150,16 +162,18 @@ export function COAManager({ token }: Props) {
     try {
       if (modal?.mode === "add") {
         await createAccount(token, {
-          code:        form.code.trim(),
-          name:        form.name.trim(),
-          type:        form.type,
-          description: form.description.trim() || undefined,
+          code:             form.code.trim(),
+          name:             form.name.trim(),
+          type:             form.type,
+          description:      form.description.trim() || undefined,
+          account_category: form.type === "asset" ? form.account_category : undefined,
         });
       } else if (modal?.mode === "edit" && modal.account) {
         await updateAccount(token, modal.account.id, {
-          name:        form.name.trim(),
-          description: form.description.trim(),
-          is_active:   form.is_active,
+          name:             form.name.trim(),
+          description:      form.description.trim(),
+          is_active:        form.is_active,
+          account_category: form.type === "asset" ? form.account_category : undefined,
         });
       }
       closeModal();
@@ -413,6 +427,20 @@ export function COAManager({ token }: Props) {
               ))}
             </Select>
           </div>
+
+          {form.type === "asset" && (
+            <Select
+              label="Kategori"
+              required
+              value={form.account_category}
+              onChange={(e) => setForm((f) => ({ ...f, account_category: e.target.value as Exclude<AccountCategory, ""> }))}
+              hint="Kas/Bank = muncul sebagai pilihan Sumber Dana di pembayaran & biaya; Aset Lain = tidak"
+            >
+              {(Object.keys(CATEGORY_LABELS) as Exclude<AccountCategory, "">[]).map((c) => (
+                <option key={c} value={c}>{CATEGORY_LABELS[c]}</option>
+              ))}
+            </Select>
+          )}
 
           <Input
             label="Nama Akun"

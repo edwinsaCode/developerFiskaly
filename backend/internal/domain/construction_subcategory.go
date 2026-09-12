@@ -37,6 +37,24 @@ func (c ConstructionSubcategory) Valid() bool {
 	}
 }
 
+// Label mengembalikan nama tampilan subkategori — SSOT untuk teks yang dilihat
+// pengguna (RAB vs Realisasi Konstruksi), supaya tidak ada package lain yang
+// menuliskan ulang label ini sebagai string literal.
+func (c ConstructionSubcategory) Label() string {
+	switch c {
+	case ConstructionProduksiSubsidi:
+		return "Produksi Subsidi"
+	case ConstructionProduksiKomersial:
+		return "Produksi Komersial"
+	case ConstructionSaranaPrasarana:
+		return "Sarana & Prasarana"
+	case ConstructionPerizinan:
+		return "Perizinan"
+	default:
+		return string(c)
+	}
+}
+
 // RestrictsToTaxCategory mengembalikan TaxCategory yang berhak menerima HPP
 // dari subkategori ini, dan true bila subkategori ini memang dibatasi.
 // Sarana & Prasarana dan Perizinan mengembalikan (_, false) — dialokasikan ke

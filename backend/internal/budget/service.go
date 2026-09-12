@@ -37,6 +37,16 @@ type RealisasiProvider interface {
 	// dalam plan tersebut. Hanya cost entry dengan budget_item_id yang cocok yang dihitung.
 	// Cost entry tanpa budget_item_id tidak masuk ke sini (masuk ke GetRealisasiByProject).
 	GetRealisasiPerItem(ctx context.Context, tenantID, planID uint64) (map[uint64]domain.Money, error)
+
+	// GetRealisasiByProjectCash dan GetRealisasiPerItemCash adalah versi KAS dari
+	// dua method di atas: cost entry dari tagihan vendor (AP invoice) diprorata
+	// sebesar fraksi yang SUDAH DIBAYAR, bukan nilai penuh yang diakui saat
+	// tagihan diposting (akrual). Dipakai KHUSUS laporan RAB vs Realisasi
+	// (GetRABvsRealisasi, GetItemsRealisasi, GetConstructionRealisasiTree) —
+	// HPP/closing/alokasi/dashboard tetap pakai versi akrual di atas, tidak
+	// berubah. Lihat GORMRealisasiProvider.apPaidFractionSubquery.
+	GetRealisasiByProjectCash(ctx context.Context, tenantID, projectID uint64, phaseID *uint64) (map[domain.CostCategory]domain.Money, error)
+	GetRealisasiPerItemCash(ctx context.Context, tenantID, planID uint64) (map[uint64]domain.Money, error)
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -325,9 +335,9 @@ func (s *Service) GetRABvsRealisasi(ctx context.Context, tenantID, projectID uin
 		return nil, fmt.Errorf("SumItemsByCategory: %w", err)
 	}
 
-	realisasiByCC, err := s.realisasi.GetRealisasiByProject(ctx, tenantID, projectID, phaseID)
+	realisasiByCC, err := s.realisasi.GetRealisasiByProjectCash(ctx, tenantID, projectID, phaseID)
 	if err != nil {
-		return nil, fmt.Errorf("GetRealisasiByProject: %w", err)
+		return nil, fmt.Errorf("GetRealisasiByProjectCash: %w", err)
 	}
 
 	var (
@@ -407,24 +417,15 @@ func (s *Service) GetItemsRealisasi(ctx context.Context, tenantID, projectID uin
 		return nil, fmt.Errorf("GetItemsRealisasi: ListItemsByPlan: %w", err)
 	}
 
-	realisasiPerItem, err := s.realisasi.GetRealisasiPerItem(ctx, tenantID, plan.ID)
+	realisasiPerItem, err := s.realisasi.GetRealisasiPerItemCash(ctx, tenantID, plan.ID)
 	if err != nil {
-		return nil, fmt.Errorf("GetItemsRealisasi: GetRealisasiPerItem: %w", err)
+		return nil, fmt.Errorf("GetItemsRealisasi: GetRealisasiPerItemCash: %w", err)
 	}
 
 	rows := make([]*ItemRealisasiRow, 0, len(items))
 	for _, item := range items {
 		r := realisasiPerItem[item.ID] // domain.Money zero value jika tidak ada cost entry tertaut
 		selisih := item.BudgetedAmount.Sub(r)
-
-		var persen string
-		if item.BudgetedAmount.IsZero() {
-			persen = "N/A"
-		} else {
-			p := r.Decimal().Div(item.BudgetedAmount.Decimal()).Mul(decimal.NewFromInt(100))
-			f64, _ := p.Float64()
-			persen = fmt.Sprintf("%.2f%%", f64)
-		}
 
 		rows = append(rows, &ItemRealisasiRow{
 			ItemID:          item.ID,
@@ -434,8 +435,111 @@ func (s *Service) GetItemsRealisasi(ctx context.Context, tenantID, projectID uin
 			Budgeted:        item.BudgetedAmount.String(),
 			Realisasi:       r.String(),
 			Selisih:         selisih.String(),
-			PersenRealisasi: persen,
+			PersenRealisasi: percentString(r, item.BudgetedAmount),
 		})
 	}
 	return rows, nil
+}
+
+// percentString menghitung realisasi/budget × 100, format "12.34%" — "N/A" bila
+// budget nol. SATU-SATUNYA tempat rumus ini ditulis untuk laporan RAB vs
+// Realisasi (item, subkategori, maupun kategori Konstruksi) — supaya
+// pembulatan/formatnya tidak pernah berbeda antar level.
+func percentString(realisasi, budgeted domain.Money) string {
+	if budgeted.IsZero() {
+		return "N/A"
+	}
+	p := realisasi.Decimal().Div(budgeted.Decimal()).Mul(decimal.NewFromInt(100))
+	f64, _ := p.Float64()
+	return fmt.Sprintf("%.2f%%", f64)
+}
+
+// ── GetConstructionRealisasiTree ──────────────────────────────────────────────
+
+// GetConstructionRealisasiTree menghasilkan RAB vs Realisasi Konstruksi dalam
+// HIERARKI Subkategori → Item RAB, untuk plan active di (project, phase).
+//
+// Tidak ada nama item yang di-hardcode: pengelompokan hanya memakai 4
+// subkategori kanonik (domain.ConstructionSubcategory, SUDAH WAJIB diisi saat
+// item dibuat — lihat AddItem), item di dalamnya persis apa yang dibuat user
+// di RAB. Subkategori tanpa item disembunyikan (bukan baris kosong).
+//
+// Total subkategori/Konstruksi = SUM item anak (budgeted & realisasi masing-
+// masing dijumlah dulu), lalu persentase dihitung dari total itu — BUKAN
+// rata-rata persentase anak (step 11-12 permintaan klien).
+func (s *Service) GetConstructionRealisasiTree(ctx context.Context, tenantID, projectID uint64, phaseID *uint64) (*ConstructionRealisasiTree, error) {
+	plan, err := s.store.FindActivePlan(ctx, tenantID, projectID, phaseID)
+	if err != nil {
+		return nil, ErrNoActivePlan
+	}
+
+	items, err := s.store.ListItemsByPlan(ctx, tenantID, plan.ID)
+	if err != nil {
+		return nil, fmt.Errorf("GetConstructionRealisasiTree: ListItemsByPlan: %w", err)
+	}
+
+	realisasiPerItem, err := s.realisasi.GetRealisasiPerItemCash(ctx, tenantID, plan.ID)
+	if err != nil {
+		return nil, fmt.Errorf("GetConstructionRealisasiTree: GetRealisasiPerItemCash: %w", err)
+	}
+
+	bySub := make(map[domain.ConstructionSubcategory][]*ItemRealisasiRow, len(domain.AllConstructionSubcategories))
+	for _, item := range items {
+		if item.Category != BudgetCategoryConstruction {
+			continue
+		}
+		sub := domain.ConstructionSubcategory(item.Subcategory)
+		r := realisasiPerItem[item.ID]
+		bySub[sub] = append(bySub[sub], &ItemRealisasiRow{
+			ItemID:          item.ID,
+			Category:        item.Category,
+			Subcategory:     item.Subcategory,
+			Description:     item.Description,
+			Budgeted:        item.BudgetedAmount.String(),
+			Realisasi:       r.String(),
+			Selisih:         item.BudgetedAmount.Sub(r).String(),
+			PersenRealisasi: percentString(r, item.BudgetedAmount),
+		})
+	}
+
+	var (
+		groups         []*SubcategoryRealisasiGroup
+		totalBudgeted  domain.Money
+		totalRealisasi domain.Money
+	)
+	for _, sub := range domain.AllConstructionSubcategories {
+		rows, ok := bySub[sub]
+		if !ok {
+			continue // subkategori yang belum dipakai di RAB ini — tidak ditampilkan
+		}
+		var gBudgeted, gRealisasi domain.Money
+		for _, row := range rows {
+			b, _ := domain.NewMoney(row.Budgeted)
+			r, _ := domain.NewMoney(row.Realisasi)
+			gBudgeted = gBudgeted.Add(b)
+			gRealisasi = gRealisasi.Add(r)
+		}
+		groups = append(groups, &SubcategoryRealisasiGroup{
+			Subcategory:     sub,
+			Label:           sub.Label(),
+			Items:           rows,
+			Budgeted:        gBudgeted.String(),
+			Realisasi:       gRealisasi.String(),
+			Selisih:         gBudgeted.Sub(gRealisasi).String(),
+			PersenRealisasi: percentString(gRealisasi, gBudgeted),
+		})
+		totalBudgeted = totalBudgeted.Add(gBudgeted)
+		totalRealisasi = totalRealisasi.Add(gRealisasi)
+	}
+
+	return &ConstructionRealisasiTree{
+		PlanID:          plan.ID,
+		ProjectID:       plan.ProjectID,
+		PhaseID:         plan.PhaseID,
+		Groups:          groups,
+		Budgeted:        totalBudgeted.String(),
+		Realisasi:       totalRealisasi.String(),
+		Selisih:         totalBudgeted.Sub(totalRealisasi).String(),
+		PersenRealisasi: percentString(totalRealisasi, totalBudgeted),
+	}, nil
 }
