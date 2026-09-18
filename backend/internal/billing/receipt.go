@@ -35,26 +35,40 @@ const (
 	// terlanjur bernomor KWT DIBIARKAN — dokumen historis immutable, KWD
 	// berlaku forward-only.
 	ReceiptTypeKPRDisbursement ReceiptType = "kpr_disbursement"
+	// ReceiptTypeLegacyAR (W-7 extension, "Piutang Proyek Lama"): kwitansi
+	// pelunasan piutang dari proyek SEBELUM sistem ini dipakai — KWL/{yyyy}/{seq}.
+	// Seri sendiri karena bukan pembayaran unit/termin apa pun: tidak ada Unit,
+	// SaleContract, atau ChargeGroup di baliknya, hanya legacy_receivable_payment_id.
+	ReceiptTypeLegacyAR ReceiptType = "legacy_ar"
 )
 
 type Receipt struct {
-	ID              uint64  `gorm:"primaryKey;autoIncrement"                     json:"id"`
-	TenantID        uint64  `gorm:"not null;index"                               json:"-"`
-	TerminPaymentID uint64  `gorm:"not null"                                     json:"termin_payment_id"`
-	UnitID          uint64  `gorm:"not null;index"                               json:"unit_id"`
+	ID       uint64 `gorm:"primaryKey;autoIncrement"                     json:"id"`
+	TenantID uint64 `gorm:"not null;index"                               json:"-"`
+	// TerminPaymentID dan UnitID NULLABLE (migration 000105): kwitansi piutang
+	// proyek lama (ReceiptTypeLegacyAR) tidak pernah punya termin atau unit —
+	// hanya sisa tagihan dari transaksi sebelum sistem ini dipakai. Untuk
+	// SEMUA jenis kwitansi lain keduanya tetap selalu diisi (invariant lama
+	// tidak berubah untuk KWT/KWB/KWR/KWD).
+	TerminPaymentID *uint64 `gorm:"index"                                        json:"termin_payment_id,omitempty"`
+	UnitID          *uint64 `gorm:"index"                                        json:"unit_id,omitempty"`
 	SaleContractID  *uint64 `gorm:"index"                                        json:"sale_contract_id,omitempty"`
 	// ChargeGroupID (Billing Batch 2): grup tagihan realisasi/addon yang dibayar
 	// — sumber ringkasan 4-angka pada kwitansi KWR. NULL untuk KWT/KWB.
-	ChargeGroupID   *uint64      `gorm:"index"                                        json:"charge_group_id,omitempty"`
-	ReceiptType     ReceiptType  `gorm:"not null;size:20;default:'house_payment'"     json:"receipt_type"`
-	ReceiptNumber   string       `gorm:"not null;size:30"                             json:"receipt_number"`
-	Amount          domain.Money `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'" json:"amount"`
-	BankAccountCode string       `gorm:"not null;size:20"                             json:"bank_account_code"`
-	ReceivedAt      time.Time    `gorm:"not null"                                     json:"received_at"`
-	Notes           string       `gorm:"size:500"                                     json:"notes,omitempty"`
-	CreatedBy       uint64       `gorm:"not null"                                     json:"created_by"`
-	CreatedAt       time.Time    `                                                    json:"created_at"`
-	UpdatedAt       time.Time    `                                                    json:"updated_at"`
+	ChargeGroupID *uint64 `gorm:"index"                                        json:"charge_group_id,omitempty"`
+	// LegacyReceivablePaymentID (W-7 extension): baris legacy_receivable_payments
+	// yang melahirkan kwitansi ini — analog TerminPaymentID untuk KWT/KWB/KWR.
+	// NULL untuk semua jenis kwitansi lain.
+	LegacyReceivablePaymentID *uint64      `gorm:"index"                                        json:"legacy_receivable_payment_id,omitempty"`
+	ReceiptType               ReceiptType  `gorm:"not null;size:20;default:'house_payment'"     json:"receipt_type"`
+	ReceiptNumber             string       `gorm:"not null;size:30"                             json:"receipt_number"`
+	Amount                    domain.Money `gorm:"type:DECIMAL(20,4);not null;default:'0.0000'" json:"amount"`
+	BankAccountCode           string       `gorm:"not null;size:20"                             json:"bank_account_code"`
+	ReceivedAt                time.Time    `gorm:"not null"                                     json:"received_at"`
+	Notes                     string       `gorm:"size:500"                                     json:"notes,omitempty"`
+	CreatedBy                 uint64       `gorm:"not null"                                     json:"created_by"`
+	CreatedAt                 time.Time    `                                                    json:"created_at"`
+	UpdatedAt                 time.Time    `                                                    json:"updated_at"`
 }
 
 func (Receipt) TableName() string { return "receipts" }
@@ -139,6 +153,21 @@ type ReceiptPrintData struct {
 	HasScheduleOutstanding bool
 	ScheduleTypeLabel      string // label bisnis jadwal, mis. "Kelebihan Tanah"
 	ScheduleOutstanding    domain.Money
+
+	// Ringkasan PIUTANG PROYEK LAMA (W-7 extension, requirement #4/#5). true
+	// hanya untuk ReceiptTypeLegacyAR — dibaca LANGSUNG dari legacy_receivables
+	// via LEFT JOIN di LoadReceiptPrintData (bukan lewat provider terpisah:
+	// outstanding di sini cuma pengurangan sederhana, tidak ada rumus bisnis
+	// yang perlu dilindungi di balik seam seperti ChargeSummaryProvider).
+	// LegacyOutstanding SELALU dihitung ULANG dari saldo TERKINI
+	// (original_amount − paid_amount saat ini) setiap kali kwitansi dicetak —
+	// bukan angka beku per-kwitansi — supaya kwitansi pembayaran PARTIAL tidak
+	// pernah mencetak ulang piutang awal sebagai sisa (aturan klien eksplisit).
+	HasLegacySummary     bool
+	LegacyCustomerName   string
+	LegacySourceLabel    string
+	LegacyOriginalAmount domain.Money
+	LegacyOutstanding    domain.Money
 }
 
 // ── Ringkasan finansial kontrak (hardening Receipt/Invoice) ───────────────────

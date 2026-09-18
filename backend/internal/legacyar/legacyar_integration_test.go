@@ -32,6 +32,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	"esaproperti/internal/billing"
 	"esaproperti/internal/document"
 	"esaproperti/internal/domain"
 	"esaproperti/internal/ledger"
@@ -68,6 +69,7 @@ func larConnect(t *testing.T) *gorm.DB {
 func larCleanup(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	for _, tbl := range []string{
+		"receipts",
 		"legacy_receivable_audits", "legacy_receivable_payments",
 		"legacy_receivables", "legacy_ar_batch_rows", "legacy_ar_batches",
 		"documents", "document_sequences", "document_types",
@@ -96,7 +98,8 @@ func larSetup(t *testing.T) *larEnv {
 	}
 
 	svc := legacyar.NewService(legacyar.NewRepository(db), db).
-		WithBalanceReader(ledger.NewLedgerBalanceService(ledger.NewQueryService(db)))
+		WithBalanceReader(ledger.NewLedgerBalanceService(ledger.NewQueryService(db))).
+		WithReceiptCreator(billing.NewGORMRepository(db))
 
 	// W-8: pembaca piutang harga rumah adalah sale.Service, dan ia WAJIB
 	// terpasang seperti di produksi — tenant ini memang tidak punya penjualan
@@ -448,6 +451,30 @@ func TestC_D_I_PaymentReducesOutstandingAndLedger(t *testing.T) {
 	mustEqual(t, "saldo 1-2000", e.accountBalance(t, "1-2000"), money(70_000_000))
 	mustEqual(t, "saldo 1-1100", e.accountBalance(t, "1-1100"), money(30_000_000))
 
+	// requirement #4/#5 — kwitansi terbit ATOMIK bersama jurnal (mesin
+	// kwitansi yang SAMA dengan KWT/KWB/KWR), dan "Terutang" di kwitansi
+	// adalah SISA sekarang (70jt) — bukan piutang awal (100jt).
+	billingRepo := billing.NewGORMRepository(e.db)
+	if len(pay1.Payments) != 1 {
+		t.Fatalf("pay1.Payments = %d, want 1", len(pay1.Payments))
+	}
+	rcpt1, err := billingRepo.CreateLegacyReceiptInTx(ctx, e.db, larTenant, 0, billing.LegacyReceiptInput{
+		LegacyReceivablePaymentID: pay1.Payments[0].ID,
+	})
+	if err != nil {
+		t.Fatalf("cari kwitansi pembayaran 1: %v", err)
+	}
+	print1, err := billingRepo.LoadReceiptPrintData(ctx, larTenant, rcpt1.ID)
+	if err != nil {
+		t.Fatalf("muat data cetak kwitansi 1: %v", err)
+	}
+	if !print1.HasLegacySummary {
+		t.Fatalf("kwitansi 1: HasLegacySummary = false")
+	}
+	mustEqual(t, "kwitansi 1: Amount (dibayar)", print1.Amount, money(30_000_000))
+	mustEqual(t, "kwitansi 1: Terutang (BUKAN piutang awal)", print1.LegacyOutstanding, money(70_000_000))
+	mustEqual(t, "kwitansi 1: Piutang Awal", print1.LegacyOriginalAmount, money(100_000_000))
+
 	// Rekonsiliasi TETAP cocok setelah pembayaran: turunnya saldo buku besar
 	// sudah dijelaskan barisnya sendiri. Rekonsiliasi yang rusak tiap kali ada
 	// pembayaran akan segera diabaikan orang.
@@ -461,10 +488,11 @@ func TestC_D_I_PaymentReducesOutstandingAndLedger(t *testing.T) {
 	}
 
 	// ── D: lunasi sisa 70jt ──────────────────────────────────────────────────
-	if _, err := e.svc.ReceivePayment(ctx, larTenant, legacyar.PaymentRequest{
+	pay2, err := e.svc.ReceivePayment(ctx, larTenant, legacyar.PaymentRequest{
 		Allocations:     []legacyar.PaymentAllocation{{ReceivableID: budi, Amount: money(70_000_000)}},
 		CashAccountCode: "1-1100",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("bayar 70jt: %v", err)
 	}
 	detail, _ = e.svc.GetReceivable(ctx, larTenant, budi)
@@ -473,6 +501,23 @@ func TestC_D_I_PaymentReducesOutstandingAndLedger(t *testing.T) {
 		t.Errorf("status = %s, want paid", detail.Receivable.Status)
 	}
 	mustEqual(t, "saldo 1-2000", e.accountBalance(t, "1-2000"), domain.Zero)
+
+	// requirement #4 — pelunasan terakhir: kwitansi Terutang = Rp0, LUNAS.
+	if len(pay2.Payments) != 1 {
+		t.Fatalf("pay2.Payments = %d, want 1", len(pay2.Payments))
+	}
+	rcpt2, err := billingRepo.CreateLegacyReceiptInTx(ctx, e.db, larTenant, 0, billing.LegacyReceiptInput{
+		LegacyReceivablePaymentID: pay2.Payments[0].ID,
+	})
+	if err != nil {
+		t.Fatalf("cari kwitansi pembayaran 2: %v", err)
+	}
+	print2, err := billingRepo.LoadReceiptPrintData(ctx, larTenant, rcpt2.ID)
+	if err != nil {
+		t.Fatalf("muat data cetak kwitansi 2: %v", err)
+	}
+	mustEqual(t, "kwitansi 2: Amount (dibayar)", print2.Amount, money(70_000_000))
+	mustEqual(t, "kwitansi 2: Terutang setelah lunas", print2.LegacyOutstanding, domain.Zero)
 
 	// INV-LAR-3 — cache paid_amount == Σ sub-ledger.
 	var sum domain.Money

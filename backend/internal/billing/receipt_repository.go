@@ -167,8 +167,8 @@ func createReceiptForTerminInTx(ctx context.Context, tx *gorm.DB, tenantID, crea
 
 	rec := &Receipt{
 		TenantID:        tenantID,
-		TerminPaymentID: info.ID,
-		UnitID:          info.UnitID,
+		TerminPaymentID: &info.ID,
+		UnitID:          &info.UnitID,
 		SaleContractID:  contractID,
 		ChargeGroupID:   src.ChargeGroupID,
 		ReceiptType:     rtype,
@@ -199,26 +199,111 @@ func createReceiptForTerminInTx(ctx context.Context, tx *gorm.DB, tenantID, crea
 	return rec, nil
 }
 
+// ── Kwitansi Piutang Proyek Lama (W-7 extension) ─────────────────────────────
+//
+// LegacyReceiptInput adalah data kwitansi diberikan LANGSUNG oleh
+// internal/legacyar (bukan dibaca ulang dari DB di sini) — legacyar sudah
+// mengimpor billing (searah, mengikuti pola sale→billing) untuk memanggil
+// fungsi ini di TRANSAKSI YANG SAMA dengan pelunasan, jadi billing TIDAK
+// BOLEH balik mengimpor legacyar (circular import). Bentuknya sengaja minimal
+// — hanya kunci penghubung (LegacyReceivablePaymentID) + data transaksi kas —
+// karena data ringkasan piutang (customer, source, sisa) dibaca LIVE dari
+// legacy_receivables saat kwitansi DICETAK (LoadReceiptPrintData), bukan
+// dibekukan di sini. Ini pola yang sama dengan TerminInfo di atas.
+type LegacyReceiptInput struct {
+	LegacyReceivablePaymentID uint64
+	Amount                    domain.Money
+	BankAccountCode           string
+	Date                      time.Time
+	Notes                     string
+}
+
+// findReceiptByLegacyPaymentDB mengembalikan receipt yang sudah ada untuk
+// satu baris legacy_receivable_payments — analog findReceiptByTerminDB.
+func findReceiptByLegacyPaymentDB(ctx context.Context, db *gorm.DB, tenantID, legacyPaymentID uint64) (*Receipt, error) {
+	var rec Receipt
+	err := db.WithContext(ctx).
+		Where("tenant_id = ? AND legacy_receivable_payment_id = ?", tenantID, legacyPaymentID).
+		First(&rec).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrReceiptNotFound
+		}
+		return nil, fmt.Errorf("findReceiptByLegacyPaymentDB: %w", err)
+	}
+	return &rec, nil
+}
+
+// CreateLegacyReceiptInTx membuat kwitansi piutang proyek lama secara IDEMPOTEN
+// MEMAKAI transaksi yang diberikan — dipanggil oleh legacyar.Service.ReceivePayment
+// di transaksi pelunasan yang sama (requirement #4/#5: tidak ada baris
+// pelunasan tanpa kwitansi, dan retry/klik-ganda tidak pernah menerbitkan dua
+// kwitansi untuk satu baris pelunasan yang sama).
+func (r *GORMRepository) CreateLegacyReceiptInTx(ctx context.Context, tx *gorm.DB, tenantID, createdBy uint64, in LegacyReceiptInput) (*Receipt, error) {
+	return createLegacyReceiptInTx(ctx, tx, tenantID, createdBy, in)
+}
+
+func createLegacyReceiptInTx(ctx context.Context, tx *gorm.DB, tenantID, createdBy uint64, in LegacyReceiptInput) (*Receipt, error) {
+	// Fast path: sudah ada (dalam scope tx) — sama pola dengan kwitansi termin.
+	if existing, err := findReceiptByLegacyPaymentDB(ctx, tx, tenantID, in.LegacyReceivablePaymentID); err == nil {
+		return existing, nil
+	} else if !errors.Is(err, ErrReceiptNotFound) {
+		return nil, err
+	}
+
+	paymentID := in.LegacyReceivablePaymentID
+	rec := &Receipt{
+		TenantID:                  tenantID,
+		LegacyReceivablePaymentID: &paymentID,
+		ReceiptType:               ReceiptTypeLegacyAR,
+		Amount:                    in.Amount,
+		BankAccountCode:           in.BankAccountCode,
+		ReceivedAt:                in.Date,
+		Notes:                     in.Notes,
+		CreatedBy:                 createdBy,
+	}
+	alloc, nerr := nextReceiptNumber(tx, tenantID, ReceiptTypeLegacyAR, in.Date)
+	if nerr != nil {
+		return nil, nerr
+	}
+	rec.ReceiptNumber = alloc.Number
+	if err := tx.WithContext(ctx).Create(rec).Error; err != nil {
+		return nil, fmt.Errorf("createLegacyReceiptInTx: %w", err)
+	}
+	var actor *uint64
+	if createdBy != 0 {
+		actor = &createdBy
+	}
+	if _, derr := document.Register(tx, tenantID, alloc,
+		document.Source{Table: "receipts", ID: rec.ID}, rec.Amount, actor); derr != nil {
+		return nil, derr
+	}
+	return rec, nil
+}
+
 // ── ReceiptPrintLoader ────────────────────────────────────────────────────────
 
 func (r *GORMRepository) LoadReceiptPrintData(ctx context.Context, tenantID, receiptID uint64) (*ReceiptPrintData, error) {
 	type row struct {
-		ReceiptNumber   string       `gorm:"column:receipt_number"`
-		Amount          domain.Money `gorm:"column:amount"`
-		ReceivedAt      time.Time    `gorm:"column:received_at"`
-		BankAccountCode string       `gorm:"column:bank_account_code"`
-		Notes           string       `gorm:"column:notes"`
-		CompanyName     string       `gorm:"column:company_name"`
-		BuyerName       string       `gorm:"column:buyer_name"`
-		BuyerID         string       `gorm:"column:buyer_id"`
-		PaymentType     string       `gorm:"column:payment_type"`
-		ProjectName     string       `gorm:"column:project_name"`
-		UnitCode        string       `gorm:"column:unit_code"`
-		UnitType        string       `gorm:"column:unit_type"`
-		ReceiptType     string       `gorm:"column:receipt_type"`
-		BankName        string       `gorm:"column:disbursing_bank_name"`
-		TerminKind      string       `gorm:"column:termin_kind"`
-		InstallmentNo   *int         `gorm:"column:installment_no"`
+		ReceiptNumber        string       `gorm:"column:receipt_number"`
+		Amount               domain.Money `gorm:"column:amount"`
+		ReceivedAt           time.Time    `gorm:"column:received_at"`
+		BankAccountCode      string       `gorm:"column:bank_account_code"`
+		Notes                string       `gorm:"column:notes"`
+		CompanyName          string       `gorm:"column:company_name"`
+		BuyerName            string       `gorm:"column:buyer_name"`
+		BuyerID              string       `gorm:"column:buyer_id"`
+		PaymentType          string       `gorm:"column:payment_type"`
+		ProjectName          string       `gorm:"column:project_name"`
+		UnitCode             string       `gorm:"column:unit_code"`
+		UnitType             string       `gorm:"column:unit_type"`
+		ReceiptType          string       `gorm:"column:receipt_type"`
+		BankName             string       `gorm:"column:disbursing_bank_name"`
+		TerminKind           string       `gorm:"column:termin_kind"`
+		InstallmentNo        *int         `gorm:"column:installment_no"`
+		LegacySourceLabel    string       `gorm:"column:legacy_source_label"`
+		LegacyOriginalAmount domain.Money `gorm:"column:legacy_original_amount"`
+		LegacyOutstanding    domain.Money `gorm:"column:legacy_outstanding"`
 	}
 	var res row
 	// Pembayar kwitansi diambil dari KONTRAK bila ada. Untuk KWB tidak ada
@@ -235,28 +320,56 @@ func (r *GORMRepository) LoadReceiptPrintData(ctx context.Context, tenantID, rec
 	// spesifik: financing source TERMIN ITU SENDIRI (bank yang benar-benar
 	// mencairkan transaksi ini) → financing source kontrak → kolom bank_kpr
 	// kontrak. Tidak ada nama bank yang ditulis di kode.
+	//
+	// Unit yang dicetak: r.unit_id adalah snapshot BEKU saat kwitansi
+	// diterbitkan (sengaja tidak diubah oleh transfer unit — dokumen historis
+	// lain, mis. jurnal/termin, memang tetap merujuk konteks saat terbit).
+	// Tapi kwitansi booking (KWB) memakai kunci idempoten termin_payment_id
+	// yang TIDAK berubah lintas transfer, sehingga cetak-ulang KWB pasca
+	// TransferBookingAtomic (unit_id booking sudah pindah) akan tetap
+	// menampilkan unit lama jika hanya baca r.unit_id — bug. Maka unit
+	// diresolusi dari bk.unit_id (unit booking TERKINI) bila baris booking
+	// ditemukan, fallback ke r.unit_id untuk kwitansi lain (KWT/KWR/KWD)
+	// yang tidak terhubung ke booking manapun.
+	//
+	// units/projects sengaja LEFT JOIN (bukan JOIN): kwitansi piutang proyek
+	// lama (legacy_ar, migration 000105) tidak pernah punya unit_id sama
+	// sekali — INNER JOIN akan membuat kwitansi itu GAGAL dimuat sepenuhnya.
+	// legacy_receivable_payments/legacy_receivables dibaca LANGSUNG (bukan
+	// lewat package legacyar — billing tidak boleh mengimpor legacyar,
+	// circular import; sama pola dengan bookings/customers di atas).
+	// legacy_outstanding SELALU dihitung dari saldo TERKINI (original_amount
+	// − paid_amount SAAT INI di legacy_receivables), bukan angka beku per
+	// kwitansi — requirement #4: kwitansi pembayaran parsial tidak boleh
+	// mencetak ulang piutang awal sebagai sisa.
 	err := r.db.WithContext(ctx).Raw(`
 		SELECT
 			r.receipt_number, r.receipt_type, r.amount, r.received_at, r.bank_account_code, r.notes,
 			t.name        AS company_name,
-			COALESCE(NULLIF(c.buyer_name, ''), cu.name, '')     AS buyer_name,
-			COALESCE(NULLIF(c.buyer_id, ''), cu.id_number, '')  AS buyer_id,
+			COALESCE(NULLIF(c.buyer_name, ''), cu.name, NULLIF(lr.customer_name, ''), '')  AS buyer_name,
+			COALESCE(NULLIF(c.buyer_id, ''), cu.id_number, lrc.id_number, '')               AS buyer_id,
 			COALESCE(c.payment_type, '') AS payment_type,
 			COALESCE(NULLIF(fst.name, ''), NULLIF(fsc.name, ''), NULLIF(c.bank_kpr, ''), '')
 			              AS disbursing_bank_name,
-			p.name        AS project_name,
-			u.code        AS unit_code, u.unit_type,
-			COALESCE(tp.kind, '') AS termin_kind, tp.installment_no
+			COALESCE(p.name, '') AS project_name,
+			COALESCE(u.code, '') AS unit_code, COALESCE(u.unit_type, '') AS unit_type,
+			COALESCE(tp.kind, '') AS termin_kind, tp.installment_no,
+			COALESCE(lr.source_label, '')             AS legacy_source_label,
+			COALESCE(lr.original_amount, 0)           AS legacy_original_amount,
+			COALESCE(lr.original_amount - lr.paid_amount, 0) AS legacy_outstanding
 		FROM receipts r
-		JOIN units u    ON u.id = r.unit_id AND u.tenant_id = r.tenant_id
-		JOIN projects p ON p.id = u.project_id
+		LEFT JOIN bookings bk ON bk.termin_payment_id = r.termin_payment_id AND bk.tenant_id = r.tenant_id
+		LEFT JOIN units u    ON u.id = COALESCE(bk.unit_id, r.unit_id) AND u.tenant_id = r.tenant_id
+		LEFT JOIN projects p ON p.id = u.project_id
 		JOIN tenants t  ON t.id = r.tenant_id
 		LEFT JOIN sale_contracts c ON c.id = r.sale_contract_id AND c.tenant_id = r.tenant_id
-		LEFT JOIN bookings bk  ON bk.termin_payment_id = r.termin_payment_id AND bk.tenant_id = r.tenant_id
 		LEFT JOIN customers cu ON cu.id = bk.customer_id AND cu.tenant_id = r.tenant_id
 		LEFT JOIN termin_payments tp   ON tp.id = r.termin_payment_id AND tp.tenant_id = r.tenant_id
 		LEFT JOIN financing_sources fst ON fst.id = tp.financing_source_id AND fst.tenant_id = r.tenant_id
 		LEFT JOIN financing_sources fsc ON fsc.id = c.financing_source_id  AND fsc.tenant_id = r.tenant_id
+		LEFT JOIN legacy_receivable_payments lrp ON lrp.id = r.legacy_receivable_payment_id AND lrp.tenant_id = r.tenant_id
+		LEFT JOIN legacy_receivables lr ON lr.id = lrp.legacy_receivable_id AND lr.tenant_id = r.tenant_id
+		LEFT JOIN customers lrc ON lrc.id = lr.customer_id AND lrc.tenant_id = r.tenant_id
 		WHERE r.id = ? AND r.tenant_id = ?
 	`, receiptID, tenantID).Scan(&res).Error
 	if err != nil {
@@ -266,21 +379,26 @@ func (r *GORMRepository) LoadReceiptPrintData(ctx context.Context, tenantID, rec
 		return nil, ErrReceiptNotFound
 	}
 	return &ReceiptPrintData{
-		ReceiptType:     ReceiptType(res.ReceiptType),
-		ReceiptNumber:   res.ReceiptNumber,
-		Amount:          res.Amount,
-		ReceivedAt:      res.ReceivedAt,
-		BankAccountCode: res.BankAccountCode,
-		Notes:           res.Notes,
-		KindLabel:       terminKindLabel(res.TerminKind, res.InstallmentNo),
-		CompanyName:     res.CompanyName,
-		BuyerName:          res.BuyerName,
-		BuyerID:            res.BuyerID,
-		PaymentType:        res.PaymentType,
-		DisbursingBankName: res.BankName,
-		ProjectName:     res.ProjectName,
-		UnitCode:        res.UnitCode,
-		UnitType:        res.UnitType,
+		ReceiptType:          ReceiptType(res.ReceiptType),
+		ReceiptNumber:        res.ReceiptNumber,
+		Amount:               res.Amount,
+		ReceivedAt:           res.ReceivedAt,
+		BankAccountCode:      res.BankAccountCode,
+		Notes:                res.Notes,
+		KindLabel:            terminKindLabel(res.TerminKind, res.InstallmentNo),
+		CompanyName:          res.CompanyName,
+		BuyerName:            res.BuyerName,
+		BuyerID:              res.BuyerID,
+		PaymentType:          res.PaymentType,
+		DisbursingBankName:   res.BankName,
+		ProjectName:          res.ProjectName,
+		UnitCode:             res.UnitCode,
+		UnitType:             res.UnitType,
+		HasLegacySummary:     ReceiptType(res.ReceiptType) == ReceiptTypeLegacyAR,
+		LegacyCustomerName:   res.BuyerName,
+		LegacySourceLabel:    res.LegacySourceLabel,
+		LegacyOriginalAmount: res.LegacyOriginalAmount,
+		LegacyOutstanding:    res.LegacyOutstanding,
 	}, nil
 }
 

@@ -552,13 +552,23 @@ func (s *Service) ReceivePayment(ctx context.Context, tenantID uint64, req Recei
 	//     ubah frontend); (c) selainnya pakai yang dikirim pemanggil (fallback "other").
 	kind, installmentNo := resolveTerminKind(req, targetSchedule)
 
+	// 3d. Kode unit untuk deskripsi (readability accounting 2026-09-18) —
+	// best-effort: gagal resolve (unit tak ditemukan, dsb) tidak pernah
+	// menggagalkan penerimaan pembayaran, deskripsi hanya jatuh ke label
+	// generik tanpa kode unit.
+	var unitCode string
+	if info, uerr := s.units.FindUnitSaleInfo(ctx, tenantID, unitID); uerr == nil {
+		unitCode = info.Code
+	}
+	desc := buildReceiveDescription(req, kind, installmentNo, unitCode)
+
 	// 4. Validasi + routing + baris jurnal balanced (TANPA tulis DB).
 	prepared, err := s.preparePayment(ctx, tenantID, RecordTerminRequest{
 		UnitID:          unitID,
 		BankAccountCode: req.BankAccountCode,
 		Amount:          req.Amount,
 		Date:            req.Date,
-		Description:     buildReceiveDescription(req, kind, installmentNo),
+		Description:     desc,
 		CreatedBy:       req.CreatedBy,
 		IdempotencyKey:  idemPtr(req.IdempotencyKey),
 		Source:          req.Source,
@@ -588,7 +598,7 @@ func (s *Service) ReceivePayment(ctx context.Context, tenantID uint64, req Recei
 		PhaseID:           prepared.phaseID,
 		Amount:            req.Amount,
 		Date:              req.Date,
-		Description:       buildReceiveDescription(req, kind, installmentNo),
+		Description:       desc,
 		BankAccountCode:   req.BankAccountCode,
 		CreditAccountCode: prepared.creditCode,
 		CreatedBy:         req.CreatedBy,
@@ -891,9 +901,12 @@ func resolveTerminKind(req ReceivePaymentRequest, targetSchedule *PaymentSchedul
 // buildReceiveDescription menyusun deskripsi termin_payments/jurnal yang
 // SELALU menyebut jenis penerimaannya (DP/Cicilan/Pelunasan/Kelebihan Tanah/
 // dst) di depan — supaya riwayat & audit trail gampang ditelusuri tanpa
-// terkecuali, bukan hanya "Penerimaan pembayaran" generik.
-func buildReceiveDescription(req ReceivePaymentRequest, kind TerminKind, installmentNo *int) string {
-	desc := "Penerimaan " + TerminKindLabel(kind, installmentNo)
+// terkecuali, bukan hanya "Penerimaan pembayaran" generik. unitCode (readability
+// accounting 2026-09-18) disisipkan lewat DescribeWithUnit supaya Jurnal & Buku
+// Besar langsung menunjukkan unit tanpa membuka baris detail; kosong (mis.
+// penerimaan tanpa relasi unit) → deskripsi tetap seperti sebelumnya.
+func buildReceiveDescription(req ReceivePaymentRequest, kind TerminKind, installmentNo *int, unitCode string) string {
+	desc := DescribeWithUnit("Penerimaan "+TerminKindLabel(kind, installmentNo), unitCode)
 	if req.Reference != "" {
 		desc += " ref " + req.Reference
 	}

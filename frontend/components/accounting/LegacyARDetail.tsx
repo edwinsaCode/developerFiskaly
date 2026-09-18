@@ -14,6 +14,7 @@ import { Rupiah } from "@/components/format/Rupiah";
 import { Tanggal } from "@/components/format/Tanggal";
 import { useToast } from "@/components/ui/Toast";
 import { LegacyARPaymentModal } from "@/components/accounting/LegacyARPaymentModal";
+import { DocumentNumberLink } from "@/components/documents/DocumentNumberLink";
 import { ApiError } from "@/lib/api/client";
 import { fetchLegacyReceivable, voidLegacyPayment } from "@/lib/api/legacyar";
 import type {
@@ -178,6 +179,7 @@ export function LegacyARDetail({ token, initial }: { token: string; initial: Det
                 <Th>Bukti</Th>
                 <Th>Kas / Bank</Th>
                 <Th>Jurnal</Th>
+                <Th>Kwitansi</Th>
                 <Th right>Jumlah</Th>
                 <Th>Keterangan</Th>
                 <Th>Aksi</Th>
@@ -201,6 +203,13 @@ export function LegacyARDetail({ token, initial }: { token: string; initial: Det
                       >
                         #{p.journal_entry_id}
                       </Link>
+                    </Td>
+                    <Td mono>
+                      {p.receipt_number ? (
+                        <DocumentNumberLink token={token} number={p.receipt_number} />
+                      ) : (
+                        "—"
+                      )}
                     </Td>
                     <Td right>
                       <Rupiah value={p.amount} />

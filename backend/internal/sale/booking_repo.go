@@ -31,6 +31,11 @@ type CreateBookingAtomicParams struct {
 	BankAccountCode   string
 	GenerateReceipt   bool
 	ReceiptNotes      string
+	// UnitCode: kode unit kanonik (readability accounting 2026-09-18) —
+	// disisipkan ke deskripsi jurnal booking fee via DescribeWithUnit. Kosong
+	// = deskripsi generik dipertahankan (tidak seharusnya terjadi untuk
+	// booking, unit selalu ada, tapi tidak boleh menggagalkan booking).
+	UnitCode string
 }
 
 // transitionUnitPinnedTx meng-update status unit dengan predikat DI-PIN ke
@@ -73,7 +78,7 @@ func (r *GORMRepository) CreateBookingAtomic(ctx context.Context, p CreateBookin
 			entry, err := txPosting.Create(ctx, ledger.CreateJournalRequest{
 				TenantID:    p.TenantID,
 				Date:        b.BookingDate,
-				Description: fmt.Sprintf("Booking fee unit %d", b.UnitID),
+				Description: DescribeWithUnit("Booking fee", p.UnitCode),
 				Lines:       toledgerLines(p.JournalLines),
 			})
 			if err != nil {
@@ -92,7 +97,7 @@ func (r *GORMRepository) CreateBookingAtomic(ctx context.Context, p CreateBookin
 				Amount:            b.BookingFee,
 				BankAccountCode:   p.BankAccountCode,
 				Date:              b.BookingDate,
-				Description:       "Booking fee",
+				Description:       DescribeWithUnit("Booking fee", p.UnitCode),
 				JournalEntryID:    entry.ID,
 				CreditAccountCode: p.CreditAccountCode,
 				CreatedBy:         b.CreatedBy,

@@ -777,6 +777,7 @@ func (s *Service) RecordAkad(ctx context.Context, tenantID uint64, req RecordBAS
 				ReceivableAccountCode: accountCodePiutang,
 				RecognitionDate:       req.BASTDate,
 				CreatedBy:             req.CreatedBy,
+				UnitCode:              unit.Code,
 			})
 			if lerr != nil {
 				return nil, fmt.Errorf("siapkan Akad Kelebihan Tanah: %w", lerr)

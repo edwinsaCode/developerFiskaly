@@ -148,7 +148,7 @@ const receiptPrintHTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>{{if eq .ReceiptType "booking"}}Kwitansi Booking{{else if eq .ReceiptType "realization"}}Kwitansi Biaya Realisasi{{else if eq .ReceiptType "kpr_disbursement"}}Kwitansi Pencairan KPR{{else}}Bukti Pembayaran{{end}} {{.ReceiptNumber}} — {{.CompanyName}}</title>
+<title>{{if eq .ReceiptType "booking"}}Kwitansi Booking{{else if eq .ReceiptType "realization"}}Kwitansi Biaya Realisasi{{else if eq .ReceiptType "kpr_disbursement"}}Kwitansi Pencairan KPR{{else if eq .ReceiptType "legacy_ar"}}Kwitansi Piutang Proyek Lama{{else}}Bukti Pembayaran{{end}} {{.ReceiptNumber}} — {{.CompanyName}}</title>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html { font-size: 14px; }
@@ -167,95 +167,146 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #f5f2ee; color: #
 }
 .btn-print:hover { opacity: 0.9; }
 
-.page-wrap { padding: 80px 32px 40px; display: flex; justify-content: center; }
+/* ── Layout halaman: A4 PORTRAIT, 2 area kwitansi (atas/bawah) ──────────────
+   Satu lembar HVS A4 dipotong jadi 2 kwitansi identik (rangkap: lembar
+   customer + lembar arsip) — konvensi kwitansi developer properti Indonesia.
+   .receipt-half punya TINGGI TETAP (297mm halaman ÷ 2, dikurangi margin
+   cetak) supaya dua salinan selalu pas dalam SATU halaman A4, tidak pernah
+   meluber ke halaman kedua. .receipt-sheet sendiri tetap auto-height (desain
+   aslinya tidak diubah) — skrip fitReceipts() di bawah mengecilkannya
+   (CSS transform: scale, bukan crop) hanya BILA kontennya melebihi tinggi
+   area, jadi kwitansi panjang (banyak baris ringkasan/catatan) tetap utuh
+   tercetak, tidak pernah terpotong. */
+.page-wrap { padding: 80px 16px 40px; display: flex; flex-direction: column; align-items: center; gap: 4mm; }
+.receipt-half {
+  width: 100%; max-width: 190mm; height: 128mm; overflow: hidden;
+  display: flex; justify-content: center; align-items: flex-start;
+}
+.cut-line { width: 100%; max-width: 190mm; display: flex; align-items: center; gap: 3mm;
+  color: #a89d94; font-size: 0.68rem; letter-spacing: 0.04em; }
+.cut-line::before, .cut-line::after { content: ""; flex: 1; border-top: 1px dashed #c9b8ac; }
 .receipt-sheet {
-  width: 210mm; min-height: 140mm; background: #fff; border-radius: 8px;
-  box-shadow: 0 4px 32px rgba(0,0,0,0.12); padding: 12mm 14mm;
-  display: flex; flex-direction: column; font-size: 0.9rem;
+  width: 190mm; flex: none; transform-origin: top center;
+  background: #fff; border-radius: 8px;
+  box-shadow: 0 4px 32px rgba(0,0,0,0.12); padding: 9mm 11mm;
+  display: flex; flex-direction: column; font-size: 0.86rem;
 }
 
 /* ── Header: logo + kotak perusahaan (kiri) · judul + kotak tgl/no (kanan) ── */
-.hdr { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 7mm; }
-.hdr-left { display: flex; gap: 5mm; align-items: flex-start; }
-.hdr-left img { width: 22mm; height: auto; }
-.company-box { border: 1.4px solid #2b211b; padding: 2.5mm 4mm; min-width: 62mm; }
-.company-box .cname { font-weight: 800; font-size: 0.92rem; letter-spacing: 0.02em; }
-.company-box .caddr { font-size: 0.78rem; margin-top: 1mm; line-height: 1.45; color: #4a3d34; }
+.hdr { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4mm; }
+.hdr-left { display: flex; gap: 4mm; align-items: flex-start; }
+.hdr-left img { width: 18mm; height: auto; }
+.company-box { border: 1.4px solid #2b211b; padding: 2mm 3.5mm; min-width: 58mm; }
+.company-box .cname { font-weight: 800; font-size: 0.9rem; letter-spacing: 0.02em; }
+.company-box .caddr { font-size: 0.74rem; margin-top: 1mm; line-height: 1.35; color: #4a3d34; }
 .hdr-right { text-align: right; }
-.doc-title { font-size: 1.55rem; font-weight: 700; letter-spacing: 0.01em; color: #2b211b;
-  border-bottom: 2.5px solid #A84522; padding-bottom: 1.5mm; display: inline-block; }
-.meta-boxes { display: flex; gap: 4mm; justify-content: flex-end; margin-top: 4mm; }
-.meta-box { border: 1.2px solid #2b211b; min-width: 30mm; text-align: center; }
-.meta-box .mlabel { font-size: 0.7rem; border-bottom: 1px solid #2b211b; padding: 1mm 2.5mm; background: #faf0eb; }
-.meta-box .mval { padding: 1.5mm 2.5mm; font-weight: 600; font-size: 0.85rem; }
+.doc-title { font-size: 1.3rem; font-weight: 700; letter-spacing: 0.01em; color: #2b211b;
+  border-bottom: 2.5px solid #A84522; padding-bottom: 1mm; display: inline-block; }
+.meta-boxes { display: flex; gap: 3mm; justify-content: flex-end; margin-top: 2.5mm; }
+.meta-box { border: 1.2px solid #2b211b; min-width: 28mm; text-align: center; }
+.meta-box .mlabel { font-size: 0.66rem; border-bottom: 1px solid #2b211b; padding: 0.8mm 2mm; background: #faf0eb; }
+.meta-box .mval { padding: 1mm 2mm; font-weight: 600; font-size: 0.8rem; }
 
 /* ── Diterima dari (kiri) · Jumlah Terima (kanan) ── */
-.row-2 { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 6mm; gap: 8mm; }
+.row-2 { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 3mm; gap: 6mm; }
 .received-box { flex: 1; max-width: 95mm; }
 .received-box .rlabel { display: inline-block; border: 1.2px solid #2b211b; background: #faf0eb;
-  font-size: 0.74rem; font-weight: 700; padding: 1mm 3mm; margin-bottom: -1px; }
-.received-box .rval { border: 1.2px solid #2b211b; padding: 2.5mm 3.5mm; font-weight: 600; min-height: 14mm; }
-.received-box .rval .rid { font-weight: 400; font-size: 0.78rem; color: #4a3d34; }
-.amount-terima { border: 1.4px solid #2b211b; text-align: center; min-width: 42mm; }
-.amount-terima .alabel { font-size: 0.72rem; font-weight: 700; border-bottom: 1px solid #2b211b;
-  padding: 1mm 3mm; background: #faf0eb; }
-.amount-terima .aval { padding: 2mm 4mm; font-size: 1.15rem; font-weight: 800; color: #A84522; }
+  font-size: 0.7rem; font-weight: 700; padding: 0.8mm 2.5mm; margin-bottom: -1px; }
+.received-box .rval { border: 1.2px solid #2b211b; padding: 1.5mm 3mm; font-weight: 600; min-height: 9mm; }
+.received-box .rval .rid { font-weight: 400; font-size: 0.74rem; color: #4a3d34; }
+.amount-terima { border: 1.4px solid #2b211b; text-align: center; min-width: 40mm; }
+.amount-terima .alabel { font-size: 0.68rem; font-weight: 700; border-bottom: 1px solid #2b211b;
+  padding: 0.8mm 2.5mm; background: #faf0eb; }
+.amount-terima .aval { padding: 1.2mm 3mm; font-size: 1.05rem; font-weight: 800; color: #A84522; }
 
 /* ── Tabel rincian (meniru kolom formulir referensi) ── */
-table.rincian { width: 100%; border-collapse: collapse; margin-bottom: 2mm; }
-table.rincian th, table.rincian td { border: 1.2px solid #2b211b; padding: 2mm 3mm; font-size: 0.82rem; }
+table.rincian { width: 100%; border-collapse: collapse; margin-bottom: 1.5mm; }
+table.rincian th, table.rincian td { border: 1.2px solid #2b211b; padding: 1.2mm 2.5mm; font-size: 0.76rem; }
 table.rincian th { background: #faf0eb; font-weight: 700; text-align: center; }
 table.rincian td.num { text-align: right; font-variant-numeric: tabular-nums; }
-.total-row { display: flex; justify-content: flex-end; align-items: center; gap: 3mm; margin-bottom: 5mm; }
-.total-row .tlabel { border: 1.2px solid #2b211b; padding: 1.2mm 4mm; font-weight: 700; font-size: 0.8rem; background: #faf0eb; }
-.total-row .tval { border: 1.2px solid #2b211b; padding: 1.2mm 4mm; min-width: 38mm; text-align: right;
+.total-row { display: flex; justify-content: flex-end; align-items: center; gap: 3mm; margin-bottom: 3mm; }
+.total-row .tlabel { border: 1.2px solid #2b211b; padding: 1mm 3.5mm; font-weight: 700; font-size: 0.76rem; background: #faf0eb; }
+.total-row .tval { border: 1.2px solid #2b211b; padding: 1mm 3.5mm; min-width: 34mm; text-align: right;
   font-weight: 800; font-variant-numeric: tabular-nums; }
 
 /* ── Ringkasan finansial kontrak ── */
-.summary-grid { display: flex; gap: 0; border: 1.4px solid #2b211b; margin-bottom: 5mm; }
+.summary-grid { display: flex; gap: 0; border: 1.4px solid #2b211b; margin-bottom: 3mm; }
 .sum-cell { flex: 1; border-right: 1.2px solid #2b211b; text-align: center; }
 .sum-cell:last-child { border-right: none; }
-.sum-cell .sk { font-size: 0.7rem; font-weight: 700; background: #faf0eb; border-bottom: 1px solid #2b211b; padding: 1.2mm 2mm; }
-.sum-cell .sv { padding: 2mm; font-weight: 700; font-size: 0.88rem; font-variant-numeric: tabular-nums; }
+.sum-cell .sk { font-size: 0.64rem; font-weight: 700; background: #faf0eb; border-bottom: 1px solid #2b211b; padding: 1mm 1.5mm; }
+.sum-cell .sv { padding: 1.2mm; font-weight: 700; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
 .sum-cell.terutang .sk { background: #A84522; color: #fff; }
-.sum-cell.terutang .sv { color: #A84522; font-size: 0.95rem; }
-.sum-note { font-size: 0.68rem; color: #7a6e65; margin: -3mm 0 5mm; }
+.sum-cell.terutang .sv { color: #A84522; font-size: 0.86rem; }
+.sum-note { font-size: 0.62rem; color: #7a6e65; margin: -2mm 0 3mm; }
 
 /* ── Terbilang ── */
-.terbilang { display: flex; align-items: stretch; gap: 3mm; margin-bottom: 9mm; }
-.terbilang .tblabel { font-size: 0.82rem; padding-top: 1.5mm; }
-.terbilang .tbval { flex: 1; border: 1.2px solid #2b211b; padding: 1.5mm 3.5mm; font-style: italic; font-weight: 600; }
+.terbilang { display: flex; align-items: stretch; gap: 3mm; margin-bottom: 4mm; }
+.terbilang .tblabel { font-size: 0.76rem; padding-top: 1mm; }
+.terbilang .tbval { flex: 1; border: 1.2px solid #2b211b; padding: 1mm 3mm; font-style: italic; font-weight: 600; font-size: 0.8rem; }
 
 /* ── Tanda tangan ── */
-.sig-row { display: flex; justify-content: space-between; margin-top: auto; padding-top: 4mm; }
-.sig-left { font-size: 0.82rem; }
-.sig-left .sig-line { margin-top: 12mm; border-top: 1px solid #2b211b; width: 40mm; }
-.sig-left .tgl { margin-top: 2mm; font-size: 0.78rem; }
-.sig-center { text-align: center; font-size: 0.82rem; }
-.sig-center .space { height: 16mm; }
+.sig-row { display: flex; justify-content: space-between; margin-top: auto; padding-top: 2mm; }
+.sig-left { font-size: 0.76rem; }
+.sig-left .sig-line { margin-top: 6mm; border-top: 1px solid #2b211b; width: 36mm; }
+.sig-left .tgl { margin-top: 1.5mm; font-size: 0.72rem; }
+.sig-center { text-align: center; font-size: 0.76rem; }
+.sig-center .space { height: 8mm; }
 .sig-center .who { font-weight: 700; color: #A84522; letter-spacing: 0.03em; }
-.sig-center .dept { font-size: 0.76rem; font-weight: 600; color: #4a3d34; }
+.sig-center .dept { font-size: 0.7rem; font-weight: 600; color: #4a3d34; }
 
-.rcpt-footer { margin-top: 6mm; padding-top: 3mm; border-top: 1px dashed #c9b8ac;
-  text-align: center; font-size: 0.65rem; color: #a89d94; }
+.rcpt-footer { margin-top: 3mm; padding-top: 1.5mm; border-top: 1px dashed #c9b8ac;
+  text-align: center; font-size: 0.6rem; color: #a89d94; }
 
-@page { size: A4 landscape; margin: 12mm; }
+@page { size: A4 portrait; margin: 10mm; }
 @media print {
   .print-bar { display: none !important; }
   body { background: #fff; }
-  .page-wrap { padding: 0; display: block; }
-  .receipt-sheet { width: 100%; min-height: auto; box-shadow: none; border-radius: 0; padding: 0; }
+  .page-wrap { padding: 0; gap: 3mm; }
+  .receipt-half { height: 128mm; }
+  .receipt-sheet { box-shadow: none; }
+  .cut-line { display: none; }
 }
 </style>
 </head>
 <body>
 
 <div class="print-bar">
-  <h1>{{.CompanyName}} — {{if eq .ReceiptType "booking"}}Kwitansi Booking{{else if eq .ReceiptType "realization"}}Kwitansi Biaya Realisasi{{else if eq .ReceiptType "kpr_disbursement"}}Kwitansi Pencairan KPR{{else if .KindLabel}}Bukti Pembayaran — {{.KindLabel}}{{else}}Bukti Pembayaran{{end}}</h1>
+  <h1>{{.CompanyName}} — {{if eq .ReceiptType "booking"}}Kwitansi Booking{{else if eq .ReceiptType "realization"}}Kwitansi Biaya Realisasi{{else if eq .ReceiptType "kpr_disbursement"}}Kwitansi Pencairan KPR{{else if eq .ReceiptType "legacy_ar"}}Kwitansi Piutang Proyek Lama{{else if .KindLabel}}Bukti Pembayaran — {{.KindLabel}}{{else}}Bukti Pembayaran{{end}}</h1>
   <button class="btn-print" onclick="window.print()">&#128438; Cetak / Simpan PDF</button>
 </div>
 
 <div class="page-wrap">
+<div class="receipt-half">{{template "receiptBody" .}}</div>
+<div class="cut-line">✂ potong di sini — kwitansi rangkap 2 (pembeli &amp; arsip)</div>
+<div class="receipt-half">{{template "receiptBody" .}}</div>
+</div>
+
+<script>
+// Shrink-to-fit: kwitansi didesain auto-height (tidak diubah) — di sini
+// hanya diperkecil (transform: scale, BUKAN crop/overflow) bila kontennya
+// melebihi tinggi area separuh halaman, supaya kwitansi panjang tetap utuh
+// tercetak (tidak pernah terpotong) sekaligus selalu pas 2-per-halaman A4.
+(function () {
+  function fitReceipts() {
+    document.querySelectorAll('.receipt-sheet').forEach(function (el) {
+      el.style.transform = 'none';
+      var box = el.parentElement;
+      var target = box.clientHeight;
+      var natural = el.scrollHeight;
+      if (target > 0 && natural > target) {
+        el.style.transform = 'scale(' + (target / natural).toFixed(4) + ')';
+      }
+    });
+  }
+  if (document.readyState === 'complete') fitReceipts();
+  else window.addEventListener('load', fitReceipts);
+  window.addEventListener('beforeprint', fitReceipts);
+})();
+</script>
+
+</body>
+</html>
+{{define "receiptBody"}}
 <div class="receipt-sheet">
 
   <div class="hdr">
@@ -267,7 +318,7 @@ table.rincian td.num { text-align: right; font-variant-numeric: tabular-nums; }
       </div>
     </div>
     <div class="hdr-right">
-      <span class="doc-title">{{if eq .ReceiptType "booking"}}Kwitansi Booking{{else if eq .ReceiptType "realization"}}Kwitansi Biaya Realisasi{{else if eq .ReceiptType "kpr_disbursement"}}Kwitansi Pencairan KPR{{else if .KindLabel}}Bukti Pembayaran — {{.KindLabel}}{{else}}Bukti Pembayaran{{end}}</span>
+      <span class="doc-title">{{if eq .ReceiptType "booking"}}Kwitansi Booking{{else if eq .ReceiptType "realization"}}Kwitansi Biaya Realisasi{{else if eq .ReceiptType "kpr_disbursement"}}Kwitansi Pencairan KPR{{else if eq .ReceiptType "legacy_ar"}}Kwitansi Piutang Proyek Lama{{else if .KindLabel}}Bukti Pembayaran — {{.KindLabel}}{{else}}Bukti Pembayaran{{end}}</span>
       {{/*
         Tidak ada baris keterangan akuntansi di bawah judul kwitansi.
 
@@ -339,9 +390,9 @@ table.rincian td.num { text-align: right; font-variant-numeric: tabular-nums; }
              sudah dipaksa domain.Zero utk Booking di GetReceiptPrintData
              (Rule A tanpa syarat) — di sini tinggal dipastikan tampil terlepas
              dari .HasSummary. */}}
-        <td class="num">{{if eq .ReceiptType "booking"}}{{rupiah .Outstanding}}{{else if .HasChargeSummary}}{{rupiah .ChargeOutstanding}}{{else if .HasSummary}}{{rupiah .Outstanding}}{{else}}&mdash;{{end}}</td>
+        <td class="num">{{if eq .ReceiptType "booking"}}{{rupiah .Outstanding}}{{else if eq .ReceiptType "legacy_ar"}}{{rupiah .LegacyOutstanding}}{{else if .HasChargeSummary}}{{rupiah .ChargeOutstanding}}{{else if .HasSummary}}{{rupiah .Outstanding}}{{else}}&mdash;{{end}}</td>
         <td class="num">{{rupiah .Amount}}</td>
-        <td>{{if and .KindLabel (eq .ReceiptType "house_payment")}}<strong>{{.KindLabel}}</strong> — {{end}}Unit {{.UnitCode}} — {{.UnitType}}, {{.ProjectName}}{{if .Notes}}<br/><span style="font-size:0.76rem;color:#4a3d34">{{.Notes}}</span>{{end}}<br/><span style="font-size:0.74rem;color:#4a3d34">{{paymentTypeLabel .PaymentType}} · {{bankLabel .BankAccountCode}}</span></td>
+        <td>{{if eq .ReceiptType "legacy_ar"}}Piutang Proyek Lama{{if .LegacySourceLabel}} — {{.LegacySourceLabel}}{{end}}{{if .Notes}}<br/><span style="font-size:0.76rem;color:#4a3d34">{{.Notes}}</span>{{end}}<br/><span style="font-size:0.74rem;color:#4a3d34">{{paymentTypeLabel .PaymentType}} · {{bankLabel .BankAccountCode}}</span>{{else}}{{if and .KindLabel (eq .ReceiptType "house_payment")}}<strong>{{.KindLabel}}</strong> — {{end}}Unit {{.UnitCode}} — {{.UnitType}}, {{.ProjectName}}{{if .Notes}}<br/><span style="font-size:0.76rem;color:#4a3d34">{{.Notes}}</span>{{end}}<br/><span style="font-size:0.74rem;color:#4a3d34">{{paymentTypeLabel .PaymentType}} · {{bankLabel .BankAccountCode}}</span>{{end}}</td>
         <td class="num">{{if .HasSummary}}{{rupiah .Discount}}{{else}}&mdash;{{end}}</td>
       </tr>
     </tbody>
@@ -361,6 +412,21 @@ table.rincian td.num { text-align: right; font-variant-numeric: tabular-nums; }
     <div class="sum-cell"><div class="sk">Pembayaran Ini</div><div class="sv">{{rupiah .Amount}}</div></div>
     <div class="sum-cell"><div class="sk">Total Dibayar</div><div class="sv">{{rupiah .ChargePaid}}</div></div>
     <div class="sum-cell terutang"><div class="sk">Sisa Terutang</div><div class="sv">{{rupiah .ChargeOutstanding}}</div></div>
+  </div>
+  {{end}}
+
+  {{if .HasLegacySummary}}
+  <!-- Ringkasan Piutang Proyek Lama (W-7 perluasan, requirement #4) — SATU
+       sumber: legacy_receivables/legacy_receivable_payments, dibaca langsung
+       lewat LEFT JOIN di LoadReceiptPrintData. "Terutang" WAJIB dihitung
+       ulang dari saldo piutang terkini SETELAH pembayaran ini diposting —
+       bukan jumlah piutang awal (requirement #4: dilarang menampilkan
+       piutang awal sebagai sisa pada pembayaran parsial). -->
+  <div class="summary-grid">
+    <div class="sum-cell"><div class="sk">{{if .LegacySourceLabel}}{{.LegacySourceLabel}}{{else}}Piutang Proyek Lama{{end}}</div><div class="sv">&nbsp;</div></div>
+    <div class="sum-cell"><div class="sk">Piutang Awal</div><div class="sv">{{rupiah .LegacyOriginalAmount}}</div></div>
+    <div class="sum-cell"><div class="sk">Pembayaran Ini</div><div class="sv">{{rupiah .Amount}}</div></div>
+    <div class="sum-cell terutang"><div class="sk">Terutang</div><div class="sv">{{rupiah .LegacyOutstanding}}</div></div>
   </div>
   {{end}}
 
@@ -410,7 +476,4 @@ table.rincian td.num { text-align: right; font-variant-numeric: tabular-nums; }
   </footer>
 
 </div>
-</div>
-
-</body>
-</html>`
+{{end}}`

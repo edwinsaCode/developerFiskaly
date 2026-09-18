@@ -8,6 +8,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"esaproperti/internal/billing"
 	"esaproperti/internal/document"
 	"esaproperti/internal/domain"
 	"esaproperti/internal/ledger"
@@ -226,6 +227,40 @@ func (s *Service) ReceivePayment(ctx context.Context, tenantID uint64, req Payme
 					return fmt.Errorf("pembayaran dengan kunci idempotensi yang sama sedang diproses")
 				}
 				return err
+			}
+
+			// Kwitansi (requirement #4/#5): SATU kwitansi per baris pembayaran,
+			// lewat mesin kwitansi yang sudah ada (billing) — bukan mesin kedua.
+			// Dibuat DI DALAM transaksi yang sama dengan jurnal & sub-ledger di
+			// atas, jadi kwitansi tidak pernah lahir tanpa pembayarannya (atau
+			// sebaliknya). "Terutang" di kwitansi selalu dihitung ulang saat
+			// dicetak (billing.LoadReceiptPrintData), bukan dibekukan di sini.
+			if s.receipts != nil {
+				var actor uint64
+				if req.ActorID != nil {
+					actor = *req.ActorID
+				}
+				receipt, rerr := s.receipts.CreateLegacyReceiptInTx(ctx, tx, tenantID, actor, billing.LegacyReceiptInput{
+					LegacyReceivablePaymentID: p.ID,
+					Amount:                    it.amount,
+					BankAccountCode:           cash.Code,
+					Date:                      date,
+					Notes:                     trunc(strings.TrimSpace(req.Notes), 500),
+				})
+				if rerr != nil {
+					return rerr
+				}
+				// Snapshot balik ke baris pembayaran (pola DocumentID/DocumentNumber
+				// di atas) supaya halaman detail bisa menawarkan cetak kwitansi
+				// langsung dari riwayat pembayaran, tanpa join dan tanpa pindah ke
+				// Buku Dokumen.
+				if receipt != nil {
+					if err := r.SavePaymentReceipt(ctx, tenantID, p.ID, receipt.ID, receipt.ReceiptNumber); err != nil {
+						return err
+					}
+					p.ReceiptID = &receipt.ID
+					p.ReceiptNumber = receipt.ReceiptNumber
+				}
 			}
 
 			// Guard #1 (pola FE-2): kolom cache TIDAK PERNAH ditulis tanpa baris

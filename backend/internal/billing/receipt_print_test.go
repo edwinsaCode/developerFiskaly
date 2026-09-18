@@ -9,6 +9,52 @@ import (
 	"esaproperti/internal/domain"
 )
 
+// ── A4 portrait, 2 kwitansi per lembar ─────────────────────────────────────
+//
+// Dulu kwitansi dicetak A4 landscape satu lembar satu kwitansi. Sekarang satu
+// lembar A4 portrait berisi 2 salinan (pembeli & arsip), dipisah garis
+// potong. Uji ini menjaga struktur itu tidak regresi ke landscape atau balik
+// jadi satu salinan per lembar.
+func TestRenderReceiptPrint_A4PortraitTwoUp(t *testing.T) {
+	var buf bytes.Buffer
+	amt, _ := domain.NewMoney("5000000")
+	data := &ReceiptPrintData{
+		ReceiptType:   ReceiptTypeBooking,
+		ReceiptNumber: "KWB/2026/000001",
+		Amount:        amt,
+		ReceivedAt:    time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC),
+		CompanyName:   "PT Nata Alam Raya",
+		BuyerName:     "Budi Santoso",
+		ProjectName:   "LITHOS Villas",
+		UnitCode:      "LITHOS-A01",
+		UnitType:      "villa",
+	}
+	if err := RenderReceiptPrint(&buf, data); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+
+	if !strings.Contains(html, "size: A4 portrait") {
+		t.Error("halaman harus A4 portrait, bukan landscape")
+	}
+	if strings.Contains(html, "size: A4 landscape") {
+		t.Error("layout landscape lama masih ada — regresi Task 1")
+	}
+	if got := strings.Count(html, "receipt-sheet"); got < 2 {
+		t.Errorf("kwitansi harus tercetak 2x per lembar (2-up), ditemukan %d penanda .receipt-sheet", got)
+	}
+	if got := strings.Count(html, "KWB/2026/000001"); got < 2 {
+		t.Errorf("nomor kwitansi harus muncul di kedua salinan, ditemukan %d kali", got)
+	}
+	if !strings.Contains(html, "potong di sini") {
+		t.Error("garis potong antar 2 salinan hilang")
+	}
+	// Safety net shrink-to-fit: mencegah konten terpotong pada isi yang panjang.
+	if !strings.Contains(html, "fitReceipts") {
+		t.Error("script shrink-to-fit (anti-clipping) hilang dari template")
+	}
+}
+
 // ── Hardening: ringkasan finansial di kwitansi ────────────────────────────────
 
 func TestRenderReceiptPrint_SummaryVisible_ZeroShown(t *testing.T) {

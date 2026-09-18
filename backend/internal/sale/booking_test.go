@@ -184,21 +184,30 @@ func (a *stubAccounts) ValidateCashBankAccount(_ context.Context, _ uint64, code
 	return nil
 }
 
-type stubUnits struct{ status string }
+type stubUnits struct {
+	status string
+	// code: kode unit kanonik (readability accounting 2026-09-18) — kosong
+	// (default) berperilaku identik sebelum field ini ada.
+	code string
+}
 
 func (u *stubUnits) FindUnitSaleInfo(_ context.Context, _ uint64, unitID uint64) (*sale.UnitSaleInfo, error) {
 	if unitID == 0 {
 		return nil, sale.ErrUnitNotFound
 	}
-	return &sale.UnitSaleInfo{ID: unitID, ProjectID: 7, Status: u.status}, nil
+	return &sale.UnitSaleInfo{ID: unitID, ProjectID: 7, Status: u.status, Code: u.code}, nil
 }
 
 func newBookingTestService(store sale.BookingStore, unitStatus string, missing ...string) *sale.Service {
+	return newBookingTestServiceWithCode(store, unitStatus, "", missing...)
+}
+
+func newBookingTestServiceWithCode(store sale.BookingStore, unitStatus, unitCode string, missing ...string) *sale.Service {
 	acc := &stubAccounts{missing: map[string]bool{}}
 	for _, m := range missing {
 		acc.missing[m] = true
 	}
-	units := &stubUnits{status: unitStatus}
+	units := &stubUnits{status: unitStatus, code: unitCode}
 	return sale.NewService(acc, nil, units, nil, nil, nil,
 		sale.WithBookingStore(store), sale.WithContractStore(stubContracts{}))
 }
@@ -239,6 +248,24 @@ func TestCreateBooking_Valid(t *testing.T) {
 	cr := store.created.JournalLines[1].Credit
 	if dr.String() != "5000000" || cr.String() != "5000000" {
 		t.Errorf("Dr/Cr = %s/%s, want 5000000/5000000", dr, cr)
+	}
+}
+
+// TestCreateBooking_UnitCodePassedToAtomicParams (readability accounting
+// 2026-09-18): kode unit kanonik (SoT tunggal — tidak ada entitas Blok
+// terpisah di domain) harus ikut diteruskan ke CreateBookingAtomicParams
+// supaya repo bisa menyusun deskripsi jurnal "Booking fee — Unit {code}"
+// alih-alih "Booking fee unit {id}". Unit tanpa kode (string kosong, mis.
+// data legacy) tidak boleh menggagalkan booking — hanya deskripsi jatuh ke
+// label generik (diuji terpisah lewat sale.DescribeWithUnit).
+func TestCreateBooking_UnitCodePassedToAtomicParams(t *testing.T) {
+	store := newMockBookingStore()
+	svc := newBookingTestServiceWithCode(store, "available", "A-15")
+	if _, err := svc.CreateBooking(context.Background(), 1, validBookingReq()); err != nil {
+		t.Fatalf("CreateBooking: %v", err)
+	}
+	if store.created == nil || store.created.UnitCode != "A-15" {
+		t.Fatalf("UnitCode tidak diteruskan ke CreateBookingAtomicParams: %+v", store.created)
 	}
 }
 

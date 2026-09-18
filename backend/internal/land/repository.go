@@ -23,6 +23,19 @@ type GORMRepository struct {
 	db *gorm.DB
 }
 
+// describeWithUnit menambahkan " — Unit {code}" pada deskripsi jurnal Akad
+// Kelebihan Tanah bila transaksi ini dibundel dengan Akad unit rumah
+// (readability accounting 2026-09-18; lihat sale.DescribeWithUnit — helper
+// terpisah, land TIDAK BOLEH mengimpor sale, arah dependency terbalik).
+// unitCode kosong (jalur standalone, land.Service.RecordAkad) → deskripsi
+// project-level lama dipertahankan.
+func describeWithUnit(base, unitCode string) string {
+	if unitCode == "" {
+		return base
+	}
+	return base + " — Unit " + unitCode
+}
+
 func NewGORMRepository(db *gorm.DB) *GORMRepository {
 	return &GORMRepository{db: db}
 }
@@ -353,7 +366,7 @@ func RecordAkadTx(ctx context.Context, tx *gorm.DB, tenantID uint64, in RecordAk
 		revEntry, err := txPosting.CreateAndPost(ctx, ledger.CreateJournalRequest{
 			TenantID:    tenantID,
 			Date:        in.RecognitionDate,
-			Description: fmt.Sprintf("Akad Kelebihan Tanah proyek %d", in.ProjectID),
+			Description: describeWithUnit(fmt.Sprintf("Akad Kelebihan Tanah proyek %d", in.ProjectID), in.UnitCode),
 			Source:      "land",
 			CreatedBy:   in.CreatedBy,
 			Lines:       revenueLines,
@@ -368,7 +381,7 @@ func RecordAkadTx(ctx context.Context, tx *gorm.DB, tenantID uint64, in RecordAk
 			cogsEntry, err := txPosting.CreateAndPost(ctx, ledger.CreateJournalRequest{
 				TenantID:    tenantID,
 				Date:        in.RecognitionDate,
-				Description: fmt.Sprintf("HPP Akad Kelebihan Tanah proyek %d", in.ProjectID),
+				Description: describeWithUnit(fmt.Sprintf("HPP Akad Kelebihan Tanah proyek %d", in.ProjectID), in.UnitCode),
 				Source:      "land",
 				CreatedBy:   in.CreatedBy,
 				Lines:       toLedgerLines(in.COGSLines),
@@ -389,7 +402,7 @@ func RecordAkadTx(ctx context.Context, tx *gorm.DB, tenantID uint64, in RecordAk
 			pphEntry, err := txPosting.CreateAndPost(ctx, ledger.CreateJournalRequest{
 				TenantID:    tenantID,
 				Date:        in.RecognitionDate,
-				Description: fmt.Sprintf("Akrual PPh Final Pengalihan Event 5a — Kelebihan Tanah proyek %d", in.ProjectID),
+				Description: describeWithUnit(fmt.Sprintf("Akrual PPh Final Pengalihan Event 5a — Kelebihan Tanah proyek %d", in.ProjectID), in.UnitCode),
 				Source:      "land",
 				CreatedBy:   in.CreatedBy,
 				Lines:       taxLinesToLedgerLines(in.PPhPlan.JournalLines()),

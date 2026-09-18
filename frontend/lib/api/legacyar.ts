@@ -114,6 +114,12 @@ export interface LegacyPayment {
   journal_entry_id: number;
   document_id?: number;
   document_number?: string;
+  // Kwitansi (KWL) yang lahir dari baris pembayaran ini — dipakai untuk
+  // menawarkan cetak langsung dari riwayat pembayaran, tanpa pindah ke Buku
+  // Dokumen. Kosong pada baris pembatalan (VoidPayment tidak menerbitkan
+  // kwitansi baru).
+  receipt_id?: number;
+  receipt_number?: string;
   voids_payment_id?: number;
   notes?: string;
   created_at: string;
@@ -225,16 +231,19 @@ export async function fetchLegacyReconciliation(
 
 // ── Impor ────────────────────────────────────────────────────────────────────
 
-// templateUrl: tautan unduh template resmi — SELALU same-origin lewat proxy Next.
+// templateUrl: tautan unduh template resmi — lewat route handler Next
+// (app/api/legacy-ar/template), BUKAN proxy rewrite /api/v1/* langsung.
 //
-// Sengaja tidak memakai apiBase(): ini bukan URL yang di-fetch kode, melainkan
-// href yang ditulis ke HTML dan diikuti BROWSER. apiBase() menjawab "http://
-// backend:8080/..." saat dirender di server — host internal yang tidak bisa
-// diresolusi browser, dan sekaligus memicu hydration mismatch karena klien
-// menjawab beda. Yang menentukan bentuk tautan ini adalah siapa yang MENGKLIK,
-// bukan siapa yang merender.
+// Rute backend ini dilindungi JWT (Authorization: Bearer header) — tapi <a
+// href download> adalah navigasi browser murni yang tidak bisa menyertakan
+// header custom, hanya cookie ikut otomatis. Lewat rewrite langsung, backend
+// selalu menolak 401 (JSON) dan browser menyimpan JSON itu sebagai
+// "template.xlsx" — bug yang dilaporkan. Route handler Next membaca cookie
+// sesi di server, menyisipkan Authorization sendiri, lalu meneruskan biner
+// xlsx-nya. Sengaja tidak memakai apiBase(): ini href yang ditulis ke HTML
+// dan diikuti BROWSER, bukan URL yang di-fetch kode.
 export function legacyTemplateUrl(): string {
-  return "/api/v1/legacy-ar/template";
+  return "/api/legacy-ar/template";
 }
 
 export interface UploadLegacyInput {

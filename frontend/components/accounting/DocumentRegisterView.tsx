@@ -20,6 +20,7 @@ import {
 } from "@/lib/api/document";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
+import { DocumentNumberLink } from "@/components/documents/DocumentNumberLink";
 
 function formatRupiah(value: string): string {
   const num = parseFloat(value);
@@ -162,7 +163,9 @@ export function DocumentRegisterView({ token }: { token: string }) {
             <tbody>
               {rows.map((d) => (
                 <tr key={d.id} className="border-b border-border-subtle last:border-0">
-                  <td className="px-4 py-3 font-mono text-text-primary whitespace-nowrap">{d.number}</td>
+                  <td className="px-4 py-3 font-mono text-text-primary whitespace-nowrap">
+                    <DocumentNumberLink token={token} number={d.number} />
+                  </td>
                   <td className="px-4 py-3 text-text-secondary">
                     {typeName[d.document_type_code] ?? d.document_type_code}
                   </td>

@@ -235,6 +235,16 @@ func (r *Repository) CreatePayment(ctx context.Context, p *Payment) error {
 	return r.db.WithContext(ctx).Create(p).Error
 }
 
+// SavePaymentReceipt menempelkan referensi kwitansi (KWL) ke baris pembayaran
+// yang sudah dibuat. Kwitansi lahir SETELAH baris pembayaran diinsert (ia
+// menunjuk legacy_receivable_payment_id), jadi ini selalu UPDATE susulan di
+// transaksi yang sama — bukan write kedua yang terpisah dari jurnalnya.
+func (r *Repository) SavePaymentReceipt(ctx context.Context, tenantID, paymentID, receiptID uint64, receiptNumber string) error {
+	return r.db.WithContext(ctx).Model(&Payment{}).
+		Where("tenant_id = ? AND id = ?", tenantID, paymentID).
+		Updates(map[string]any{"receipt_id": receiptID, "receipt_number": receiptNumber}).Error
+}
+
 func (r *Repository) FindPayment(ctx context.Context, tenantID, id uint64, forUpdate bool) (*Payment, error) {
 	q := r.db.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenantID, id)
 	if forUpdate {

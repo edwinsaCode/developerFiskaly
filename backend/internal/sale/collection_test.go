@@ -75,6 +75,35 @@ func TestCollection_FullPayment_BeforeBAST(t *testing.T) {
 	}
 }
 
+// TestCollection_Description_IncludesUnitCode memverifikasi end-to-end (readability
+// accounting 2026-09-18): TerminPayment.Description yang benar-benar tersimpan lewat
+// RecordCollectionPayment menyertakan kode Unit kanonik, bukan hanya di level builder
+// (lihat TestBuildReceiveDescription_UnitCode di description_internal_test.go).
+func TestCollection_Description_IncludesUnitCode(t *testing.T) {
+	const tenant, contract, unit = uint64(1), uint64(10), uint64(100)
+	cs := newMockContractStore()
+	seedContractWithSchedules(cs, tenant, contract, unit, domain.FromInt(1_000_000_000),
+		[]*sale.PaymentSchedule{sched(1, 1, 1_000_000_000)})
+	units := map[uint64]*sale.UnitSaleInfo{unit: {ID: unit, ProjectID: 9, Status: "reserved", Code: "A-15"}}
+	svc, _, ts := buildServiceWithContracts(units, nil, cs)
+
+	if _, err := svc.RecordCollectionPayment(context.Background(), tenant, collReq(contract, 1_000_000_000, "")); err != nil {
+		t.Fatalf("RecordCollectionPayment: %v", err)
+	}
+
+	if len(ts.termins) != 1 {
+		t.Fatalf("expected 1 termin tersimpan, got %d", len(ts.termins))
+	}
+	// resolveTerminKind (collection.go) hanya mengetahui targetSchedule spesifik
+	// via jalur legacy RecordTermin; RecordCollectionPayment (waterfall,
+	// perilaku existing — tidak diubah task ini) jatuh ke label "Lainnya" bila
+	// req.Kind tak diisi. Yang diverifikasi di sini murni penyisipan kode unit.
+	got := ts.termins[0].Description
+	if want := "Penerimaan Lainnya — Unit A-15 ref TRX-001 — transfer"; got != want {
+		t.Errorf("termin Description = %q, want %q", got, want)
+	}
+}
+
 // ── Partial payment (before BAST) ────────────────────────────────────────────
 
 func TestCollection_PartialPayment_BeforeBAST(t *testing.T) {

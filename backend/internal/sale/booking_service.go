@@ -176,6 +176,7 @@ func (s *Service) CreateBooking(ctx context.Context, tenantID uint64, req Create
 		CreditAccountCode: creditCode,
 		GenerateReceipt:   !feeZero,
 		ReceiptNotes:      "Booking fee",
+		UnitCode:          unit.Code,
 	})
 }
 

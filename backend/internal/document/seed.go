@@ -19,6 +19,7 @@ const (
 	TypeRealization      = "realization"       // KWR — kwitansi biaya realisasi
 	TypeInternalTransfer = "internal_transfer" // MTI — memo transfer internal
 	TypeInvoice          = "invoice"           // INV — invoice / tagihan
+	TypeLegacyReceivable = "legacy_ar"         // KWL — kwitansi piutang proyek lama
 
 	// W-3.1 — jenis dokumen kas. Dikelompokkan menurut ECONOMIC OWNERSHIP:
 	// siapa pemilik ekonomis uang yang bergerak, bukan modul yang mencatatnya.
@@ -36,6 +37,7 @@ var defaultTypes = []DocumentType{
 	{Code: TypeRealization, Name: "Kwitansi Biaya Realisasi", Prefix: "KWR"},
 	{Code: TypeInternalTransfer, Name: "Memo Transfer Internal", Prefix: "MTI"},
 	{Code: TypeInvoice, Name: "Invoice / Tagihan", Prefix: "INV"},
+	{Code: TypeLegacyReceivable, Name: "Kwitansi Piutang Proyek Lama", Prefix: "KWL"},
 	{Code: TypeKPRDisbursement, Name: "Kwitansi Pencairan KPR", Prefix: "KWD"},
 	{Code: TypeCashIn, Name: "Bukti Kas Masuk", Prefix: "BKM"},
 	{Code: TypeCashOut, Name: "Bukti Kas Keluar", Prefix: "BKK"},

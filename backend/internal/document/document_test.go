@@ -183,6 +183,8 @@ func TestDefaultTypes_KonsistenDenganMigrasi(t *testing.T) {
 		"realization":       "KWR",
 		"internal_transfer": "MTI",
 		"invoice":           "INV",
+		// 000105 — kwitansi piutang proyek lama (perluasan W-7).
+		"legacy_ar": "KWL",
 		// 000066 — katalog kas W-3, disusun menurut economic ownership.
 		"kpr_disbursement":   "KWD", // pembayar = bank
 		"cash_in":            "BKM", // penerimaan perusahaan non-customer

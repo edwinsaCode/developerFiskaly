@@ -249,7 +249,12 @@ type Payment struct {
 	JournalEntryID     uint64       `gorm:"not null;index"     json:"journal_entry_id"`
 	DocumentID         *uint64      `json:"document_id,omitempty"`
 	// DocumentNumber di-snapshot supaya riwayat terbaca tanpa join.
-	DocumentNumber string    `gorm:"size:40" json:"document_number,omitempty"`
+	DocumentNumber string  `gorm:"size:40" json:"document_number,omitempty"`
+	ReceiptID      *uint64 `json:"receipt_id,omitempty"`
+	// ReceiptNumber di-snapshot dengan pola yang sama seperti DocumentNumber —
+	// supaya halaman detail bisa menawarkan cetak kwitansi (KWL) langsung dari
+	// baris riwayat pembayaran tanpa pindah ke Buku Dokumen.
+	ReceiptNumber  string    `gorm:"size:40" json:"receipt_number,omitempty"`
 	VoidsPaymentID *uint64   `json:"voids_payment_id,omitempty"`
 	Notes          string    `gorm:"size:500" json:"notes,omitempty"`
 	IdempotencyKey *string   `gorm:"size:64"  json:"-"`

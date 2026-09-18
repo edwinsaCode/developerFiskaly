@@ -76,11 +76,13 @@ func (m *mockReceipts) CreateReceiptForTermin(ctx context.Context, tenantID, cre
 	}
 	m.seq[tenantID]++
 	m.nextID++
+	terminID := info.ID
+	unitID := info.UnitID
 	rec := &Receipt{
 		ID:              m.nextID,
 		TenantID:        tenantID,
-		TerminPaymentID: info.ID,
-		UnitID:          info.UnitID,
+		TerminPaymentID: &terminID,
+		UnitID:          &unitID,
 		ReceiptNumber:   fmt.Sprintf("KWT/2026/%06d", m.seq[tenantID]),
 		Amount:          info.Amount,
 		BankAccountCode: info.BankAccountCode,

@@ -289,6 +289,13 @@ type PrepareBundledAkadRequest struct {
 	ReceivableAccountCode string
 	RecognitionDate       time.Time
 	CreatedBy             *uint64
+	// UnitCode (readability accounting 2026-09-18): kode unit rumah yang
+	// Akad-nya membundel komponen tanah ini — diteruskan apa adanya oleh
+	// sale.Service (sudah punya UnitSaleInfo.Code) supaya deskripsi jurnal
+	// Kelebihan Tanah bisa dikenali konteks Unit-nya. Kosong = deskripsi
+	// project-level lama dipertahankan (jalur standalone land.Service.RecordAkad
+	// tidak pernah punya unit rumah).
+	UnitCode string
 }
 
 // PrepareBundledAkad resolves everything RecordAkad would (pool, reservation
@@ -388,6 +395,7 @@ func (s *Service) PrepareBundledAkad(ctx context.Context, tenantID uint64, req P
 		QuantityM2:                req.QuantityM2,
 		UnitPriceSnapshot:         unitPrice,
 		DPPAmount:                 dpp,
+		UnitCode:                  req.UnitCode,
 		IsPKP:                     req.IsPKP,
 		VATRateSnapshot:           req.VATRateSnapshot,
 		GrossAmount:               gross,

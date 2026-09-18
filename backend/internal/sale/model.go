@@ -140,6 +140,18 @@ func TerminKindLabel(k TerminKind, installmentNo *int) string {
 	}
 }
 
+// DescribeWithUnit menambahkan " — Unit {code}" pada deskripsi jurnal/termin
+// supaya Jurnal & Buku Besar bisa langsung dikenali tanpa membuka baris
+// detail (readability accounting, improvement 2026-09-18). unitCode kosong
+// (transaksi tanpa relasi unit, mis. biaya operasional umum) → deskripsi
+// dipertahankan apa adanya, tidak dipaksakan.
+func DescribeWithUnit(base, unitCode string) string {
+	if unitCode == "" {
+		return base
+	}
+	return base + " — Unit " + unitCode
+}
+
 func (TerminPayment) TableName() string { return "termin_payments" }
 
 // ── SaleRecord (Event 3+4) ────────────────────────────────────────────────────
@@ -290,6 +302,12 @@ type UnitSaleInfo struct {
 	UnitType string
 	// ListPrice: harga list unit (master) — sumber UnitPriceSnapshot kontrak.
 	ListPrice domain.Money
+	// Code: identifier kanonik unit (mis. "A-15") — SATU-SATUNYA sumber
+	// "nama/kode unit" di domain ini. Tidak ada entitas Blok terpisah; "Blok"
+	// hanya parameter input wizard bulk-create yang di-bake ke dalam Code
+	// (lihat BulkCreateUnitsRequest.Block). Dipakai untuk deskripsi
+	// jurnal/kwitansi yang bisa dikenali manusia (readability accounting).
+	Code string
 }
 
 // BASTAtomicParams berisi semua input yang sudah divalidasi dan diresolved

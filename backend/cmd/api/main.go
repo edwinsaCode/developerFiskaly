@@ -163,6 +163,9 @@ func main() {
 	// porsi SALDO AWAL bisa dibandingkan dengan rincian piutang lama tanpa
 	// tercampur mutasi penjualan berjalan.
 	legacyARHandler.Svc().WithBalanceReader(ledger.NewLedgerBalanceService(ledger.NewQueryService(gdb)))
+	// Kwitansi piutang proyek lama lewat mesin kwitansi yang SAMA dengan
+	// KWT/KWB/KWR/KWD (requirement #1/#4/#5) — jangan pernah mesin kedua.
+	legacyARHandler.Svc().WithReceiptCreator(billing.NewGORMRepository(gdb))
 	// SATU daftar piutang (INV-AR-1). `legacy` adalah sumber ketiga pada mesin
 	// aging yang sama, bukan halaman aging tersendiri: seorang customer berutang
 	// satu jumlah, walau tagihannya lahir dari proses yang berbeda.

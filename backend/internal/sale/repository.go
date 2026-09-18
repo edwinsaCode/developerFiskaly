@@ -116,7 +116,7 @@ func (r *GORMRepository) PostJournal(ctx context.Context, tenantID, journalID ui
 func (r *GORMRepository) FindUnitSaleInfo(ctx context.Context, tenantID, unitID uint64) (*UnitSaleInfo, error) {
 	var u project.Unit
 	err := r.db.WithContext(ctx).
-		Select("id, project_id, phase_id, status, unit_type, list_price").
+		Select("id, project_id, phase_id, status, unit_type, list_price, code").
 		Where("id = ? AND tenant_id = ?", unitID, tenantID).
 		First(&u).Error
 	if err != nil {
@@ -132,6 +132,7 @@ func (r *GORMRepository) FindUnitSaleInfo(ctx context.Context, tenantID, unitID 
 		Status:    string(u.Status),
 		UnitType:  u.UnitType,
 		ListPrice: u.ListPrice,
+		Code:      u.Code,
 	}, nil
 }
 
@@ -251,7 +252,7 @@ func (r *GORMRepository) Execute(ctx context.Context, params BASTAtomicParams) (
 		revenueReq := ledger.CreateJournalRequest{
 			TenantID:    params.TenantID,
 			Date:        params.BASTDate,
-			Description: fmt.Sprintf("Akad pengakuan pendapatan unit %d", params.UnitID),
+			Description: DescribeWithUnit("Akad pengakuan pendapatan", unitRow.Code),
 			Lines:       toledgerLines(params.RevenueLines),
 		}
 		revEntry, err := txPosting.Create(ctx, revenueReq)
@@ -268,7 +269,7 @@ func (r *GORMRepository) Execute(ctx context.Context, params BASTAtomicParams) (
 			cogsReq := ledger.CreateJournalRequest{
 				TenantID:    params.TenantID,
 				Date:        params.BASTDate,
-				Description: fmt.Sprintf("Akad HPP unit %d", params.UnitID),
+				Description: DescribeWithUnit("Akad HPP", unitRow.Code),
 				Lines:       toledgerLines(params.COGSLines),
 			}
 			cogsEntry, err := txPosting.Create(ctx, cogsReq)
@@ -340,7 +341,7 @@ func (r *GORMRepository) Execute(ctx context.Context, params BASTAtomicParams) (
 				nettingReq := ledger.CreateJournalRequest{
 					TenantID:    params.TenantID,
 					Date:        params.BASTDate,
-					Description: fmt.Sprintf("Netting uang muka Kelebihan Tanah unit %d saat BAST", params.UnitID),
+					Description: DescribeWithUnit("Netting uang muka Kelebihan Tanah saat BAST", unitRow.Code),
 					Lines:       toledgerLines(params.LandAdvanceLines),
 				}
 				nettingEntry, err := txPosting.Create(ctx, nettingReq)

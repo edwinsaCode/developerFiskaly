@@ -12,6 +12,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"esaproperti/internal/billing"
 	"esaproperti/internal/domain"
 	"esaproperti/internal/ledger"
 )
@@ -42,11 +43,22 @@ type LedgerBalanceReader interface {
 	AccountMovementBySource(ctx context.Context, tenantID uint64, code string, asOf *time.Time) (map[string]domain.Money, error)
 }
 
+// ReceiptCreator adalah seam ke MESIN KWITANSI YANG SUDAH ADA
+// (billing.GORMRepository) — requirement W-7 perluasan (piutang proyek lama):
+// jangan pernah membuat mesin kwitansi kedua. Diimplementasikan langsung oleh
+// billing.GORMRepository (lihat billing.LegacyReceiptInput dan
+// createLegacyReceiptInTx) dan dipanggil DI DALAM transaksi ReceivePayment
+// yang sama, supaya kwitansi dan jurnal penerimaan atomik bersama.
+type ReceiptCreator interface {
+	CreateLegacyReceiptInTx(ctx context.Context, tx *gorm.DB, tenantID, createdBy uint64, in billing.LegacyReceiptInput) (*billing.Receipt, error)
+}
+
 // Service adalah pintu masuk seluruh operasi piutang proyek lama.
 type Service struct {
-	repo    *Repository
-	db      *gorm.DB
-	balance LedgerBalanceReader
+	repo     *Repository
+	db       *gorm.DB
+	balance  LedgerBalanceReader
+	receipts ReceiptCreator
 }
 
 func NewService(repo *Repository, db *gorm.DB) *Service {
@@ -57,6 +69,15 @@ func NewService(repo *Repository, db *gorm.DB) *Service {
 // WithPeriodChecker di ledger).
 func (s *Service) WithBalanceReader(b LedgerBalanceReader) *Service {
 	s.balance = b
+	return s
+}
+
+// WithReceiptCreator memasang mesin kwitansi yang sudah ada (billing). Bila
+// tidak dipasang, ReceivePayment tetap berjalan (jurnal & sub-ledger tetap
+// tercatat) tapi tidak menerbitkan kwitansi — dipakai test yang tidak
+// menguji kwitansi, persis pola WithBalanceReader.
+func (s *Service) WithReceiptCreator(r ReceiptCreator) *Service {
+	s.receipts = r
 	return s
 }
 

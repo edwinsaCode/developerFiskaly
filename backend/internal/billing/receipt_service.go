@@ -139,8 +139,8 @@ func (s *ReceiptService) GetReceiptPrintData(ctx context.Context, tenantID, rece
 	// adalah sisa jadwal itu — bukan Outstanding gabungan kontrak di bawah.
 	// Dicek SEBELUM ringkasan kontrak agar template bisa memilih prioritas.
 	if s.scheduleOutstanding != nil {
-		if rec, rerr := s.receipts.FindReceiptByID(ctx, tenantID, receiptID); rerr == nil && rec != nil {
-			if ts, terr := s.scheduleOutstanding.LoadTargetedScheduleOutstanding(ctx, tenantID, rec.TerminPaymentID); terr == nil && ts != nil && ts.Type == "land" {
+		if rec, rerr := s.receipts.FindReceiptByID(ctx, tenantID, receiptID); rerr == nil && rec != nil && rec.TerminPaymentID != nil {
+			if ts, terr := s.scheduleOutstanding.LoadTargetedScheduleOutstanding(ctx, tenantID, *rec.TerminPaymentID); terr == nil && ts != nil && ts.Type == "land" {
 				data.HasScheduleOutstanding = true
 				data.ScheduleTypeLabel = "Kelebihan Tanah"
 				data.ScheduleOutstanding = ts.Outstanding
@@ -149,14 +149,18 @@ func (s *ReceiptService) GetReceiptPrintData(ctx context.Context, tenantID, rece
 	}
 	// Hardening: ringkasan finansial kontrak. Kontrak dicari dari receipt
 	// (sale_contract_id bila ada; fallback kontrak aktif unit). Best-effort.
-	if s.summary != nil {
+	// Piutang proyek lama (legacy_ar) tidak punya kontrak maupun unit — tidak
+	// ada ContractSummary untuk dicari, dan rec.UnitID nil untuk jenis ini
+	// (migration 000105) sehingga SummaryByUnitID tidak boleh dipanggil sama
+	// sekali. Terutangnya dijawab HasLegacySummary di bawah, bukan di sini.
+	if s.summary != nil && data.ReceiptType != ReceiptTypeLegacyAR {
 		if rec, rerr := s.receipts.FindReceiptByID(ctx, tenantID, receiptID); rerr == nil && rec != nil {
 			var cs *ContractSummary
 			var serr error
 			if rec.SaleContractID != nil {
 				cs, serr = s.summary.SummaryByContractID(ctx, tenantID, *rec.SaleContractID)
-			} else {
-				cs, serr = s.summary.SummaryByUnitID(ctx, tenantID, rec.UnitID)
+			} else if rec.UnitID != nil {
+				cs, serr = s.summary.SummaryByUnitID(ctx, tenantID, *rec.UnitID)
 			}
 			if serr == nil && cs != nil {
 				data.HasSummary = true
