@@ -140,14 +140,25 @@ func TerminKindLabel(k TerminKind, installmentNo *int) string {
 	}
 }
 
-// DescribeWithUnit menambahkan " — Unit {code}" pada deskripsi jurnal/termin
-// supaya Jurnal & Buku Besar bisa langsung dikenali tanpa membuka baris
-// detail (readability accounting, improvement 2026-09-18). unitCode kosong
-// (transaksi tanpa relasi unit, mis. biaya operasional umum) → deskripsi
-// dipertahankan apa adanya, tidak dipaksakan.
-func DescribeWithUnit(base, unitCode string) string {
+// DescribeWithUnit menambahkan konteks proyek + unit pada deskripsi
+// jurnal/termin supaya Jurnal & Buku Besar bisa langsung dikenali tanpa
+// membuka baris detail (readability accounting, 2026-09-18/09-20):
+//
+//	"{base} — Proyek {projectName} — Unit {unitCode}"
+//
+// Nama proyek berasal dari master projects.name; kode unit dari units.code.
+// Deskripsi jurnal yang sudah diposting immutable (invariant #5), jadi ini
+// snapshot saat posting — sengaja, demi audit trail. TIDAK ada segmen Blok:
+// Blok bukan entity di domain ini (hanya prefix Unit.Code) dan tidak boleh
+// diparse/dikarang. unitCode kosong (transaksi tanpa relasi unit, mis. biaya
+// operasional umum) → deskripsi dipertahankan apa adanya; projectName kosong
+// → segmen proyek dilewati.
+func DescribeWithUnit(base, projectName, unitCode string) string {
 	if unitCode == "" {
 		return base
+	}
+	if projectName != "" {
+		base += " — Proyek " + projectName
 	}
 	return base + " — Unit " + unitCode
 }
@@ -308,6 +319,8 @@ type UnitSaleInfo struct {
 	// (lihat BulkCreateUnitsRequest.Block). Dipakai untuk deskripsi
 	// jurnal/kwitansi yang bisa dikenali manusia (readability accounting).
 	Code string
+	// ProjectName: projects.name (master) — untuk deskripsi jurnal/buku besar.
+	ProjectName string
 }
 
 // BASTAtomicParams berisi semua input yang sudah divalidasi dan diresolved

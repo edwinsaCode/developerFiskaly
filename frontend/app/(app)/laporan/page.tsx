@@ -15,7 +15,7 @@ import {
 import { fetchRABvsRealisasi, fetchConstructionRealisasi } from "@/lib/api/budget";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { LaporanNavClient } from "@/components/laporan/LaporanNavClient";
-import { ExportCsvButton } from "@/components/laporan/ExportCsvButton";
+import { ExportExcelButton } from "@/components/laporan/ExportExcelButton";
 import { ExportPdfButton } from "@/components/laporan/ExportPdfButton";
 import { NeracaSection } from "@/components/laporan/NeracaSection";
 import { PLSection } from "@/components/laporan/PLSection";
@@ -123,10 +123,10 @@ export default async function LaporanPage({ searchParams }: PageProps) {
         </div>
         {exportParams && (
           <div className="flex items-center gap-2">
-            <ExportCsvButton
+            <ExportExcelButton
               report={exportParams.report}
               params={exportParams.params}
-              label="Export CSV"
+              label="Export Excel"
             />
             <ExportPdfButton
               token={token}

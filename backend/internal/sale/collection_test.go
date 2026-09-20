@@ -84,7 +84,7 @@ func TestCollection_Description_IncludesUnitCode(t *testing.T) {
 	cs := newMockContractStore()
 	seedContractWithSchedules(cs, tenant, contract, unit, domain.FromInt(1_000_000_000),
 		[]*sale.PaymentSchedule{sched(1, 1, 1_000_000_000)})
-	units := map[uint64]*sale.UnitSaleInfo{unit: {ID: unit, ProjectID: 9, Status: "reserved", Code: "A-15"}}
+	units := map[uint64]*sale.UnitSaleInfo{unit: {ID: unit, ProjectID: 9, Status: "reserved", Code: "A-15", ProjectName: "Nata Alam"}}
 	svc, _, ts := buildServiceWithContracts(units, nil, cs)
 
 	if _, err := svc.RecordCollectionPayment(context.Background(), tenant, collReq(contract, 1_000_000_000, "")); err != nil {
@@ -99,7 +99,7 @@ func TestCollection_Description_IncludesUnitCode(t *testing.T) {
 	// perilaku existing — tidak diubah task ini) jatuh ke label "Lainnya" bila
 	// req.Kind tak diisi. Yang diverifikasi di sini murni penyisipan kode unit.
 	got := ts.termins[0].Description
-	if want := "Penerimaan Lainnya — Unit A-15 ref TRX-001 — transfer"; got != want {
+	if want := "Penerimaan Lainnya — Proyek Nata Alam — Unit A-15 ref TRX-001 — transfer"; got != want {
 		t.Errorf("termin Description = %q, want %q", got, want)
 	}
 }

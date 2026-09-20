@@ -141,7 +141,7 @@ func (h *Handler) balanceSheet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Query().Get("format") == "csv" {
+	if isTableFormat(r) {
 		var rows [][]string
 		for _, line := range neraca.Aset {
 			rows = append(rows, []string{"aset", line.Code, line.Name, line.Amount})
@@ -155,7 +155,7 @@ func (h *Handler) balanceSheet(w http.ResponseWriter, r *http.Request) {
 			rows = append(rows, []string{"ekuitas", line.Code, line.Name, line.Amount})
 		}
 		rows = append(rows, []string{"ke_total", "", "Total Kewajiban+Ekuitas", neraca.TotalKewajibanEkuitas})
-		writeCSV(w, []string{"seksi", "kode", "nama", "jumlah"}, rows)
+		writeTable(w, r, "neraca", []string{"seksi", "kode", "nama", "jumlah"}, rows)
 		return
 	}
 	writeReportJSON(w, http.StatusOK, neraca)
@@ -176,8 +176,8 @@ func (h *Handler) incomeStatement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Query().Get("format") == "csv" {
-		writeCSV(w, []string{"seksi", "kode", "nama", "jumlah"}, plToCSVRows(rpt))
+	if isTableFormat(r) {
+		writeTable(w, r, "laba_rugi", []string{"seksi", "kode", "nama", "jumlah"}, plToCSVRows(rpt))
 		return
 	}
 	writeReportJSON(w, http.StatusOK, rpt)
@@ -203,8 +203,8 @@ func (h *Handler) projectPL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Query().Get("format") == "csv" {
-		writeCSV(w, []string{"seksi", "kode", "nama", "jumlah"}, plToCSVRows(rpt))
+	if isTableFormat(r) {
+		writeTable(w, r, "laba_rugi_proyek", []string{"seksi", "kode", "nama", "jumlah"}, plToCSVRows(rpt))
 		return
 	}
 	writeReportJSON(w, http.StatusOK, rpt)
@@ -225,7 +225,7 @@ func (h *Handler) cashFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Query().Get("format") == "csv" {
+	if isTableFormat(r) {
 		var rows [][]string
 		for _, l := range rpt.Operasi.Lines {
 			rows = append(rows, []string{"operasi", l.Description, l.Amount})
@@ -240,7 +240,7 @@ func (h *Handler) cashFlow(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = append(rows, []string{"pendanaan_net", "Net Arus Kas Pendanaan", rpt.Pendanaan.Net})
 		rows = append(rows, []string{"net_change", "Perubahan Kas Bersih", rpt.NetChange})
-		writeCSV(w, []string{"kategori", "deskripsi", "jumlah"}, rows)
+		writeTable(w, r, "arus_kas", []string{"kategori", "deskripsi", "jumlah"}, rows)
 		return
 	}
 	writeReportJSON(w, http.StatusOK, rpt)
@@ -259,14 +259,14 @@ func (h *Handler) salesPipeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Query().Get("format") == "csv" {
+	if isTableFormat(r) {
 		rows := [][]string{
 			{"available", strconv.Itoa(rpt.Available.Count), rpt.Available.TotalListPrice, ""},
 			{"reserved", strconv.Itoa(rpt.Reserved.Count), rpt.Reserved.TotalListPrice, rpt.Reserved.TotalAdvance},
 			{"sold", strconv.Itoa(rpt.Sold.Count), "", rpt.Sold.TotalContractValue},
 			{"total", strconv.Itoa(rpt.TotalUnits), rpt.ProjectedRevenue, ""},
 		}
-		writeCSV(w, []string{"status", "jumlah_unit", "total_list_price", "nilai_kontrak"}, rows)
+		writeTable(w, r, "sales_pipeline", []string{"status", "jumlah_unit", "total_list_price", "nilai_kontrak"}, rows)
 		return
 	}
 	writeReportJSON(w, http.StatusOK, rpt)
@@ -287,7 +287,7 @@ func (h *Handler) taxLiability(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Query().Get("format") == "csv" {
+	if isTableFormat(r) {
 		var rows [][]string
 		for _, item := range rpt.Items {
 			unitID := ""
@@ -308,7 +308,7 @@ func (h *Handler) taxLiability(w http.ResponseWriter, r *http.Request) {
 		rows = append(rows, []string{"", "", "", "", "Total Kewajiban", rpt.TotalObligation, "", ""})
 		rows = append(rows, []string{"", "", "", "", "Total Dibayar", rpt.TotalPaid, "", ""})
 		rows = append(rows, []string{"", "", "", "", "Belum Dibayar", rpt.TotalOutstanding, "", ""})
-		writeCSV(w, []string{"id", "unit_id", "rate_code", "transfer_value", "rate", "tax_amount", "status", "accrual_date"}, rows)
+		writeTable(w, r, "pajak", []string{"id", "unit_id", "rate_code", "transfer_value", "rate", "tax_amount", "status", "accrual_date"}, rows)
 		return
 	}
 	writeReportJSON(w, http.StatusOK, rpt)
@@ -341,7 +341,7 @@ func (h *Handler) arAging(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Query().Get("format") == "csv" {
+	if isTableFormat(r) {
 		var rows [][]string
 		for _, row := range rpt.Rows {
 			rows = append(rows, []string{
@@ -356,7 +356,7 @@ func (h *Handler) arAging(w http.ResponseWriter, r *http.Request) {
 		rows = append(rows, []string{"", "", "", "", "Jatuh Tempo", "", "", rpt.Overdue, "", "", ""})
 		rows = append(rows, []string{"", "", "", "", "Jatuh Tempo Minggu Ini", "", "", rpt.DueThisWeek, "", "", ""})
 		rows = append(rows, []string{"", "", "", "", "Collection Rate (%)", "", "", rpt.CollectionRate, "", "", ""})
-		writeCSV(w, []string{"sumber", "buyer", "unit", "invoice", "jatuh_tempo", "nominal", "dibayar", "outstanding", "hari_telat", "bucket", "status"}, rows)
+		writeTable(w, r, "ar_aging", []string{"sumber", "buyer", "unit", "invoice", "jatuh_tempo", "nominal", "dibayar", "outstanding", "hari_telat", "bucket", "status"}, rows)
 		return
 	}
 	writeReportJSON(w, http.StatusOK, rpt)
@@ -376,13 +376,13 @@ func (h *Handler) trialBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Query().Get("format") == "csv" {
+	if isTableFormat(r) {
 		var rows [][]string
 		for _, row := range tb.Rows {
 			rows = append(rows, []string{row.AccountCode, row.AccountName, string(row.AccountType), row.TotalDebit.String(), row.TotalCredit.String(), row.Balance.String()})
 		}
 		rows = append(rows, []string{"", "", "TOTAL", tb.TotalDebit.String(), tb.TotalCredit.String(), ""})
-		writeCSV(w, []string{"kode", "nama", "tipe", "total_debit", "total_kredit", "saldo"}, rows)
+		writeTable(w, r, "neraca_saldo", []string{"kode", "nama", "tipe", "total_debit", "total_kredit", "saldo"}, rows)
 		return
 	}
 	writeReportJSON(w, http.StatusOK, tb)
@@ -426,7 +426,7 @@ func (h *Handler) generalLedger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Query().Get("format") == "csv" {
+	if isTableFormat(r) {
 		var rows [][]string
 		for _, e := range entries {
 			rows = append(rows, []string{
@@ -434,7 +434,7 @@ func (h *Handler) generalLedger(w http.ResponseWriter, r *http.Request) {
 				e.Debit.String(), e.Credit.String(), e.Balance.String(),
 			})
 		}
-		writeCSV(w, []string{"tanggal", "referensi", "keterangan", "debit", "kredit", "saldo"}, rows)
+		writeTable(w, r, "buku_besar", []string{"tanggal", "referensi", "keterangan", "debit", "kredit", "saldo"}, rows)
 		return
 	}
 	writeReportJSON(w, http.StatusOK, entries)
@@ -681,6 +681,12 @@ func writeReportJSON(w http.ResponseWriter, status int, v any) {
 
 func writeReportError(w http.ResponseWriter, status int, msg string) {
 	writeReportJSON(w, status, map[string]string{"error": msg})
+}
+
+// isTableFormat: ?format=csv atau ?format=xlsx — dua bentuk tabular dari data yang sama.
+func isTableFormat(r *http.Request) bool {
+	f := r.URL.Query().Get("format")
+	return f == "csv" || f == "xlsx"
 }
 
 func writeCSV(w http.ResponseWriter, header []string, rows [][]string) {

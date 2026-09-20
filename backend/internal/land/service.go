@@ -60,7 +60,8 @@ type RecordAkadParams struct {
 	// UnitCode (readability accounting 2026-09-18): lihat komentar
 	// PrepareBundledAkadRequest.UnitCode di akad.go. Kosong pada jalur
 	// standalone (land.Service.RecordAkad) — deskripsi tetap project-level.
-	UnitCode string
+	UnitCode    string
+	ProjectName string
 
 	RevenueLines []JournalLineInput // Akad pengakuan pendapatan
 	COGSLines    []JournalLineInput // Akad HPP; nil jika hpp_total = 0

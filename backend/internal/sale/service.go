@@ -778,6 +778,7 @@ func (s *Service) RecordAkad(ctx context.Context, tenantID uint64, req RecordBAS
 				RecognitionDate:       req.BASTDate,
 				CreatedBy:             req.CreatedBy,
 				UnitCode:              unit.Code,
+				ProjectName:           unit.ProjectName,
 			})
 			if lerr != nil {
 				return nil, fmt.Errorf("siapkan Akad Kelebihan Tanah: %w", lerr)

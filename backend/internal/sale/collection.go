@@ -556,11 +556,11 @@ func (s *Service) ReceivePayment(ctx context.Context, tenantID uint64, req Recei
 	// best-effort: gagal resolve (unit tak ditemukan, dsb) tidak pernah
 	// menggagalkan penerimaan pembayaran, deskripsi hanya jatuh ke label
 	// generik tanpa kode unit.
-	var unitCode string
+	var unitCode, projectName string
 	if info, uerr := s.units.FindUnitSaleInfo(ctx, tenantID, unitID); uerr == nil {
-		unitCode = info.Code
+		unitCode, projectName = info.Code, info.ProjectName
 	}
-	desc := buildReceiveDescription(req, kind, installmentNo, unitCode)
+	desc := buildReceiveDescription(req, kind, installmentNo, projectName, unitCode)
 
 	// 4. Validasi + routing + baris jurnal balanced (TANPA tulis DB).
 	prepared, err := s.preparePayment(ctx, tenantID, RecordTerminRequest{
@@ -905,8 +905,8 @@ func resolveTerminKind(req ReceivePaymentRequest, targetSchedule *PaymentSchedul
 // accounting 2026-09-18) disisipkan lewat DescribeWithUnit supaya Jurnal & Buku
 // Besar langsung menunjukkan unit tanpa membuka baris detail; kosong (mis.
 // penerimaan tanpa relasi unit) → deskripsi tetap seperti sebelumnya.
-func buildReceiveDescription(req ReceivePaymentRequest, kind TerminKind, installmentNo *int, unitCode string) string {
-	desc := DescribeWithUnit("Penerimaan "+TerminKindLabel(kind, installmentNo), unitCode)
+func buildReceiveDescription(req ReceivePaymentRequest, kind TerminKind, installmentNo *int, projectName, unitCode string) string {
+	desc := DescribeWithUnit("Penerimaan "+TerminKindLabel(kind, installmentNo), projectName, unitCode)
 	if req.Reference != "" {
 		desc += " ref " + req.Reference
 	}

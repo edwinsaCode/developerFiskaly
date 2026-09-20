@@ -36,6 +36,8 @@ type CreateBookingAtomicParams struct {
 	// = deskripsi generik dipertahankan (tidak seharusnya terjadi untuk
 	// booking, unit selalu ada, tapi tidak boleh menggagalkan booking).
 	UnitCode string
+	// ProjectName: projects.name (master) — segmen proyek deskripsi jurnal.
+	ProjectName string
 }
 
 // transitionUnitPinnedTx meng-update status unit dengan predikat DI-PIN ke
@@ -78,7 +80,7 @@ func (r *GORMRepository) CreateBookingAtomic(ctx context.Context, p CreateBookin
 			entry, err := txPosting.Create(ctx, ledger.CreateJournalRequest{
 				TenantID:    p.TenantID,
 				Date:        b.BookingDate,
-				Description: DescribeWithUnit("Booking fee", p.UnitCode),
+				Description: DescribeWithUnit("Booking fee", p.ProjectName, p.UnitCode),
 				Lines:       toledgerLines(p.JournalLines),
 			})
 			if err != nil {
@@ -97,7 +99,7 @@ func (r *GORMRepository) CreateBookingAtomic(ctx context.Context, p CreateBookin
 				Amount:            b.BookingFee,
 				BankAccountCode:   p.BankAccountCode,
 				Date:              b.BookingDate,
-				Description:       DescribeWithUnit("Booking fee", p.UnitCode),
+				Description:       DescribeWithUnit("Booking fee", p.ProjectName, p.UnitCode),
 				JournalEntryID:    entry.ID,
 				CreditAccountCode: p.CreditAccountCode,
 				CreatedBy:         b.CreatedBy,

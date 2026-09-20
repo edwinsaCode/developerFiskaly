@@ -13,6 +13,7 @@ import { Tanggal } from "@/components/format/Tanggal";
 import { fetchAccounts } from "@/lib/api/ledger";
 import { fetchGeneralLedger } from "@/lib/api/reports";
 import { ExportPdfButton } from "@/components/laporan/ExportPdfButton";
+import { ExportExcelButton } from "@/components/laporan/ExportExcelButton";
 import { LinkifiedText } from "@/components/documents/LinkifiedText";
 import type { Account, LedgerEntry } from "@/lib/types/api";
 import { dateToLocalStr, todayLocalStr } from "@/lib/date";
@@ -135,6 +136,11 @@ export function GeneralLedgerView({ token, initialAccountId }: { token: string; 
                 report="general-ledger"
                 params={{ account_id: accountId, from, to }}
                 label="Export PDF"
+              />
+              <ExportExcelButton
+                report="general-ledger"
+                params={{ account_id: accountId, from, to }}
+                label="Export Excel"
               />
             </div>
           </div>
