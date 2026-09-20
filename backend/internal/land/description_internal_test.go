@@ -10,17 +10,18 @@ func TestDescribeWithUnit(t *testing.T) {
 	cases := []struct {
 		name     string
 		base     string
+		project  string
 		unitCode string
 		want     string
 	}{
-		{"kode tersedia (bundled dgn Akad unit)", "Akad Kelebihan Tanah proyek 9", "A-15", "Akad Kelebihan Tanah proyek 9 — Unit A-15"},
-		{"kode kosong dipertahankan apa adanya (standalone, ketentuan #6)", "Akad Kelebihan Tanah proyek 9", "", "Akad Kelebihan Tanah proyek 9"},
+		{"kode tersedia (bundled dgn Akad unit)", "Akad Kelebihan Tanah proyek 9", "Nata Alam", "A-15", "Akad Kelebihan Tanah proyek 9 — Proyek Nata Alam — Unit A-15"},
+		{"kode kosong dipertahankan apa adanya (standalone, ketentuan #6)", "Akad Kelebihan Tanah proyek 9", "Nata Alam", "", "Akad Kelebihan Tanah proyek 9"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := describeWithUnit(c.base, c.unitCode)
+			got := describeWithUnit(c.base, c.project, c.unitCode)
 			if got != c.want {
-				t.Errorf("describeWithUnit(%q, %q) = %q, want %q", c.base, c.unitCode, got, c.want)
+				t.Errorf("describeWithUnit(%q, %q, %q) = %q, want %q", c.base, c.project, c.unitCode, got, c.want)
 			}
 		})
 	}

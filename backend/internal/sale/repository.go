@@ -126,14 +126,29 @@ func (r *GORMRepository) FindUnitSaleInfo(ctx context.Context, tenantID, unitID 
 		return nil, fmt.Errorf("FindUnitSaleInfo: %w", err)
 	}
 	return &UnitSaleInfo{
-		ID:        u.ID,
-		ProjectID: u.ProjectID,
-		PhaseID:   u.PhaseID,
-		Status:    string(u.Status),
-		UnitType:  u.UnitType,
-		ListPrice: u.ListPrice,
-		Code:      u.Code,
+		ID:          u.ID,
+		ProjectID:   u.ProjectID,
+		PhaseID:     u.PhaseID,
+		Status:      string(u.Status),
+		UnitType:    u.UnitType,
+		ListPrice:   u.ListPrice,
+		Code:        u.Code,
+		ProjectName: projectNameByID(r.db.WithContext(ctx), tenantID, u.ProjectID),
 	}, nil
+}
+
+// projectNameByID membaca projects.name untuk deskripsi jurnal. Best-effort:
+// gagal/kosong → "" dan deskripsi jatuh ke bentuk tanpa segmen proyek; tidak
+// pernah menggagalkan transaksi.
+func projectNameByID(db *gorm.DB, tenantID, projectID uint64) string {
+	var name string
+	if err := db.Model(&project.Project{}).
+		Select("name").
+		Where("id = ? AND tenant_id = ?", projectID, tenantID).
+		Scan(&name).Error; err != nil {
+		return ""
+	}
+	return name
 }
 
 // ── TerminStore ───────────────────────────────────────────────────────────────
@@ -238,6 +253,7 @@ func (r *GORMRepository) Execute(ctx context.Context, params BASTAtomicParams) (
 			Scan(&unitRow).Error; err != nil {
 			return fmt.Errorf("baca status unit: %w", err)
 		}
+		projectName := projectNameByID(tx, params.TenantID, params.ProjectID)
 		fromStatus := unitRow.Status
 		switch {
 		case fromStatus == "":
@@ -252,7 +268,7 @@ func (r *GORMRepository) Execute(ctx context.Context, params BASTAtomicParams) (
 		revenueReq := ledger.CreateJournalRequest{
 			TenantID:    params.TenantID,
 			Date:        params.BASTDate,
-			Description: DescribeWithUnit("Akad pengakuan pendapatan", unitRow.Code),
+			Description: DescribeWithUnit("Akad pengakuan pendapatan", projectName, unitRow.Code),
 			Lines:       toledgerLines(params.RevenueLines),
 		}
 		revEntry, err := txPosting.Create(ctx, revenueReq)
@@ -269,7 +285,7 @@ func (r *GORMRepository) Execute(ctx context.Context, params BASTAtomicParams) (
 			cogsReq := ledger.CreateJournalRequest{
 				TenantID:    params.TenantID,
 				Date:        params.BASTDate,
-				Description: DescribeWithUnit("Akad HPP", unitRow.Code),
+				Description: DescribeWithUnit("Akad HPP", projectName, unitRow.Code),
 				Lines:       toledgerLines(params.COGSLines),
 			}
 			cogsEntry, err := txPosting.Create(ctx, cogsReq)
@@ -341,7 +357,7 @@ func (r *GORMRepository) Execute(ctx context.Context, params BASTAtomicParams) (
 				nettingReq := ledger.CreateJournalRequest{
 					TenantID:    params.TenantID,
 					Date:        params.BASTDate,
-					Description: DescribeWithUnit("Netting uang muka Kelebihan Tanah saat BAST", unitRow.Code),
+					Description: DescribeWithUnit("Netting uang muka Kelebihan Tanah saat BAST", projectName, unitRow.Code),
 					Lines:       toledgerLines(params.LandAdvanceLines),
 				}
 				nettingEntry, err := txPosting.Create(ctx, nettingReq)

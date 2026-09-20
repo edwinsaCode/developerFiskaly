@@ -296,6 +296,8 @@ type PrepareBundledAkadRequest struct {
 	// project-level lama dipertahankan (jalur standalone land.Service.RecordAkad
 	// tidak pernah punya unit rumah).
 	UnitCode string
+	// ProjectName: projects.name — segmen proyek deskripsi (lihat sale.DescribeWithUnit).
+	ProjectName string
 }
 
 // PrepareBundledAkad resolves everything RecordAkad would (pool, reservation
@@ -396,6 +398,7 @@ func (s *Service) PrepareBundledAkad(ctx context.Context, tenantID uint64, req P
 		UnitPriceSnapshot:         unitPrice,
 		DPPAmount:                 dpp,
 		UnitCode:                  req.UnitCode,
+		ProjectName:               req.ProjectName,
 		IsPKP:                     req.IsPKP,
 		VATRateSnapshot:           req.VATRateSnapshot,
 		GrossAmount:               gross,

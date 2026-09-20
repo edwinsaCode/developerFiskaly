@@ -195,7 +195,7 @@ func (u *stubUnits) FindUnitSaleInfo(_ context.Context, _ uint64, unitID uint64)
 	if unitID == 0 {
 		return nil, sale.ErrUnitNotFound
 	}
-	return &sale.UnitSaleInfo{ID: unitID, ProjectID: 7, Status: u.status, Code: u.code}, nil
+	return &sale.UnitSaleInfo{ID: unitID, ProjectID: 7, Status: u.status, Code: u.code, ProjectName: "Nata Alam"}, nil
 }
 
 func newBookingTestService(store sale.BookingStore, unitStatus string, missing ...string) *sale.Service {
@@ -254,7 +254,7 @@ func TestCreateBooking_Valid(t *testing.T) {
 // TestCreateBooking_UnitCodePassedToAtomicParams (readability accounting
 // 2026-09-18): kode unit kanonik (SoT tunggal — tidak ada entitas Blok
 // terpisah di domain) harus ikut diteruskan ke CreateBookingAtomicParams
-// supaya repo bisa menyusun deskripsi jurnal "Booking fee — Unit {code}"
+// supaya repo bisa menyusun deskripsi jurnal "Booking fee — Proyek {nama} — Unit {code}"
 // alih-alih "Booking fee unit {id}". Unit tanpa kode (string kosong, mis.
 // data legacy) tidak boleh menggagalkan booking — hanya deskripsi jatuh ke
 // label generik (diuji terpisah lewat sale.DescribeWithUnit).
@@ -264,7 +264,7 @@ func TestCreateBooking_UnitCodePassedToAtomicParams(t *testing.T) {
 	if _, err := svc.CreateBooking(context.Background(), 1, validBookingReq()); err != nil {
 		t.Fatalf("CreateBooking: %v", err)
 	}
-	if store.created == nil || store.created.UnitCode != "A-15" {
+	if store.created == nil || store.created.UnitCode != "A-15" || store.created.ProjectName != "Nata Alam" {
 		t.Fatalf("UnitCode tidak diteruskan ke CreateBookingAtomicParams: %+v", store.created)
 	}
 }

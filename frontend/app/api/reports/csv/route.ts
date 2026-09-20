@@ -1,4 +1,5 @@
-// CSV export proxy — membaca httpOnly cookie dan meneruskan ke Go backend dengan ?format=csv.
+// CSV/Excel export proxy — membaca httpOnly cookie dan meneruskan ke Go backend dengan
+// ?format=csv atau ?format=xlsx (query `format` dari browser; default csv).
 // Client tidak pernah menyentuh token; browser hanya membuka URL ini.
 
 import { cookies } from "next/headers";
@@ -37,11 +38,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "laporan tidak dikenal" }, { status: 400 });
   }
 
-  const backendPath = pathBuilder(searchParams);
+  const isXlsx = searchParams.get("format") === "xlsx";
+  // `format` dari browser tidak boleh ikut diteruskan (duplikat dengan format=csv di builder).
+  const forwarded = new URLSearchParams(searchParams);
+  forwarded.delete("format");
+  let backendPath = pathBuilder(forwarded);
+  if (isXlsx) backendPath = backendPath.replace("format=csv", "format=xlsx");
   const backendRes = await fetch(`${API_URL}${backendPath}`, {
     headers: {
       Authorization: `Bearer ${token}`,
-      Accept: "text/csv",
+      Accept: isXlsx ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : "text/csv",
     },
   });
 
@@ -49,11 +55,24 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "gagal mengambil laporan" }, { status: backendRes.status });
   }
 
+  const reportName = report.replace(/-/g, "_");
+  const stamp = new Date().toISOString().slice(0, 10);
+
+  if (isXlsx) {
+    // Biner: .arrayBuffer(), bukan .text() — xlsx yang di-text()-kan rusak.
+    return new NextResponse(await backendRes.arrayBuffer(), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": `attachment; filename="${reportName}_${stamp}.xlsx"`,
+      },
+    });
+  }
+
   const csvText = await backendRes.text();
   // BOM UTF-8 agar Excel membaca encoding benar
   const bom = "﻿";
-  const reportName = report.replace(/-/g, "_");
-  const filename = `${reportName}_${new Date().toISOString().slice(0, 10)}.csv`;
+  const filename = `${reportName}_${stamp}.csv`;
 
   return new NextResponse(bom + csvText, {
     status: 200,
