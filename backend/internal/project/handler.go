@@ -76,6 +76,8 @@ func (h *Handler) Mount(r chi.Router) {
 		// LT-2 (kelebihan-tanah-final-architecture §B.5): koreksi eksplisit-admin
 		// luas tanah, terpisah dari status transition.
 		r.With(auth.RequireWrite()).Patch("/land-area", h.updateUnitLandArea)
+		// Hapus unit kelebihan/salah — hanya unit tanpa relasi apa pun.
+		r.With(auth.RequireWrite()).Delete("/", h.deleteUnit)
 	})
 }
 
@@ -900,6 +902,37 @@ func (h *Handler) updateUnitLandArea(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeProjectJSON(w, http.StatusOK, u)
+}
+
+// deleteUnit: 204 bila terhapus; 409 + daftar alasan bila unit sudah dipakai.
+func (h *Handler) deleteUnit(w http.ResponseWriter, r *http.Request) {
+	tenantID, err := projectTenantID(r)
+	if err != nil {
+		writeProjectError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	id, err := parseProjectID(r)
+	if err != nil {
+		writeProjectError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if err := h.svc.DeleteUnit(r.Context(), tenantID, id); err != nil {
+		var inUse *UnitInUseError
+		if errors.As(err, &inUse) {
+			writeProjectJSON(w, http.StatusConflict, map[string]any{
+				"error":   ErrUnitInUse.Error(),
+				"reasons": inUse.Reasons,
+			})
+			return
+		}
+		if isNotFound(err) {
+			writeProjectError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeProjectError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) listUnitTransitions(w http.ResponseWriter, r *http.Request) {

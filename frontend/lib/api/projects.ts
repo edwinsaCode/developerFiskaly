@@ -36,6 +36,12 @@ export async function updateUnitLandArea(token: string, unitId: number, landArea
   return apiFetch<Unit>(`/units/${unitId}/land-area`, { token, method: "PATCH", body: { land_area: landArea } });
 }
 
+// Hapus unit kelebihan/salah. Backend hanya mengizinkan unit tanpa relasi apa
+// pun; unit yang sudah dipakai → 409 dengan `reasons` (ApiError.payload).
+export async function deleteUnit(token: string, unitId: number): Promise<void> {
+  return apiFetch<void>(`/units/${unitId}`, { token, method: "DELETE" });
+}
+
 // ── UAT Batch 2 §2 — Product Catalog ─────────────────────────────────────────
 
 export interface ProductType {

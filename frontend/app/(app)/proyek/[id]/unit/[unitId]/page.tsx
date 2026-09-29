@@ -14,6 +14,7 @@ import { Rupiah } from "@/components/format/Rupiah";
 import { Tanggal } from "@/components/format/Tanggal";
 import { UnitCostBreakdown } from "@/components/proyek/CostBreakdownTable";
 import { LandAreaEditButton } from "@/components/proyek/LandAreaEditButton";
+import { DeleteUnitButton } from "@/components/proyek/DeleteUnitButton";
 import { RecordPaymentButton } from "@/components/billing/RecordPaymentButton";
 import { PrintReceiptButton } from "@/components/billing/PrintReceiptButton";
 import { getTokenAndRole } from "@/lib/auth";
@@ -126,6 +127,11 @@ export default async function UnitDetailPage({ params }: PageProps) {
             )}
           </h1>
           <StatusBadge status={unit.status} />
+          {!isMarketing && (
+            <div className="ml-auto">
+              <DeleteUnitButton token={token} projectId={projectId} unitId={unit.id} unitCode={unit.code} />
+            </div>
+          )}
         </div>
         <Card padding="sm">
           <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">

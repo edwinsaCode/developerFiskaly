@@ -1,6 +1,9 @@
 package project
 
-import "errors"
+import (
+	"errors"
+	"strings"
+)
 
 var (
 	// ErrProjectNotFound is returned when a project does not exist for the given tenant.
@@ -65,4 +68,21 @@ var (
 	// ErrLandAreaNegative (LT-2): land_area adalah luas — negatif tidak berarti
 	// apa pun secara fisik, ditolak fail-closed (beda dari nol, yang sah = belum diisi).
 	ErrLandAreaNegative = errors.New("land_area tidak boleh negatif")
+
+	// ErrUnitInUse: unit sudah punya riwayat (booking, kontrak, pembayaran,
+	// jurnal, alokasi HPP, dst.) sehingga tidak boleh dihapus. Histori tidak
+	// pernah di-cascade (Invariant #5); pembatalan lewat domain Cancellation.
+	ErrUnitInUse = errors.New("unit tidak bisa dihapus karena sudah memiliki riwayat transaksi")
 )
+
+// UnitInUseError membawa daftar alasan penolakan hapus unit agar layar bisa
+// menyebut persis apa yang masih menahan unit itu. errors.Is(err, ErrUnitInUse).
+type UnitInUseError struct {
+	Reasons []string
+}
+
+func (e *UnitInUseError) Error() string {
+	return ErrUnitInUse.Error() + ": " + strings.Join(e.Reasons, "; ")
+}
+
+func (e *UnitInUseError) Unwrap() error { return ErrUnitInUse }
