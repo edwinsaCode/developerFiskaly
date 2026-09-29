@@ -234,6 +234,20 @@ func (m *mockUnitStore) AttachBuyerNames(_ context.Context, _ uint64, _ []*proje
 	return nil
 }
 
+func (m *mockUnitStore) DeleteUnitIfUnused(_ context.Context, tenantID, id uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.units[id]
+	if !ok || u.TenantID != tenantID {
+		return project.ErrUnitNotFound
+	}
+	if u.Status != project.UnitStatusAvailable {
+		return &project.UnitInUseError{Reasons: []string{"status " + string(u.Status)}}
+	}
+	delete(m.units, id)
+	return nil
+}
+
 func (m *mockUnitStore) UpdateUnitStatus(_ context.Context, tenantID, id uint64, status project.UnitStatus, opts project.UpdateUnitOpts) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

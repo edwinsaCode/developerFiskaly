@@ -48,6 +48,10 @@ type UnitStore interface {
 	// AttachBuyerNames mengisi nama pemegang unit (kontrak → booking → buyer_ref).
 	// Lihat buyer_name.go untuk urutan dan alasannya.
 	AttachBuyerNames(ctx context.Context, tenantID uint64, units []*Unit) error
+	// DeleteUnitIfUnused: hapus unit HANYA bila belum punya relasi apa pun
+	// (booking, kontrak, pembayaran, jurnal, alokasi, …) — lihat unit_delete.go.
+	// Ada relasi → *UnitInUseError (errors.Is ErrUnitInUse), tanpa cascade.
+	DeleteUnitIfUnused(ctx context.Context, tenantID, id uint64) error
 }
 
 // ApprovalGate adalah SEAM ke Generic Approval Workflow (Increment 5, opt-in).
@@ -362,6 +366,13 @@ func (s *Service) UpdateUnitLandArea(ctx context.Context, tenantID, id uint64, l
 	}
 	u.LandArea = landArea
 	return u, nil
+}
+
+// DeleteUnit menghapus unit yang belum pernah dipakai (mis. kelebihan saat
+// generate blok). Unit dengan histori apa pun ditolak — koreksinya lewat
+// pembatalan, bukan penghapusan (Invariant #5).
+func (s *Service) DeleteUnit(ctx context.Context, tenantID, id uint64) error {
+	return s.units.DeleteUnitIfUnused(ctx, tenantID, id)
 }
 
 func (s *Service) ListUnitsByProject(ctx context.Context, tenantID, projectID uint64) ([]*Unit, error) {
