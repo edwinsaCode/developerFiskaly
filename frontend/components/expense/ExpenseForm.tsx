@@ -136,6 +136,10 @@ export function ExpenseForm({ token, canWrite, projects, expenseTypes, fixedAsse
   const activeTypes = expenseTypes.filter((t) => t.is_active);
   const selectedType = activeTypes.find((t) => String(t.id) === form.expense_type_id);
   const isProjectScope = form.scope === "proyek";
+  // Biaya proyek Operasional merinci jenisnya (gaji, sewa, …) dari master yang
+  // sama dengan pengeluaran kantor — laba rugi jadi menampilkan baris beban
+  // yang deskriptif, bukan "Beban Operasional" generik.
+  const isProjectOperational = isProjectScope && form.category === "operational";
 
   // INV-EXP-2 datang dari backend sebagai `allows_project_tag`. Kalau jenis yang
   // dipilih tidak boleh di-tag proyek, tag yang terlanjur terisi dibersihkan —
@@ -253,6 +257,9 @@ export function ExpenseForm({ token, canWrite, projects, expenseTypes, fixedAsse
     } else {
       if (!form.project_id) e.project_id = "Pilih proyek";
       if (!form.category) e.category = "Pilih kategori biaya proyek";
+      if (form.category === "operational" && !form.expense_type_id) {
+        e.expense_type_id = "Pilih jenis operasional";
+      }
       // UAT 2026-09-07: Hard Cost tanpa unit (pool bersama proyek) wajib
       // menyatakan subkategori — "Produksi" saja tidak cukup untuk menentukan
       // unit Subsidi/Komersial mana yang berhak menerima HPP-nya.
@@ -293,6 +300,9 @@ export function ExpenseForm({ token, canWrite, projects, expenseTypes, fixedAsse
       body.project_id = num(form.project_id);
       body.category = form.category;
       body.budget_item_id = num(form.budget_item_id);
+      if (form.category === "operational") {
+        body.expense_type_id = num(form.expense_type_id);
+      }
       if (isExpenseCategory) {
         // RULE KLIEN FREEZE (2026-09-04): soft/operational selalu beban
         // periode — tidak pernah per-unit, tidak pernah dikapitalisasi.
@@ -532,6 +542,7 @@ export function ExpenseForm({ token, canWrite, projects, expenseTypes, fixedAsse
                     category,
                     unit_id: EXPENSE_PROJECT_CATEGORIES.includes(category) ? "" : f.unit_id,
                     hard_subcategory: category === "hard" ? f.hard_subcategory : "",
+                    expense_type_id: category === "operational" ? f.expense_type_id : "",
                   }));
                 }}
                 error={errors.category}
@@ -558,6 +569,28 @@ export function ExpenseForm({ token, canWrite, projects, expenseTypes, fixedAsse
                   <option value="">Pilih subkategori...</option>
                   {CONSTRUCTION_SUBCATEGORIES.map((s) => (
                     <option key={s.value} value={s.value}>{s.label}</option>
+                  ))}
+                </Select>
+              )}
+
+              {isProjectOperational && (
+                <Select
+                  label="Jenis Operasional"
+                  required
+                  value={form.expense_type_id}
+                  onChange={(e) => set("expense_type_id", e.target.value)}
+                  error={errors.expense_type_id}
+                  hint={
+                    selectedType
+                      ? `Akan didebit ke akun ${selectedType.expense_account_code} — tetap tercatat sebagai biaya proyek kategori Operasional`
+                      : activeTypes.length === 0
+                        ? "Belum ada jenis pengeluaran aktif. Tambahkan di master jenis pengeluaran terlebih dahulu."
+                        : undefined
+                  }
+                >
+                  <option value="">Pilih jenis operasional...</option>
+                  {activeTypes.map((t) => (
+                    <option key={t.id} value={String(t.id)}>{t.name}</option>
                   ))}
                 </Select>
               )}

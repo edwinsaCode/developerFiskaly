@@ -136,9 +136,12 @@ func (dto expenseDTO) toRequest(amount domain.Money, date time.Time) (CreateCost
 		if req.ProjectID == 0 {
 			return CreateCostEntryRequest{}, ErrProjectRequired
 		}
-		if dto.ExpenseTypeID != nil {
+		// Jenis pengeluaran hanya merinci kategori Operasional (beban periode);
+		// kategori lain memakai taksonomi RAB apa adanya.
+		if dto.ExpenseTypeID != nil && domain.CostCategory(dto.Category) != domain.CostCategoryOperational {
 			return CreateCostEntryRequest{}, ErrExpenseTypeNotForProjectCost
 		}
+		req.ExpenseTypeID = dto.ExpenseTypeID
 		req.Category = domain.CostCategory(dto.Category)
 		req.CostTier = domain.CostTier(dto.CostTier)
 		req.HardSubcategory = domain.ConstructionSubcategory(dto.HardSubcategory)

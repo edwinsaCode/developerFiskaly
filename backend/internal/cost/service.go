@@ -119,9 +119,12 @@ type CreateCostEntryRequest struct {
 	Vendor          string
 	Description     string
 	BudgetItemID    *uint64             // opsional: tautkan ke budget item RAB (butuh project)
-	// ExpenseTypeID (W-10): jenis pengeluaran OPERASIONAL dari master
-	// expense_types. Bila terisi, akun debit berasal dari master — bukan dari
-	// enum Category — dan transaksi wajib bertier overhead tanpa tautan RAB.
+	// ExpenseTypeID (W-10): jenis pengeluaran dari master expense_types. Bila
+	// terisi, akun debit berasal dari master — bukan dari enum Category — dan
+	// transaksi wajib bertier overhead. Dua jalur:
+	//   - pengeluaran kantor (Category=other): tanpa tautan RAB;
+	//   - biaya proyek Category=operational: perincian jenis beban operasional
+	//     proyek, tetap realisasi RAB kategori operasional (lihat plan()).
 	// nil = jalur biaya proyek dengan taksonomi CostCategory (tidak berubah).
 	ExpenseTypeID *uint64
 }
@@ -280,21 +283,41 @@ func (s *Service) plan(ctx context.Context, tenantID uint64, req CreateCostEntry
 		return p, nil
 	}
 
-	// ── Jalur OPERASIONAL (W-10) ────────────────────────────────────────────
 	// Jenis pengeluaran hanya berlaku untuk beban periode. Membiarkannya pada
 	// tier direct/shared berarti akun beban dipakai untuk mengkapitalisasi
 	// persediaan — pool HPP akan membaca angka yang tak pernah dianggarkan.
 	if tier != domain.CostTierOverhead {
 		return costPlan{}, ErrExpenseTypeNotForProjectCost
 	}
+	if s.expenseTypes == nil {
+		// Fail-closed: resolver tidak terpasang bukan alasan memakai akun default.
+		return costPlan{}, ErrExpenseTypeUnknown
+	}
+
+	// ── Jalur BIAYA PROYEK kategori Operasional + jenis pengeluaran ─────────
+	// Biaya proyek "Operasional" (beban periode, 5-4600) boleh merinci jenisnya
+	// (gaji, sewa, …) memakai master yang sama dengan pengeluaran kantor, agar
+	// laba rugi menampilkan baris beban yang deskriptif. Baris ini TETAP biaya
+	// proyek: cost_entries.category = operational, sehingga realisasi RAB
+	// (GetRealisasiByProjectCash per kategori & GetRealisasiPerItem* per item,
+	// keduanya membaca cost_entries) tidak berubah dan tautan item RAB tetap sah.
+	// Yang berubah hanya akun debit: dari 5-4600 generik ke akun jenisnya.
+	// INV-EXP-2 sengaja tidak diterapkan — baris ini memang realisasi RAB.
+	if req.Category == domain.CostCategoryOperational && req.ProjectID != 0 {
+		policy, err := s.expenseTypes.ResolveExpenseType(ctx, tenantID, *req.ExpenseTypeID)
+		if err != nil {
+			return costPlan{}, err
+		}
+		p.debitCode = policy.ExpenseAccountCode
+		p.expenseType = &policy
+		return p, nil
+	}
+
+	// ── Jalur OPERASIONAL (W-10) ────────────────────────────────────────────
 	// Item RAB dianggarkan dalam taksonomi CostCategory; pengeluaran kantor
 	// tidak pernah menjadi realisasi salah satu item itu.
 	if req.BudgetItemID != nil {
 		return costPlan{}, ErrExpenseTypeWithBudgetItem
-	}
-	if s.expenseTypes == nil {
-		// Fail-closed: resolver tidak terpasang bukan alasan memakai akun default.
-		return costPlan{}, ErrExpenseTypeUnknown
 	}
 	policy, err := s.expenseTypes.ResolveExpenseType(ctx, tenantID, *req.ExpenseTypeID)
 	if err != nil {
@@ -319,6 +342,9 @@ func (s *Service) plan(ctx context.Context, tenantID uint64, req CreateCostEntry
 // journalDescription menyusun deskripsi jurnal sebuah rencana biaya.
 func (p costPlan) journalDescription(req CreateCostEntryRequest) string {
 	if p.expenseType != nil {
+		if req.Category == domain.CostCategoryOperational {
+			return fmt.Sprintf("Beban operasional proyek %s — %s", p.expenseType.Name, req.Description)
+		}
 		return fmt.Sprintf("Beban %s — %s", p.expenseType.Name, req.Description)
 	}
 	descPrefix := "Kapitalisasi"

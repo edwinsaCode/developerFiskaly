@@ -102,7 +102,7 @@ var (
 
 	// ErrExpenseTypeNotForProjectCost: expense_type_id hanya untuk pengeluaran
 	// operasional (tier overhead). Biaya proyek memakai taksonomi CostCategory.
-	ErrExpenseTypeNotForProjectCost = errors.New("jenis pengeluaran hanya untuk biaya operasional (cost_tier overhead); biaya proyek memakai kategori RAB")
+	ErrExpenseTypeNotForProjectCost = errors.New("jenis pengeluaran hanya untuk biaya operasional (cost_tier overhead) atau biaya proyek kategori Operasional; kategori proyek lain memakai kategori RAB")
 
 	// ErrExpenseTypeWithBudgetItem: pengeluaran operasional tidak pernah menjadi
 	// realisasi item RAB — item RAB dianggarkan dalam taksonomi CostCategory.

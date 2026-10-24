@@ -40,6 +40,9 @@ var costPaymentLabels = map[string]string{
 
 func categoryLabelOf(it *ExpenseListItem) string {
 	if it.ExpenseTypeName != "" {
+		if it.Scope == "proyek" {
+			return costCategoryLabels[it.Category] + " — " + it.ExpenseTypeName
+		}
 		return it.ExpenseTypeName
 	}
 	if lbl, ok := costCategoryLabels[it.Category]; ok {

@@ -167,10 +167,12 @@ func (r *GORMRepository) ListExpenses(ctx context.Context, tenantID uint64, f Ex
 		q = q.Where("ce.date <= ?", *f.To)
 	}
 	switch f.Scope {
+	// Lihat expenseScopeOf: biaya proyek kategori operational boleh membawa
+	// jenis pengeluaran, jadi expense_type_id saja tidak lagi menentukan scope.
 	case "operasional":
-		q = q.Where("ce.expense_type_id IS NOT NULL")
+		q = q.Where("ce.expense_type_id IS NOT NULL AND ce.category <> ?", string(domain.CostCategoryOperational))
 	case "proyek":
-		q = q.Where("ce.expense_type_id IS NULL AND ce.project_id IS NOT NULL")
+		q = q.Where("(ce.expense_type_id IS NULL OR ce.category = ?) AND ce.project_id IS NOT NULL", string(domain.CostCategoryOperational))
 	}
 	if f.ProjectID != nil {
 		q = q.Where("ce.project_id = ?", *f.ProjectID)
@@ -189,7 +191,7 @@ func (r *GORMRepository) ListExpenses(ctx context.Context, tenantID uint64, f Ex
 			Amount:           rw.Amount,
 			Vendor:           rw.Vendor,
 			Description:      rw.Description,
-			Scope:            expenseScopeOf(rw.ExpenseTypeID),
+			Scope:            expenseScopeOf(rw.ExpenseTypeID, domain.CostCategory(rw.Category)),
 			ExpenseTypeID:    rw.ExpenseTypeID,
 			ExpenseTypeName:  deref(rw.ExpenseTypeName),
 			Category:         rw.Category,
@@ -225,8 +227,11 @@ func expenseStatusOf(postedAt *time.Time, reversalID *uint64) ExpenseStatus {
 	}
 }
 
-func expenseScopeOf(expenseTypeID *uint64) string {
-	if expenseTypeID != nil {
+// expenseScopeOf: pengeluaran kantor selalu bertipe master dengan kategori
+// `other` (dipaksa handler); biaya proyek kategori operational yang merinci
+// jenisnya tetap scope proyek.
+func expenseScopeOf(expenseTypeID *uint64, category domain.CostCategory) string {
+	if expenseTypeID != nil && category != domain.CostCategoryOperational {
 		return "operasional"
 	}
 	return "proyek"
