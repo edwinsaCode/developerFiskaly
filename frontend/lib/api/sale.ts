@@ -279,6 +279,11 @@ export interface ContractFinancialSummary {
    *  SESUNGGUHNYA sudah diterima (bukan Σ total_paid, yang mengecualikan
    *  pembayaran yang 100% meluber ke baris tanah). */
   total_paid_actual: string;
+  /** Pecahan terpisah (audit kwitansi 2026-10-29): pembayaran Kelebihan Tanah
+   *  TIDAK PERNAH mengurangi sisa harga unit, dan sebaliknya. */
+  house_outstanding: string; // sisa harga unit
+  land_paid: string;         // Σ pembayaran khusus Kelebihan Tanah
+  land_outstanding: string;  // sisa Kelebihan Tanah ("0" bila tanpa tanah)
 }
 
 export async function fetchContractFinancialSummary(

@@ -197,7 +197,9 @@ func (s *Service) GetCustomerStatement(ctx context.Context, tenantID, contractID
 			// RUMAH. Penerimaan di luar harga (booking fee = Pendapatan
 			// Booking) TIDAK ditampilkan di sini — ia hidup di Laba Rugi.
 			// Fee pra-R4 (flag TRUE, historis bagian harga) tetap tampil.
-			if !tp.CountsTowardPrice {
+			// Pembayaran Kelebihan Tanah (FALSE, di luar harga unit) tetap
+			// tampil — itu piutang kontrak ini, bukan pendapatan booking.
+			if !tp.CountsTowardPrice && tp.Kind != TerminKindLandExcess {
 				continue
 			}
 			stmt.Payments = append(stmt.Payments, StatementPaymentLine{

@@ -187,7 +187,10 @@ func (m *mockTerminStore) SaveTermin(_ context.Context, t *sale.TerminPayment) e
 func (m *mockTerminStore) SumTerminsByUnit(_ context.Context, _ uint64, unitID uint64) (domain.Money, error) {
 	var sum domain.Money
 	for _, t := range m.termins {
-		if t.UnitID == unitID {
+		// Mirror repo: termin murni Kelebihan Tanah (counts_toward_price=FALSE)
+		// tidak mengurangi harga unit. Fixture lama membiarkan flag zero-value,
+		// jadi hanya kind land_excess yang dikecualikan.
+		if t.UnitID == unitID && (t.CountsTowardPrice || t.Kind != sale.TerminKindLandExcess) {
 			sum = sum.Add(t.Amount)
 		}
 	}

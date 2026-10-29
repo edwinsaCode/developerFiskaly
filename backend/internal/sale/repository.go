@@ -1274,6 +1274,11 @@ func (r *GORMRepository) CommitPayment(ctx context.Context, tenantID uint64, p P
 // perilaku pra-land untuk kombinasi lain, bukan regresi baru.
 func planAllocationsLocked(ctx context.Context, tx *gorm.DB, tenantID uint64, p PaymentCommitParams) ([]ScheduleAllocation, domain.Money, bool, error) {
 	switch {
+	case p.LandEarmark:
+		// Kelebihan Tanah pra-Akad: tidak ada jadwal tanah untuk dialokasikan,
+		// dan cicilan rumah TIDAK BOLEH ikut terbayar. Seluruhnya saldo kredit
+		// (Uang Muka), di luar harga unit — dinetkan ke piutang tanah saat Akad.
+		return nil, p.Amount, false, nil
 	case p.ScheduleID != nil:
 		var sch PaymentSchedule
 		err := tx.WithContext(ctx).

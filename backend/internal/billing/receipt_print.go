@@ -390,7 +390,7 @@ table.rincian td.num { text-align: right; font-variant-numeric: tabular-nums; }
              sudah dipaksa domain.Zero utk Booking di GetReceiptPrintData
              (Rule A tanpa syarat) — di sini tinggal dipastikan tampil terlepas
              dari .HasSummary. */}}
-        <td class="num">{{if eq .ReceiptType "booking"}}{{rupiah .Outstanding}}{{else if eq .ReceiptType "legacy_ar"}}{{rupiah .LegacyOutstanding}}{{else if .HasChargeSummary}}{{rupiah .ChargeOutstanding}}{{else if .HasSummary}}{{rupiah .Outstanding}}{{else}}&mdash;{{end}}</td>
+        <td class="num">{{if eq .ReceiptType "booking"}}{{rupiah .Outstanding}}{{else if eq .ReceiptType "legacy_ar"}}{{rupiah .LegacyOutstanding}}{{else if .HasChargeSummary}}{{rupiah .ChargeOutstanding}}{{else if and .HasLand (eq .TerminKind "land_excess")}}{{if .HasScheduleOutstanding}}{{rupiah .ScheduleOutstanding}}{{else}}{{rupiah .LandOutstanding}}{{end}}{{else if .HasSummary}}{{rupiah .Outstanding}}{{else}}&mdash;{{end}}</td>
         <td class="num">{{rupiah .Amount}}</td>
         <td>{{if eq .ReceiptType "legacy_ar"}}Piutang Proyek Lama{{if .LegacySourceLabel}} — {{.LegacySourceLabel}}{{end}}{{if .Notes}}<br/><span style="font-size:0.76rem;color:#4a3d34">{{.Notes}}</span>{{end}}<br/><span style="font-size:0.74rem;color:#4a3d34">{{paymentTypeLabel .PaymentType}} · {{bankLabel .BankAccountCode}}</span>{{else}}{{if and .KindLabel (eq .ReceiptType "house_payment")}}<strong>{{.KindLabel}}</strong> — {{end}}Unit {{.UnitCode}} — {{.UnitType}}, {{.ProjectName}}{{if .Notes}}<br/><span style="font-size:0.76rem;color:#4a3d34">{{.Notes}}</span>{{end}}<br/><span style="font-size:0.74rem;color:#4a3d34">{{paymentTypeLabel .PaymentType}} · {{bankLabel .BankAccountCode}}</span>{{end}}</td>
         <td class="num">{{if .HasSummary}}{{rupiah .Discount}}{{else}}&mdash;{{end}}</td>
@@ -442,11 +442,24 @@ table.rincian td.num { text-align: right; font-variant-numeric: tabular-nums; }
     <div class="sum-cell"><div class="sk">Harga Unit{{if not .PriceIsSnapshot}}*{{end}}</div><div class="sv">{{rupiah .UnitPrice}}</div></div>
     <div class="sum-cell"><div class="sk">Diskon</div><div class="sv">{{rupiah .Discount}}</div></div>
     <div class="sum-cell"><div class="sk">Nilai Kontrak</div><div class="sv">{{rupiah .NetContract}}</div></div>
+    {{if .HasLand}}
+    <div class="sum-cell"><div class="sk">Sudah Dibayar (Unit)</div><div class="sv">{{rupiah .TotalPaid}}</div></div>
+    <div class="sum-cell terutang"><div class="sk">Sisa Harga Unit</div><div class="sv">{{rupiah .Outstanding}}</div></div>
+  </div>
+  <!-- Audit kwitansi 2026-10-29: Kelebihan Tanah adalah piutang TERPISAH
+       dari harga unit — sisanya dicetak sendiri, tidak pernah mengurangi
+       atau digabung ke Sisa Harga Unit. -->
+  <div class="summary-grid">
+    <div class="sum-cell"><div class="sk">Kelebihan Tanah</div><div class="sv">{{rupiah .LandBilled}}</div></div>
+    <div class="sum-cell"><div class="sk">Sudah Dibayar (Tanah)</div><div class="sv">{{rupiah .LandPaid}}</div></div>
+    <div class="sum-cell terutang"><div class="sk">Sisa Kelebihan Tanah</div><div class="sv">{{if .HasScheduleOutstanding}}{{rupiah .ScheduleOutstanding}}{{else}}{{rupiah .LandOutstanding}}{{end}}</div></div>
+    {{else}}
     <div class="sum-cell"><div class="sk">Sudah Dibayar</div><div class="sv">{{rupiah .TotalPaid}}</div></div>
     {{if .HasScheduleOutstanding}}
     <div class="sum-cell terutang"><div class="sk">Sisa {{.ScheduleTypeLabel}}</div><div class="sv">{{rupiah .ScheduleOutstanding}}</div></div>
     {{else}}
     <div class="sum-cell terutang"><div class="sk">Terutang</div><div class="sv">{{rupiah .Outstanding}}</div></div>
+    {{end}}
     {{end}}
   </div>
   {{if not .PriceIsSnapshot}}<div class="sum-note">*&nbsp;Kontrak dibuat sebelum pencatatan harga unit — harga mengikuti nilai kontrak (DPP), diskon 0.</div>{{end}}

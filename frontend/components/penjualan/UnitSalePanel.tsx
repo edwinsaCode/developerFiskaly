@@ -430,12 +430,16 @@ export function UnitSalePanel({ unit, saleRecord, contractId, token, bookingPara
                       <RecordPaymentButton
                         token={token}
                         contractId={contractId}
-                        outstanding={balance ?? "0"}
+                        // Pra-Akad: default nominal = sisa harga unit; pilih
+                        // "Kelebihan Tanah" → sisa Kelebihan Tanah (dua piutang
+                        // terpisah, audit kwitansi 2026-10-29).
+                        outstanding={summary?.house_outstanding ?? balance ?? "0"}
                         buyerName={unit.buyer_name || undefined}
                         label="+ Catat Penerimaan"
                         size="sm"
                         financingSourceId={canDisburse ? contract?.financing_source_id : undefined}
                         bankName={contract?.bank_kpr}
+                        landOutstanding={summary?.has_land ? summary.land_outstanding : undefined}
                         onSuccess={refresh}
                       />
                     ) : (
@@ -768,21 +772,39 @@ function ContractSummary({
           <p className="text-xs text-text-secondary">ID Kontrak</p>
           <p className="font-medium">#{contractId}</p>
         </div>
-        {balance !== null && (
+        {/* Audit kwitansi 2026-10-29: harga unit dan Kelebihan Tanah adalah
+            dua piutang terpisah — sisa masing-masing ditampilkan sendiri,
+            sama dengan kwitansi. */}
+        {summary?.has_land ? (
+          <>
+            <div>
+              <p className="text-xs text-text-secondary">Sisa Harga Unit</p>
+              <p className="font-medium text-warning">
+                <Rupiah value={summary.house_outstanding} colorSign={false} />
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-text-secondary">
+                Sisa Kelebihan Tanah (dari <Rupiah value={summary.land_amount} colorSign={false} />)
+              </p>
+              <p className="font-medium text-warning">
+                <Rupiah value={summary.land_outstanding} colorSign={false} />
+              </p>
+            </div>
+            {balance !== null && (
+              <div>
+                <p className="text-xs text-text-secondary">Total Sisa (Unit + Tanah)</p>
+                <p className="font-medium">
+                  <Rupiah value={balance} colorSign={false} />
+                </p>
+              </div>
+            )}
+          </>
+        ) : balance !== null && (
           <div>
-            <p className="text-xs text-text-secondary">
-              {summary?.has_land ? "Sisa Tagihan (Rumah + Kelebihan Tanah)" : "Sisa Tagihan"}
-            </p>
+            <p className="text-xs text-text-secondary">Sisa Tagihan</p>
             <p className="font-medium text-warning">
               <Rupiah value={balance} colorSign={false} />
-            </p>
-          </div>
-        )}
-        {summary?.has_land && (
-          <div>
-            <p className="text-xs text-text-secondary">termasuk Kelebihan Tanah</p>
-            <p className="font-medium">
-              <Rupiah value={summary.land_amount} colorSign={false} />
             </p>
           </div>
         )}

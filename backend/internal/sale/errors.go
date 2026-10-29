@@ -26,6 +26,11 @@ var (
 	ErrPaymentExceedsReceivable  = errors.New("pembayaran melebihi sisa piutang pelanggan setelah BAST")
 	ErrPaymentExceedsOutstanding = errors.New("nominal pembayaran melebihi sisa tagihan kontrak")
 	ErrCollectionAmountInvalid   = errors.New("nominal pembayaran harus rupiah bulat dan lebih besar dari nol")
+	// Kelebihan Tanah terpisah dari harga unit (audit kwitansi 2026-10-29):
+	// penerimaan berjenis land_excess wajib menyasar piutang tanah — tidak
+	// pernah jatuh ke harga unit.
+	ErrLandComponentMissing          = errors.New("kontrak tidak punya komponen Kelebihan Tanah: pilih jenis penerimaan lain")
+	ErrLandPaymentExceedsOutstanding = errors.New("nominal melebihi sisa tagihan Kelebihan Tanah")
 	// ErrBankFeeInvalid (UAT 2026-09-03, Rule #5): provisi/biaya admin bank yang
 	// dipotong saat pencairan KPR — harus rupiah bulat, tidak boleh negatif, dan
 	// tidak boleh melebihi nominal yang diselesaikan ke piutang (bank_fee tidak

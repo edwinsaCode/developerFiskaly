@@ -109,6 +109,9 @@ type ReceiptPrintData struct {
 	// kwitansi tanpa terkecuali jelas untuk apa (booking/realization/KPR sudah
 	// jelas lewat judul dokumen — field ini melengkapi sub-jenis house_payment).
 	KindLabel string
+	// TerminKind: kind mentah termin (mis. "land_excess") — menentukan sisa
+	// mana yang dicetak di kolom "Terutang" (tanah vs harga unit).
+	TerminKind string
 	// Company (tenant)
 	CompanyName string
 	// Customer (contract)
@@ -153,6 +156,15 @@ type ReceiptPrintData struct {
 	HasScheduleOutstanding bool
 	ScheduleTypeLabel      string // label bisnis jadwal, mis. "Kelebihan Tanah"
 	ScheduleOutstanding    domain.Money
+
+	// Kelebihan Tanah sebagai piutang TERPISAH (audit kwitansi 2026-10-29):
+	// kontrak ber-komponen tanah mencetak sisa harga unit (Outstanding) dan
+	// sisa Kelebihan Tanah berdampingan — pembayaran tanah tidak pernah
+	// mengurangi sisa harga unit.
+	HasLand         bool
+	LandBilled      domain.Money
+	LandPaid        domain.Money
+	LandOutstanding domain.Money
 
 	// Ringkasan PIUTANG PROYEK LAMA (W-7 extension, requirement #4/#5). true
 	// hanya untuk ReceiptTypeLegacyAR — dibaca LANGSUNG dari legacy_receivables
@@ -199,6 +211,16 @@ type ContractSummary struct {
 	// Jaminan Bank. Sama dengan TotalOutstandingActual bila FinancingRemaining
 	// nol (belum Akad / tanpa financing bank).
 	CustomerReceivableRemaining domain.Money
+
+	// Pecahan rumah vs Kelebihan Tanah (sale.ContractFinancialSummary):
+	// HouseCustomerRemaining = sisa harga unit milik customer (net Dana
+	// Jaminan Bank); LandOutstanding = sisa Kelebihan Tanah. HasLand=false →
+	// kontrak tanpa tanah, field tanah nol.
+	HasLand                bool
+	HouseCustomerRemaining domain.Money
+	LandBilled             domain.Money
+	LandPaid               domain.Money
+	LandOutstanding        domain.Money
 }
 
 // ContractSummaryProvider disediakan wiring layer (adapter ke sale.Service).

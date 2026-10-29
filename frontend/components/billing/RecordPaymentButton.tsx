@@ -40,8 +40,10 @@ interface Props {
    *  modal ber-scheduleId), pembayaran DITARGET ke jadwal ini — bukan
    *  waterfall seluruh kontrak — supaya tidak menyentuh sisa cicilan Rumah. */
   landScheduleId?: number;
-  /** Sisa jadwal Kelebihan Tanah SEKARANG (amount − paid_amount), untuk
-   *  default nominal & hint saat kind=land_excess dipilih. */
+  /** Sisa Kelebihan Tanah SEKARANG, untuk default nominal & hint saat
+   *  kind=land_excess dipilih. Pasca-Akad: sisa jadwal tanah (amount −
+   *  paid_amount). Pra-Akad (tanpa landScheduleId): summary.land_outstanding —
+   *  backend mencatatnya sebagai uang muka tanah, bukan cicilan rumah. */
   landOutstanding?: string;
   /** W-13: dipanggil setelah penerimaan/invoice kekurangan tersimpan — agar
    *  parent (mis. UnitSalePanel) bisa menyegarkan saldo/riwayat miliknya
@@ -111,7 +113,11 @@ export function RecordPaymentButton({
   // land_excess tetap murni label deskriptif (perilaku lama).
   const isTargetingLand = kind === "land_excess" && !!landScheduleId;
   const effectiveScheduleId = isTargetingLand ? landScheduleId : scheduleId;
-  const effectiveOutstanding = isTargetingLand ? (landOutstanding ?? outstanding) : outstanding;
+  // Audit kwitansi 2026-10-29: pra-Akad (belum ada jadwal tanah) backend
+  // tetap mengarahkan land_excess ke uang muka tanah — nominal & hint harus
+  // memakai sisa Kelebihan Tanah, bukan sisa harga unit.
+  const isLandKind = kind === "land_excess" && (!!landScheduleId || landOutstanding !== undefined);
+  const effectiveOutstanding = isLandKind ? (landOutstanding ?? outstanding) : outstanding;
 
   function openModal() {
     setStep("input");
@@ -154,7 +160,7 @@ export function RecordPaymentButton({
     if (!canProceed) return;
     setLoadingPreview(true);
     try {
-      setPreview(await previewCollectionPayment(token, contractId, amount, bankCode, isDisbursement ? bankFee : undefined, effectiveScheduleId, isDisbursement ? financingSourceId : undefined));
+      setPreview(await previewCollectionPayment(token, contractId, amount, bankCode, isDisbursement ? bankFee : undefined, effectiveScheduleId, isDisbursement ? financingSourceId : undefined, kind));
       setStep("preview");
     } catch (err) {
       toast(err instanceof ApiError ? err.message : "Gagal memuat pratinjau", "error");
@@ -260,7 +266,13 @@ export function RecordPaymentButton({
             {done.terminId && (
               <div className="flex items-center justify-between gap-3 rounded-lg border border-border px-4 py-3">
                 <span className="text-sm text-text-secondary">
-                  {isDisbursement ? "Sisa terutang customer" : "Sisa tagihan"}
+                  {isDisbursement
+                    ? "Sisa terutang customer"
+                    : isLandKind && !landScheduleId
+                      // Pra-Akad: remaining_balance = sisa harga unit saja;
+                      // sisa Kelebihan Tanah tampil terpisah di panel unit.
+                      ? "Sisa harga unit (di luar Kelebihan Tanah)"
+                      : "Sisa tagihan"}
                 </span>
                 <span className="text-base font-bold tabular-nums">
                   <Rupiah value={done.remainingBalance} colorSign={false} />
@@ -334,7 +346,9 @@ export function RecordPaymentButton({
                   // default nominal supaya user tidak diam-diam membayar
                   // lebih dari sisa jadwal yang sesungguhnya sedang dipilih.
                   const nextOutstanding =
-                    next === "land_excess" && landScheduleId ? (landOutstanding ?? outstanding) : outstanding;
+                    next === "land_excess" && (landScheduleId || landOutstanding !== undefined)
+                      ? (landOutstanding ?? outstanding)
+                      : outstanding;
                   setAmount(intPart(nextOutstanding));
                 }}
                 className={inputCls}
@@ -401,7 +415,7 @@ export function RecordPaymentButton({
           value={amount}
           onChange={setAmount}
           required
-          hint={isTargetingLand ? `Sisa Kelebihan Tanah: ${formatRp(effectiveOutstanding)}` : `Sisa tagihan: ${formatRp(effectiveOutstanding)}`}
+          hint={isLandKind ? `Sisa Kelebihan Tanah: ${formatRp(effectiveOutstanding)}` : `Sisa tagihan: ${formatRp(effectiveOutstanding)}`}
         />
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Field label="Referensi Pembayaran">
@@ -444,8 +458,8 @@ export function RecordPaymentButton({
             </p>
           ) : (
             <div className="border border-border rounded-lg divide-y divide-border-subtle">
-              {preview.applied.map((a) => (
-                <div key={a.schedule_id} className="flex items-center justify-between px-3 py-2 text-sm">
+              {preview.applied.map((a, i) => (
+                <div key={`${a.schedule_id}-${i}`} className="flex items-center justify-between px-3 py-2 text-sm">
                   <div className="flex items-center gap-2">
                     <span className={a.fully_paid ? "text-success" : "text-warning"}>{a.fully_paid ? "✓" : "△"}</span>
                     <span className="text-text-primary">{a.label}</span>

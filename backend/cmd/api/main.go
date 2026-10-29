@@ -292,6 +292,17 @@ func (a *contractSummaryAdapter) mapWithSplit(ctx context.Context, tenantID uint
 	}
 	cs.FinancingRemaining = finRemaining
 	cs.CustomerReceivableRemaining = sum.TotalOutstandingActual.Sub(finRemaining)
+
+	// Dana Jaminan Bank hanya membiayai rumah — dikurangkan dari sisa rumah saja.
+	houseFin := finRemaining
+	if houseFin.GreaterThan(sum.HouseOutstanding) {
+		houseFin = sum.HouseOutstanding
+	}
+	cs.HasLand = sum.HasLand
+	cs.HouseCustomerRemaining = sum.HouseOutstanding.Sub(houseFin)
+	cs.LandBilled = sum.LandAmount
+	cs.LandPaid = sum.LandPaid
+	cs.LandOutstanding = sum.LandOutstanding
 	return cs, nil
 }
 

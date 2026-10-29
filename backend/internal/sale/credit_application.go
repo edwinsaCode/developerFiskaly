@@ -167,7 +167,62 @@ func (s *Service) ApplyCredit(ctx context.Context, tenantID, contractID uint64, 
 	if req.ScheduleID == 0 {
 		return nil, ErrScheduleNotFound
 	}
+	if err := s.reserveLandCredit(ctx, tenantID, contractID, &req); err != nil {
+		return nil, err
+	}
 	return s.contracts.ApplyCredit(ctx, tenantID, contractID, req)
+}
+
+// reserveLandCredit menjaga uang muka Kelebihan Tanah pra-Akad (saldo kredit
+// dari termin land_excess) agar tidak bisa dipakai menutup cicilan RUMAH lewat
+// ApplyCredit — dana itu milik piutang tanah dan dinetkan saat Akad. Hanya
+// saldo di luar porsi tanah yang boleh dipakai; Amount nil diisi default
+// min(saldo bebas, sisa cicilan) agar default repository tidak menyapu porsi
+// tanah. Pasca-Akad porsi tanah sudah dikonsumsi ke jadwal tanah → no-op.
+func (s *Service) reserveLandCredit(ctx context.Context, tenantID, contractID uint64, req *ApplyCreditRequest) error {
+	contract, err := s.contracts.FindContractByID(ctx, tenantID, contractID)
+	if err != nil {
+		return err
+	}
+	schedules, err := s.contracts.ListSchedulesByContract(ctx, tenantID, contractID)
+	if err != nil {
+		return err
+	}
+	if liveLandSchedule(schedules) != nil {
+		return nil
+	}
+	reserved, err := s.landOnlyPaid(ctx, tenantID, contract.UnitID)
+	if err != nil || reserved.IsZero() {
+		return err
+	}
+	bc, err := s.contracts.GetBuyerCredit(ctx, tenantID, contract.UnitID)
+	if err != nil {
+		return err
+	}
+	available, err := domain.NewMoney(bc.Available)
+	if err != nil {
+		return err
+	}
+	free := available.Sub(reserved)
+	if !free.GreaterThan(domain.Zero) {
+		return ErrNoCreditAvailable
+	}
+	if req.Amount == nil {
+		sch, err := s.contracts.FindScheduleByID(ctx, tenantID, req.ScheduleID)
+		if err != nil {
+			return err
+		}
+		amt := sch.Amount.Sub(sch.PaidAmount)
+		if free.LessThan(amt) {
+			amt = free
+		}
+		req.Amount = &amt
+		return nil
+	}
+	if req.Amount.GreaterThan(free) {
+		return ErrCreditExceedsAvailable
+	}
+	return nil
 }
 
 // ConsumeRemainingCreditInTx menutup habis SISA saldo kredit buyer yang tidak

@@ -88,6 +88,17 @@ type ContractFinancialSummary struct {
 	// supaya TotalPaidActual + TotalOutstandingActual == TotalContractValueActual
 	// SELALU, tanpa pengecualian — konsisten dgn Jadwal Pembayaran yg ditampilkan.
 	TotalPaidActual domain.Money `json:"total_paid_actual"`
+
+	// Pecahan rumah vs Kelebihan Tanah (audit kwitansi 2026-10-29) — dua
+	// piutang yang TERPISAH: pembayaran tanah tidak pernah mengurangi sisa
+	// harga unit, dan sebaliknya.
+	//   HouseOutstanding = sisa harga unit (bagian rumah outstandingForContract).
+	//   LandPaid         = Σ termin khusus tanah (land_excess, di luar harga).
+	//   LandOutstanding  = pasca-Akad: sisa jadwal tanah; pra-Akad: LandAmount −
+	//                      LandPaid. Nol bila kontrak tanpa komponen tanah.
+	HouseOutstanding domain.Money `json:"house_outstanding"`
+	LandPaid         domain.Money `json:"land_paid"`
+	LandOutstanding  domain.Money `json:"land_outstanding"`
 }
 
 // ── Agregat portfolio (S3/R4 — reporting membaca ini, bukan SQL sendiri) ─────
@@ -207,19 +218,23 @@ func (s *Service) summarizeContract(ctx context.Context, tenantID uint64, c *Sal
 		Outstanding: c.GrossAmount.Sub(paid),
 	}
 
-	landAmount := domain.Zero
-	if c.LandQuantityM2 != nil && c.LandQuantityM2.IsPositive() && c.LandUnitPriceSnapshot != nil {
-		landDPP := domain.FromDecimal(c.LandUnitPriceSnapshot.Decimal().Mul(*c.LandQuantityM2).Round(0))
-		landVAT := domain.Zero
-		if c.IsPKP {
-			landVAT = domain.FromDecimal(landDPP.Decimal().Mul(c.VATRateSnapshot).Round(0))
-		}
-		landAmount = landDPP.Add(landVAT)
-		sum.HasLand = true
-	}
+	landAmount, hasLand := projectedLandAmount(c)
+	sum.HasLand = hasLand
 	sum.LandAmount = landAmount
 	sum.TotalContractValue = c.GrossAmount.Add(landAmount)
-	sum.TotalOutstanding = sum.TotalContractValue.Sub(paid)
+
+	// Termin khusus tanah (counts_toward_price=FALSE) tidak ada di `paid` —
+	// dikurangkan terpisah supaya total gabungan tetap benar.
+	landPaid, err := s.landOnlyPaid(ctx, tenantID, c.UnitID)
+	if err != nil {
+		return nil, err
+	}
+	sum.LandPaid = landPaid
+	sum.TotalOutstanding = sum.TotalContractValue.Sub(paid).Sub(landPaid)
+	sum.HouseOutstanding = sum.Outstanding
+	if hasLand {
+		sum.LandOutstanding = landAmount.Sub(landPaid)
+	}
 
 	// landAmountActual: Σ nominal TAGIHAN (bukan sisa) baris payment_schedules
 	// type=land yang masih hidup (superseded/dibatalkan diabaikan) — dipakai
@@ -237,6 +252,7 @@ func (s *Service) summarizeContract(ctx context.Context, tenantID uint64, c *Sal
 	// — bukan menghitung ulang dgn asumsi yang sudah terbukti salah.
 	landAmountActual := domain.Zero
 	actualOutstanding := sum.Outstanding
+	hasLandSchedule := false
 	if s.contracts != nil {
 		schedules, err := s.contracts.ListSchedulesByContract(ctx, tenantID, c.ID)
 		if err != nil {
@@ -246,15 +262,24 @@ func (s *Service) summarizeContract(ctx context.Context, tenantID uint64, c *Sal
 			if sched.Type != ScheduleTypeLand || sched.Status == ScheduleStatusSuperseded {
 				continue
 			}
+			hasLandSchedule = true
 			landAmountActual = landAmountActual.Add(sched.Amount)
 		}
-		ao, err := s.outstandingForContract(ctx, tenantID, c)
+		houseOut, landOut, err := s.outstandingSplitForContract(ctx, tenantID, c)
 		if err != nil {
 			return nil, err
 		}
-		actualOutstanding = ao
+		actualOutstanding = houseOut.Add(landOut)
+		sum.HouseOutstanding = houseOut
+		if hasLandSchedule {
+			// Pasca-Akad: piutang tanah formal (jadwal) adalah SoT.
+			sum.LandOutstanding = landOut
+		}
 	}
 	sum.TotalOutstandingActual = actualOutstanding
+	// Pra-Akad, uang muka tanah TIDAK masuk sini (jadwal tanah belum ada —
+	// invariant Paid+Outstanding == ContractValueActual dijaga); tampilkan
+	// lewat LandPaid/LandOutstanding.
 	sum.TotalPaidActual = c.GrossAmount.Add(landAmountActual).Sub(actualOutstanding)
 
 	if c.UnitPriceSnapshot != nil && !c.UnitPriceSnapshot.IsZero() {
