@@ -386,6 +386,7 @@ func (r *GORMRepository) LoadReceiptPrintData(ctx context.Context, tenantID, rec
 		BankAccountCode:      res.BankAccountCode,
 		Notes:                res.Notes,
 		KindLabel:            terminKindLabel(res.TerminKind, res.InstallmentNo),
+		TerminKind:           res.TerminKind,
 		CompanyName:          res.CompanyName,
 		BuyerName:            res.BuyerName,
 		BuyerID:              res.BuyerID,

@@ -301,7 +301,11 @@ func (h *Handler) previewCollectionPayment(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	preview, err := h.svc.PreviewCollectionPayment(r.Context(), tenantID, contractID, amount, bankCode, bankFee, scheduleID, source)
+	// kind: jenis penerimaan yang dipilih (opsional) — land_excess diarahkan
+	// ke piutang tanah, sama persis dengan submit.
+	kind := TerminKind(r.URL.Query().Get("kind"))
+
+	preview, err := h.svc.PreviewCollectionPaymentKind(r.Context(), tenantID, contractID, amount, bankCode, bankFee, scheduleID, source, kind)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrContractNotFound):
@@ -492,7 +496,8 @@ func (h *Handler) recordCollectionPayment(w http.ResponseWriter, r *http.Request
 			errors.Is(err, ErrBankFeeInvalid):
 			writeSaleError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, ErrPaymentExceedsOutstanding), errors.Is(err, ErrPaymentExceedsReceivable),
-			errors.Is(err, ErrDisbursementRequiresAkad), errors.Is(err, ErrDisbursementNeedsContract):
+			errors.Is(err, ErrDisbursementRequiresAkad), errors.Is(err, ErrDisbursementNeedsContract),
+			errors.Is(err, ErrLandComponentMissing), errors.Is(err, ErrLandPaymentExceedsOutstanding):
 			writeSaleError(w, http.StatusUnprocessableEntity, err.Error())
 		default:
 			writeSaleError(w, http.StatusInternalServerError, err.Error())
@@ -629,7 +634,8 @@ func (h *Handler) recordTermin(w http.ResponseWriter, r *http.Request) {
 			writeSaleError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, ErrUnitNotFound):
 			writeSaleError(w, http.StatusNotFound, err.Error())
-		case errors.Is(err, ErrPaymentExceedsOutstanding):
+		case errors.Is(err, ErrPaymentExceedsOutstanding),
+			errors.Is(err, ErrLandComponentMissing), errors.Is(err, ErrLandPaymentExceedsOutstanding):
 			writeSaleError(w, http.StatusUnprocessableEntity, err.Error())
 		default:
 			writeSaleError(w, http.StatusInternalServerError, err.Error())

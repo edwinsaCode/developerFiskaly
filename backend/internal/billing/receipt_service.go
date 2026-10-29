@@ -193,6 +193,18 @@ func (s *ReceiptService) GetReceiptPrintData(ctx context.Context, tenantID, rece
 				default:
 					data.Outstanding = cs.CustomerReceivableRemaining
 				}
+				// Audit kwitansi 2026-10-29: kontrak ber-Kelebihan Tanah →
+				// Outstanding = sisa HARGA UNIT saja; sisa tanah dicetak
+				// terpisah. Tidak pernah digabung/dikurangkan satu sama lain.
+				// Booking (Rule A, Terutang Rp0) dan pencairan KPR (Dana
+				// Jaminan Bank) tetap memakai tata letak lamanya.
+				if cs.HasLand && data.ReceiptType != ReceiptTypeBooking && data.ReceiptType != ReceiptTypeKPRDisbursement {
+					data.HasLand = true
+					data.LandBilled = cs.LandBilled
+					data.LandPaid = cs.LandPaid
+					data.LandOutstanding = cs.LandOutstanding
+					data.Outstanding = cs.HouseCustomerRemaining
+				}
 			}
 		}
 	}

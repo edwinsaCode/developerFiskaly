@@ -801,6 +801,19 @@ func (s *Service) RecordAkad(ctx context.Context, tenantID uint64, req RecordBAS
 		houseAdvance = gross
 	}
 	landAdvance := totalAdvance.Sub(houseAdvance)
+	// Uang muka Kelebihan Tanah pra-Akad (land_excess, counts_toward_price=
+	// FALSE — audit kwitansi 2026-10-29) TIDAK ada di totalAdvance (yang
+	// hanya menjumlah termin harga rumah), tapi duduk di Uang Muka 2-2000 yang
+	// sama sebagai saldo kredit — ikut dinetkan ke piutang tanah di sini.
+	// Belum ada jadwal tanah sebelum Akad, jadi landOnlyPaid = seluruhnya
+	// uang muka tanah.
+	if landParams != nil {
+		landEarmarked, lerr := s.landOnlyPaid(ctx, tenantID, req.UnitID)
+		if lerr != nil {
+			return nil, lerr
+		}
+		landAdvance = landAdvance.Add(landEarmarked)
+	}
 	landGross := domain.Zero
 	if landParams != nil {
 		landGross = landParams.GrossAmount

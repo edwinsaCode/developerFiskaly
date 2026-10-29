@@ -121,6 +121,12 @@ type PaymentCommitParams struct {
 	//   → seluruh amount jadi saldo kredit buyer (advance tanpa kontrak).
 	ScheduleID *uint64
 	ContractID *uint64
+	// LandEarmark: penerimaan Kelebihan Tanah PRA-Akad (jadwal tanah belum
+	// ada). Tidak di-waterfall ke cicilan rumah; seluruh nominal menjadi
+	// saldo kredit (tetap Uang Muka 2-2000) dengan counts_toward_price=FALSE
+	// sehingga sisa harga unit tidak berkurang. Dinetkan ke piutang tanah saat
+	// Akad (Service.RecordAkad → landAdvance).
+	LandEarmark bool
 
 	// Kwitansi.
 	GenerateReceipt bool
@@ -233,7 +239,7 @@ func (d *defaultCommitter) CommitPayment(ctx context.Context, tenantID uint64, p
 		FinancingSourceID: p.FinancingSourceID,
 		Kind:              p.Kind,
 		InstallmentNo:     p.InstallmentNo,
-		CountsTowardPrice: true, // R4: pembayaran harga — selalu mengurangi outstanding
+		CountsTowardPrice: !p.LandEarmark, // R4: pembayaran harga; Kelebihan Tanah pra-Akad di luar harga unit
 	}
 	if err := s.store.SaveTermin(ctx, termin); err != nil {
 		return nil, fmt.Errorf("simpan termin: %w", err)
@@ -295,6 +301,8 @@ func (d *defaultCommitter) CommitPayment(ctx context.Context, tenantID uint64, p
 // planAllocations merencanakan alokasi dari anchor (tanpa lock — jalur non-atomik).
 func (d *defaultCommitter) planAllocations(ctx context.Context, tenantID uint64, p PaymentCommitParams) ([]ScheduleAllocation, domain.Money, error) {
 	switch {
+	case p.LandEarmark:
+		return nil, p.Amount, nil // Kelebihan Tanah pra-Akad → saldo kredit, tidak menyentuh cicilan rumah
 	case p.ScheduleID != nil:
 		sch, err := d.svc.contracts.FindScheduleByID(ctx, tenantID, *p.ScheduleID)
 		if err != nil {

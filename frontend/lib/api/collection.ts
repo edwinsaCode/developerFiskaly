@@ -16,6 +16,9 @@ export async function previewCollectionPayment(
    *  dengan recordCollectionPayment, supaya backend meresolusi source=kpr_disbursement
    *  dan pratinjau menampilkan Dana Jaminan Bank (bukan Piutang Usaha generik). */
   financingSourceId?: number,
+  /** Jenis Penerimaan — land_excess membuat pratinjau memakai routing yang
+   *  sama dengan submit (piutang/uang muka Kelebihan Tanah, bukan cicilan rumah). */
+  kind?: TerminKind,
 ): Promise<CollectionPreview> {
   const qs = new URLSearchParams({
     contract_id: String(contractId),
@@ -25,6 +28,7 @@ export async function previewCollectionPayment(
   if (bankFee) qs.set("bank_fee", bankFee);
   if (scheduleId) qs.set("schedule_id", String(scheduleId));
   if (financingSourceId) qs.set("financing_source_id", String(financingSourceId));
+  if (kind) qs.set("kind", kind);
   return apiFetch<CollectionPreview>(`/collections/payment/preview?${qs}`, { token });
 }
 

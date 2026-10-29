@@ -915,6 +915,9 @@ export interface CollectionPreview {
   // (dana bebas); false bila sudah mengurangi piutang/pembiayaan riil
   // pasca-BAST (bukan kelebihan bayar meski tak cocok jadwal).
   unapplied_is_credit: boolean;
+  /** true = Kelebihan Tanah pra-Akad dicatat sbg uang muka tanah (tidak
+   *  menyentuh cicilan rumah); outstanding = sisa Kelebihan Tanah. */
+  land_advance?: boolean;
 }
 
 export interface AppliedSchedule {
